@@ -144,8 +144,9 @@
     var s = state.summary || { total: 0, empty: 0, loaded: 0, listed: 0, sold: 0, stockValueUsd: 0 };
     var tiles = [
       { label: "Accounts", value: s.total, hint: s.problem ? s.problem + " need attention" : "on the server" },
-      { label: "Empty", value: s.empty, hint: "no games yet", tone: s.empty ? "is-warn" : "" },
-      { label: "Loaded", value: s.loaded, hint: money(s.stockValueUsd) + " in games", tone: s.loaded ? "is-ok" : "" },
+      { label: "Available empty", value: s.availableEmpty || 0, hint: "unreserved stock", tone: s.availableEmpty ? "is-warn" : "" },
+      { label: "With games", value: s.loaded, hint: "including licensed farm accounts", tone: s.loaded ? "is-ok" : "" },
+      { label: "In preparation", value: s.boosting || 0, hint: (s.preparing || 0) + " game · " + (s.hourBoosting || 0) + " hour boost", tone: "is-accent" },
       { label: "On sale", value: s.listed, hint: "listed on a market", tone: s.listed ? "is-accent" : "" },
       { label: "Sold", value: s.sold, hint: "all time" },
     ];

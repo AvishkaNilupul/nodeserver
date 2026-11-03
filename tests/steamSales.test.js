@@ -457,6 +457,11 @@ test("prepared account waits for logout, lists in its game section, sells once a
   await sales.tick({ force: true });
   assert.equal((await SteamAccount.findById(a._id)).stage, "sold");
   assert.ok(await SteamSale.exists({ orderId: order.id }));
+  const panel = await boost.panelView();
+  assert.equal(panel.live.length, 1, "completed row appears once");
+  assert.equal(panel.ended.length, 0, "ready rows are not repeated as ended rows");
+  assert.equal(panel.live[0].checks.health, "sold");
+  assert.equal(panel.live[0].gameProgress[0].minutes, 3);
 });
 
 test("a boosted offer refuses a missing game or insufficient real minutes", async () => {

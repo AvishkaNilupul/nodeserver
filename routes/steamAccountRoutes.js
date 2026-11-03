@@ -12,6 +12,7 @@ const SteamAccount = require("../models/SteamAccount");
 const SteamListing = require("../models/SteamListing");
 const SteamG2gUnit = require("../models/SteamG2gUnit");
 const SteamBoost = require("../models/SteamBoost");
+const { nameOf } = require("../utils/steamBoostGames");
 const { decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
@@ -25,13 +26,18 @@ function gameValue(games) {
 }
 
 // A row as the page sees it: never the password or email ciphertext.
-function publicRow(a) {
+function publicRow(a, boost = null) {
   const games = (a.games || []).map((g) => ({
     appId: g.appId ?? null,
     name: g.name,
     priceUsd: g.priceUsd || 0,
     addedAt: g.addedAt || null,
+    verifiedAt: g.verifiedAt || null,
+    playtimeMinutes: g.playtimeMinutes || 0,
   }));
+  if (boost && a.stage === "boosting") {
+    for (const id of boost.games || []) if ((boost.licensed || []).includes(id) && !games.some(g => g.appId === id)) games.push({ appId: id, name: nameOf(id), priceUsd: 0, addedAt: boost.createdAt, verifiedAt: boost.lastSeenAt, playtimeMinutes: Number(boost.minutes?.[id]) || 0 });
+  }
   return {
     _id: String(a._id),
     accountName: a.accountName,
@@ -50,6 +56,7 @@ function publicRow(a) {
     soldAt: a.soldAt || null,
     soldNote: a.soldNote || "",
     boostedAt: a.boostedAt || null,
+    preparationPurpose: boost?.purpose || null,
     source: a.source || "generator",
     signedUpAt: a.signedUpAt || null,
     importedAt: a.importedAt || a.createdAt || null,
@@ -58,12 +65,14 @@ function publicRow(a) {
 }
 
 function summary(rows) {
-  const out = { total: rows.length, empty: 0, loaded: 0, listed: 0, sold: 0, problem: 0, boosting: 0, stockValueUsd: 0 };
+  const out = { total: rows.length, empty: 0, loaded: 0, listed: 0, sold: 0, problem: 0, boosting: 0, availableEmpty: 0, preparing: 0, hourBoosting: 0, stockValueUsd: 0 };
   for (const r of rows) {
     if (r.stage === "sold") out.sold++;
     else if (r.stage === "listed") out.listed++;
     else if (r.stage === "problem") out.problem++;
     else if (r.stage === "boosting") out.boosting++;
+    if (r.stage === "stock" && !r.loaded && !r.boostedAt) out.availableEmpty++;
+    if (r.stage === "boosting") out[r.preparationPurpose === "game" ? "preparing" : "hourBoosting"]++;
     if (r.stage !== "sold" && r.stage !== "problem") {
       if (r.loaded) out.loaded++;
       else out.empty++;
@@ -155,7 +164,9 @@ function validId(req, res) {
 router.get("/api/steam/accounts", requireSuperadmin, async (req, res) => {
   try {
     const docs = await SteamAccount.find({}, { password: 0, email: 0 }).sort({ signedUpAt: -1, createdAt: -1 }).lean();
-    const accounts = docs.map(publicRow);
+    const boosts = await SteamBoost.find({ steamAccountId: { $in: docs.filter(a => a.stage === "boosting").map(a => a._id) }, state: { $in: ["queued", "boosting", "stopping"] } }).select("steamAccountId games licensed minutes purpose createdAt lastSeenAt").lean();
+    const byAccount = new Map(boosts.map(b => [String(b.steamAccountId), b]));
+    const accounts = docs.map(a => publicRow(a, byAccount.get(String(a._id))));
     res.json({ success: true, accounts, summary: summary(accounts) });
   } catch (err) {
     console.error("[steam-accounts] list failed:", err.message);

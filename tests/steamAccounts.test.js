@@ -13,6 +13,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 
 const { encrypt, decrypt } = require("../utils/secretBox");
 const SteamAccount = require("../models/SteamAccount");
+const SteamBoost = require("../models/SteamBoost");
 const { importAccount, validate } = require("../tools/steam-signup/cloud-import.cjs");
 const router = require("../routes/steamAccountRoutes");
 
@@ -74,6 +75,7 @@ test.after(async () => {
 test.beforeEach(async () => {
   role = "superadmin";
   await SteamAccount.deleteMany({});
+  await SteamBoost.deleteMany({});
 });
 
 const importOne = (p = payload()) =>
@@ -301,4 +303,22 @@ test("Mac upload queue: uploads once, backs off on failure, recovers after a res
   await sync.runDue();
   assert.deepEqual(uploaded.sort(), ["a1", "a2"], "an uploaded account is never sent again");
   assert.ok(saves > 0);
+});
+
+
+test("licensed farm accounts are shown with games without exposing worker tokens", async () => {
+  await importOne();
+  const a = await SteamAccount.findOne();
+  await SteamAccount.updateOne({ _id: a._id }, { $set: { stage: "boosting", boostedAt: new Date() } });
+  await SteamBoost.create({ steamAccountId: a._id, state: "boosting", purpose: "game", games: [730], licensed: [730], refreshToken: encrypt("private-worker-token"), lastSeenAt: new Date() });
+  const r = await call("GET", "/api/steam/accounts");
+  assert.equal(r.status, 200);
+  assert.equal(r.body.accounts[0].loaded, true);
+  assert.equal(r.body.accounts[0].games[0].name, "Counter-Strike 2");
+  assert.equal(r.body.summary.empty, 0);
+  assert.equal(r.body.summary.availableEmpty, 0);
+  assert.equal(r.body.summary.preparing, 1);
+  assert.equal(r.body.summary.loaded, 1);
+  assert.ok(!JSON.stringify(r.body).includes("private-worker-token"));
+  assert.ok(!JSON.stringify(r.body).includes("refreshToken"));
 });

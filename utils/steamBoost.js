@@ -15,6 +15,7 @@ const SteamBoost = require("../models/SteamBoost");
 const SteamSalesState = require("../models/SteamSalesState");
 const { encrypt } = require("./secretBox");
 const games = require("./steamBoostGames");
+const farmHealth = require("./steamFarmHealth");
 const sales = require("./steamSales");
 
 const S = sales._shared;
@@ -461,15 +462,25 @@ function etaFor(b, target, now) {
 async function panelView() {
   const cfg = await settings();
   const now = deps.now();
-  const live = await SteamBoost.find({ state: { $in: [...ACTIVE, "stopping", "ready"] } }).sort({ createdAt: 1 }).lean();
-  const ended = await SteamBoost.find({ state: { $nin: ACTIVE } }).sort({ updatedAt: -1 }).limit(20).lean();
+  const runningRows = await SteamBoost.find({ state: { $in: [...ACTIVE, "stopping"] } }).sort({ createdAt: 1 }).lean();
+  const readyRows = await SteamBoost.find({ state: "ready" }).sort({ updatedAt: -1 }).limit(50).lean();
+  const live = [...runningRows, ...readyRows];
+  const ended = await SteamBoost.find({ state: { $in: ["stopped", "failed"] } }).sort({ updatedAt: -1 }).limit(20).lean();
+  const accounts = await SteamAccount.find({ _id: { $in: [...live, ...ended].map(b => b.steamAccountId) } }).select("stage").lean();
+  const stages = new Map(accounts.map(a => [String(a._id), a.stage]));
+  for (const b of [...live, ...ended]) b.accountStage = stages.get(String(b.steamAccountId)) || "missing";
   const seen = cfg.workerLastSeenAt ? new Date(cfg.workerLastSeenAt).getTime() : 0;
   const row = (b) => ({
     _id: String(b._id),
+    checks: farmHealth.assess(b, now),
+    gameProgress: (b.games || []).map(id => ({ appId: id, name: games.nameOf(id), licensed: (b.licensed || []).includes(id), minutes: Object.prototype.hasOwnProperty.call(b.minutes || {}, id) ? Number(b.minutes[id]) : null })),
+    hoursAt: b.hoursAt || null,
+    logoutAt: b.logoutAt || null,
     accountName: b.accountName,
     region: b.region,
     regionName: S.regionName(b.region) || b.region,
     state: b.state,
+    accountStage: b.accountStage,
     purpose: b.purpose, targetHours: b.targetHours, saleAppId: b.saleAppId,
     workerState: b.workerState || "",
     hours: b.hours || 0,
@@ -500,6 +511,7 @@ async function panelView() {
       note: cfg.workerNote,
       version: cfg.workerVersion,
     },
+    health: farmHealth.summary([...live, ...ended], now),
     counts: {
       active: live.filter(b => ACTIVE.includes(b.state) || b.state === "stopping").length,
       ready: live.filter(b => b.state === "ready").length,
