@@ -1062,6 +1062,8 @@ mongoose
     // Eldorado or G2G for each new Steam account. docs/STEAM-SALES.md (v2).
     require("./utils/steamG2g").start();
     require("./utils/steamDistributor").start();
+    require("./routes/steamBoostWorkerApi").start();
+    require("./utils/steamBoost").start();
     // Epic accounts on G2G: the G2G fulfiller delivers their orders through
     // utils/epicG2g; this sweep catches cancelled orders (accounts back on the
     // shelf) and keeps the linked offers' stock numbers right.

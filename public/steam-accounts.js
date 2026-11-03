@@ -8,6 +8,7 @@
     listed: { label: "On sale", tone: "is-accent" },
     sold: { label: "Sold", tone: "is-ok" },
     problem: { label: "Needs attention", tone: "is-error" },
+    boosting: { label: "Boosting hours", tone: "is-warn" },
   };
   var FILTERS = [
     { key: "all", label: "All" },
@@ -15,6 +16,7 @@
     { key: "loaded", label: "Loaded" },
     { key: "listed", label: "On sale" },
     { key: "sold", label: "Sold" },
+    { key: "boosting", label: "Boosting" },
     { key: "problem", label: "Needs attention" },
   ];
   var CODES = (
@@ -413,6 +415,9 @@
       "</div>" +
       '<div class="acc-section"><h4>Stage</h4><div class="form-2"><label class="st-field">Stage<select data-field="stage">' +
       Object.keys(STAGES)
+        .filter(function (k) {
+          return k !== "boosting" || d.stage === "boosting"; // set on the Hour boost tab only
+        })
         .map(function (k) {
           return '<option value="' + k + '"' + (d.stage === k ? " selected" : "") + ">" + esc(STAGES[k].label) + "</option>";
         })

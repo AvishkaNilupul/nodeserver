@@ -1,0 +1,9 @@
+{
+  "name": "steam-boost-worker",
+  "private": true,
+  "description": "Hour-boost worker for our Steam accounts (runs on contabo2; docs/STEAM-BOOST.md).",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "steam-user": "5.3.0"
+  }
+}

@@ -7,6 +7,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const sales = require("../utils/steamSales");
 const g2g = require("../utils/steamG2g");
 const distributor = require("../utils/steamDistributor");
+const boost = require("../utils/steamBoost");
 
 const router = express.Router();
 
@@ -36,8 +37,8 @@ router.get(
   "/api/steam/sales/overview",
   requireSuperadmin,
   handle(async () => {
-    const [base, g2gOffers, dist] = await Promise.all([sales.overview(), g2g.panelView(), distributor.view()]);
-    return { ...base, g2gOffers, distributor: dist };
+    const [base, g2gOffers, dist, boostView] = await Promise.all([sales.overview(), g2g.panelView(), distributor.view(), boost.panelView()]);
+    return { ...base, g2gOffers, distributor: dist, boost: boostView };
   }),
 );
 
@@ -56,13 +57,13 @@ router.post("/api/steam/sales/g2g/sweep", requireSuperadmin, handle(async () => 
 router.post(
   "/api/steam/sales/preview",
   requireSuperadmin,
-  handle(async (req) => ({ preview: await sales.previewListing({ region: body(req).region, priceUsd: body(req).priceUsd }) })),
+  handle(async (req) => ({ preview: await sales.previewListing({ region: body(req).region, priceUsd: body(req).priceUsd, kind: body(req).kind, appId: body(req).appId, minHours: body(req).minHours }) })),
 );
 
 router.post(
   "/api/steam/sales/listings",
   requireSuperadmin,
-  handle(async (req) => ({ listing: await sales.createListing({ region: body(req).region, priceUsd: body(req).priceUsd }, actor(req)) })),
+  handle(async (req) => ({ listing: await sales.createListing({ region: body(req).region, priceUsd: body(req).priceUsd, kind: body(req).kind, appId: body(req).appId, minHours: body(req).minHours }, actor(req)) })),
 );
 
 router.post(
@@ -100,5 +101,28 @@ router.patch(
   requireSuperadmin,
   handle(async (req) => ({ config: await sales.setConfig(body(req), actor(req)) })),
 );
+
+// Hour boost (docs/STEAM-BOOST.md): the "Hour boost" tab.
+router.get("/api/steam/boost", requireSuperadmin, handle(async () => ({ boost: await boost.panelView() })));
+
+router.patch(
+  "/api/steam/boost/settings",
+  requireSuperadmin,
+  handle(async (req) => ({ settings: await boost.setSettings(body(req), actor(req)) })),
+);
+
+router.post(
+  "/api/steam/boost/add",
+  requireSuperadmin,
+  handle(async (req) => ({ result: await boost.add(Array.isArray(body(req).accountIds) ? body(req).accountIds : [], actor(req)) })),
+);
+
+router.post(
+  "/api/steam/boost/:id/stop",
+  requireSuperadmin,
+  handle(async (req) => ({ result: await boost.stop(req.params.id, "stopped by " + actor(req) + " on the Hour boost tab", actor(req)) })),
+);
+
+router.post("/api/steam/boost/:id/retry", requireSuperadmin, handle(async (req) => ({ result: await boost.retry(req.params.id, actor(req)) })));
 
 module.exports = router;

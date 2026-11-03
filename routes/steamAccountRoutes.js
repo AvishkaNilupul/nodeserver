@@ -11,6 +11,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const SteamAccount = require("../models/SteamAccount");
 const SteamListing = require("../models/SteamListing");
 const SteamG2gUnit = require("../models/SteamG2gUnit");
+const SteamBoost = require("../models/SteamBoost");
 const { decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
@@ -48,6 +49,7 @@ function publicRow(a) {
     notes: a.notes || "",
     soldAt: a.soldAt || null,
     soldNote: a.soldNote || "",
+    boostedAt: a.boostedAt || null,
     source: a.source || "generator",
     signedUpAt: a.signedUpAt || null,
     importedAt: a.importedAt || a.createdAt || null,
@@ -56,11 +58,12 @@ function publicRow(a) {
 }
 
 function summary(rows) {
-  const out = { total: rows.length, empty: 0, loaded: 0, listed: 0, sold: 0, problem: 0, stockValueUsd: 0 };
+  const out = { total: rows.length, empty: 0, loaded: 0, listed: 0, sold: 0, problem: 0, boosting: 0, stockValueUsd: 0 };
   for (const r of rows) {
     if (r.stage === "sold") out.sold++;
     else if (r.stage === "listed") out.listed++;
     else if (r.stage === "problem") out.problem++;
+    else if (r.stage === "boosting") out.boosting++;
     if (r.stage !== "sold" && r.stage !== "problem") {
       if (r.loaded) out.loaded++;
       else out.empty++;
@@ -211,14 +214,21 @@ router.patch("/api/steam/accounts/:id", requireSuperadmin, async (req, res) => {
           message: "This account is in a G2G offer's stock. Remove it on G2G first; its stage can't change by hand while it's there.",
         });
       }
+      // Or in the hour-boost pool (utils/steamBoost.js): the worker is logged in to it.
+      if (current.stage === "boosting" || set.stage === "boosting" || (await SteamBoost.exists({ steamAccountId: current._id, state: { $in: ["queued", "boosting"] } }))) {
+        return res.status(409).json({
+          success: false,
+          message: "Boosting is set on the Hour boost tab: stop the boost there first; the stage can't change by hand while it runs.",
+        });
+      }
     }
     if (!Object.keys(set).length) return res.status(400).json({ success: false, message: "Nothing to save" });
-    const saved = await SteamAccount.findByIdAndUpdate(
-      req.params.id,
+    const saved = await SteamAccount.findOneAndUpdate(
+      { _id: req.params.id, stage: current.stage },
       { $set: set },
       { returnDocument: "after", runValidators: true, projection: { password: 0, email: 0 } },
     ).lean();
-    if (!saved) return res.status(404).json({ success: false, message: "Account not found" });
+    if (!saved) return res.status(409).json({ success: false, message: "The account changed while saving. Reload it and try again." });
     res.json({ success: true, account: publicRow(saved) });
   } catch (err) {
     console.error("[steam-accounts] save failed:", err.message);

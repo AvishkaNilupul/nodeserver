@@ -31,6 +31,8 @@ const SteamAccount = require("../models/SteamAccount");
 const SteamListing = require("../models/SteamListing");
 const SteamSale = require("../models/SteamSale");
 const SteamSalesState = require("../models/SteamSalesState");
+const products = require("./steamProducts");
+const SteamBoost = require("../models/SteamBoost");
 const BuyerMailSession = require("../models/BuyerMailSession");
 const { encrypt, decrypt } = require("./secretBox");
 
@@ -210,8 +212,15 @@ async function checkInbox(email, { fresh = false } = {}) {
 // the checkInbox answer, or null when it was not asked (cheaper list views).
 function blockersOf(acc, inbox) {
   const out = [];
-  if (acc.stage !== "stock") out.push(acc.stage === "listed" ? "already on sale" : acc.stage === "sold" ? "sold" : "marked “needs attention”");
+  if (acc.stage !== "stock") {
+    out.push(
+      acc.stage === "listed" ? "already on sale" : acc.stage === "sold" ? "sold" : acc.stage === "boosting" ? "boosting hours" : "marked “needs attention”",
+    );
+  }
   if ((acc.games || []).length) out.push("has games (region offers sell empty accounts; game offers come later)");
+  // utils/steamBoost.js: it owns free games and idle hours now, so it is not
+  // the fresh empty account a region offer promises.
+  if (acc.boostedAt) out.push("hour-boosted (sells on the boosted offers, not as an empty account)");
   if (!regionOf(acc)) out.push("no signup country");
   if (!dec(acc.password)) out.push("no saved password");
   if (!/@/.test(dec(acc.email))) out.push("no saved email");
@@ -245,7 +254,8 @@ async function stockView({ checkInboxes = true } = {}) {
 
 // Load + vet the accounts for one region listing. With no ids, every ready
 // account of that region is taken. Throws a user error naming each problem.
-async function vetAccounts({ region, accountIds = null }) {
+async function vetAccounts({ region, accountIds = null, ...rawProduct }) {
+  const product = products.normalize(rawProduct);
   const cc = String(region || "").toUpperCase();
   if (!/^[A-Z]{2}$/.test(cc)) throw userError("Choose a region");
   const q = accountIds && accountIds.length
@@ -260,7 +270,13 @@ async function vetAccounts({ region, accountIds = null }) {
   for (const acc of accounts) {
     const email = dec(acc.email).toLowerCase();
     const inbox = email ? await checkInbox(email, { fresh: true }) : null;
-    const why = blockersOf(acc, inbox);
+    const why = product.kind === "region" ? blockersOf(acc, inbox) : [
+      ...(acc.stage !== "stock" ? ["account is not free stock"] : []),
+      ...(!dec(acc.password) || !/@/.test(email) ? ["missing login"] : []),
+      ...(inbox && !inbox.ok ? [inbox.reason] : []),
+      ...products.blockers(acc, product),
+    ];
+    if (product.kind !== "region" && await SteamBoost.exists({ steamAccountId: acc._id, state: { $in: ["queued", "boosting", "stopping"] } })) why.push("worker has not acknowledged logout");
     if (regionOf(acc) && regionOf(acc) !== cc) why.push("is a " + regionName(regionOf(acc)) + " account, not " + regionName(cc));
     if (why.length) {
       // Picking "all ready accounts of a region" skips the blocked ones;
@@ -403,19 +419,20 @@ async function release(ids) {
 // Listings
 // ---------------------------------------------------------------------------
 
-async function previewListing({ region, priceUsd, accountIds = null } = {}) {
+async function previewListing({ region, priceUsd, accountIds = null, ...rawProduct } = {}) {
+  const product = products.normalize(rawProduct);
   const cfg = await getConfig();
   const cc = String(region || "").toUpperCase();
   const purl = providerUrl();
   let vetted = [];
   const problems = [];
   try {
-    vetted = await vetAccounts({ region: cc, accountIds });
+    vetted = await vetAccounts({ region: cc, accountIds, ...product });
   } catch (e) {
     problems.push(e.message);
   }
   if (!purl) problems.push("PUBLIC_BASE_URL is not an https address, so the mail page link can't be built");
-  const live = await SteamListing.findOne({ region: cc, status: { $in: LIVE_LISTING } }).select("_id title").lean();
+  const live = await SteamListing.findOne({ region: cc, kind: product.kind, ...(product.kind !== "region" ? { appId: product.appId, minHours: product.minHours } : {}), status: { $in: LIVE_LISTING } }).select("_id title").lean();
   if (live) problems.push("There is already a live " + regionName(cc) + " listing. Add the accounts to it instead.");
   let price = cfg.priceUsd;
   try {
@@ -423,11 +440,14 @@ async function previewListing({ region, priceUsd, accountIds = null } = {}) {
   } catch (e) {
     problems.push(e.message);
   }
+  const copy = product.kind === "region" ? { title: suggestTitle(cc), description: suggestDescription(cc, cfg.sessionDays) } : products.text(product, cc, regionName(cc), additionalInfoText(cfg.sessionDays) + "\n" + REGION_WARNING);
   return {
+    ...product,
+    section: products.section(product, SECTION),
     region: cc,
     regionName: regionName(cc),
-    title: suggestTitle(cc),
-    description: suggestDescription(cc, cfg.sessionDays),
+    title: copy.title,
+    description: copy.description,
     priceUsd: price,
     cover: coverFor(cc).public,
     accounts: vetted.map((v) => ({ _id: String(v.acc._id), accountName: v.acc.accountName })),
@@ -438,18 +458,20 @@ async function previewListing({ region, priceUsd, accountIds = null } = {}) {
 
 // `accountIds` (optional): list exactly these accounts (the distributor's
 // pick) instead of every ready account of the region.
-async function createListing({ region, priceUsd, accountIds = null } = {}, actor) {
+async function createListing({ region, priceUsd, accountIds = null, ...rawProduct } = {}, actor) {
+  const product = products.normalize(rawProduct);
   return withLock(async () => {
-    const pv = await previewListing({ region, priceUsd, accountIds });
+    const pv = await previewListing({ region, priceUsd, accountIds, ...product });
     if (pv.problems.length) throw userError(pv.problems.join(" | "));
     const cfg = await getConfig();
-    const vetted = await vetAccounts({ region: pv.region, accountIds });
+    const vetted = await vetAccounts({ region: pv.region, accountIds, ...product });
     const reserved = await reserve(vetted.map((v) => v.acc._id));
     const take = vetted.filter((v) => reserved.includes(String(v.acc._id)));
     if (!take.length) throw userError("Those accounts were just taken by another action. Refresh and try again.", 409);
     const listing = new SteamListing({
       market: "eldorado",
-      kind: "region",
+      ...product,
+      section: pv.section,
       region: pv.region,
       status: "draft",
       title: pv.title,
@@ -496,7 +518,7 @@ async function createListing({ region, priceUsd, accountIds = null } = {}, actor
         mainOfferImage: image,
         offerImages: [],
         entries,
-        section: SECTION,
+        section: pv.section,
       });
       if (!created.id) {
         // On Eldorado, but its id could not be read: keep the accounts
@@ -508,7 +530,7 @@ async function createListing({ region, priceUsd, accountIds = null } = {}, actor
         throw userError(listing.lastError, 502);
       }
       listing.externalId = created.id;
-      listing.url = deps.eld.offerUrl(created.id, SECTION);
+      listing.url = deps.eld.offerUrl(created.id, pv.section);
       listing.status = "active";
       await listing.save();
     } catch (e) {
@@ -621,7 +643,7 @@ function offerFields(listing, offer, patch = {}) {
     hasOriginalEmail: false,
     mainOfferImage: (offer && offer.mainOfferImage && offer.mainOfferImage.largeImage && offer.mainOfferImage) || listing.mainOfferImage,
     offerImages: (offer && offer.offerImages) || [],
-    section: SECTION,
+    section: listing.section || SECTION,
   };
 }
 
@@ -682,7 +704,7 @@ async function addAccounts(listingId, accountIds, actor) {
     const listing = await loadListing(listingId);
     requireLive(listing);
     const cfg = await getConfig();
-    const vetted = await vetAccounts({ region: listing.region, accountIds });
+    const vetted = await vetAccounts({ region: listing.region, accountIds, kind: listing.kind, appId: listing.appId, minHours: listing.minHours });
     const remote = await deps.eld.getAccountEntries(listing.externalId);
     const offer = await deps.eld.getAccountOffer(listing.externalId);
     const kept = await rebuildEntries(listing, remote, cfg, { offer });
@@ -800,7 +822,7 @@ async function updateText(listingId, { title, description } = {}) {
 async function refreshDescription(listingId) {
   const listing = await loadListing(listingId);
   const cfg = await getConfig();
-  return updateText(listingId, { description: suggestDescription(listing.region, cfg.sessionDays) });
+  return updateText(listingId, { description: listing.kind === "region" ? suggestDescription(listing.region, cfg.sessionDays) : products.text(products.normalize(listing), listing.region, regionName(listing.region), additionalInfoText(cfg.sessionDays) + "\n" + REGION_WARNING).description });
 }
 
 async function setPrice(listingId, priceUsd) {
@@ -1182,6 +1204,7 @@ function listingView(l) {
   return {
     _id: String(l._id),
     market: l.market,
+    kind: l.kind, appId: l.appId, minHours: l.minHours,
     region: l.region,
     regionName: regionName(l.region),
     status: l.status,
@@ -1221,7 +1244,7 @@ async function overview() {
     listings: listings.map(listingView),
     ready: stock.groups.map((g) => ({
       ...g,
-      liveListingId: (listings.find((l) => l.region === g.region && LIVE_LISTING.includes(l.status)) || {})._id || null,
+      liveListingId: (listings.find((l) => l.kind === "region" && l.region === g.region && LIVE_LISTING.includes(l.status)) || {})._id || null,
     })),
     blocked: stock.blocked,
     sales: sales.map((s) => ({

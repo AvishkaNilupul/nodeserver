@@ -21,6 +21,9 @@ const SteamSale = require("../models/SteamSale");
 const BuyerMailSession = require("../models/BuyerMailSession");
 const outlook = require("../utils/outlookGraphReader");
 const sales = require("../utils/steamSales");
+const SteamBoost = require("../models/SteamBoost");
+const boost = require("../utils/steamBoost");
+const shelf = require("../utils/steamShelf");
 
 // ---- fakes ------------------------------------------------------------------
 let offers; // id -> { title, description, price, state, entries: [{id, ...entry}], section }
@@ -157,7 +160,8 @@ test.beforeEach(async () => {
   telegrams.length = 0;
   inboxUses.clear();
   sales._setDeps({ eld: fakeEld, outlook: fakeOutlook, notify: async (t) => telegrams.push(t) });
-  await Promise.all([SteamAccount.deleteMany({}), SteamListing.deleteMany({}), SteamSale.deleteMany({}), BuyerMailSession.deleteMany({})]);
+  boost._setDeps({ notify: async () => {} });
+  await Promise.all([SteamBoost.deleteMany({}), SteamAccount.deleteMany({}), SteamListing.deleteMany({}), SteamSale.deleteMany({}), BuyerMailSession.deleteMany({})]);
 });
 
 // ---- tests --------------------------------------------------------------------
@@ -428,4 +432,39 @@ test("the owner's region warning is in every description, and a live offer's tex
   assert.ok((await SteamListing.findById(l._id)).description.includes(REGION_WARNING));
   await assert.rejects(sales.updateText(l._id, {}), /Nothing to change/);
   await assert.rejects(sales.updateText(l._id, { description: "x".repeat(2001) }), /2000/);
+});
+
+
+test("prepared account waits for logout, lists in its game section, sells once and leaves empty stock", async () => {
+  const a = await account("prepared_cs", "JP", { stage: "boosting" });
+  await SteamAccount.updateOne({ _id: a._id }, { $set: { boostedAt: new Date() } });
+  const b = await SteamBoost.create({ steamAccountId: a._id, accountName: a.accountName, region: "JP", purpose: "game", games: [730], saleAppId: 730, targetHours: 0 });
+  await assert.rejects(boost.login(String(b._id), 2), /Not in the pool/);
+  await assert.rejects(boost.login(String(b._id)), /generation/);
+  await boost.report({ accounts: [{ id: String(b._id), gen: 1, state: "playing", licensed: [730], playtime: { 730: { minutes: 3 } } }] });
+  assert.equal((await SteamBoost.findById(b._id)).state, "stopping");
+  assert.equal((await shelf.run()).placed, 0);
+  assert.equal((await SteamAccount.findById(a._id)).stage, "boosting");
+  await boost.report({ accounts: [{ id: String(b._id), gen: 1, stopped: true }] });
+  assert.equal((await SteamBoost.findById(b._id)).state, "ready");
+  const held = await SteamAccount.findById(a._id); assert.equal(held.games[0].playtimeMinutes, 3);
+  assert.equal((await shelf.run()).placed, 1);
+  assert.equal((await shelf.run()).placed, 0, "can't list twice");
+  const listing = await SteamListing.findOne({ kind: "game" });
+  assert.equal(listing.section.gameId, "20");
+  assert.match(listing.title, /Counter-Strike 2/);
+  const order = buy(listing.externalId, "prepared_cs");
+  await sales.tick({ force: true });
+  assert.equal((await SteamAccount.findById(a._id)).stage, "sold");
+  assert.ok(await SteamSale.exists({ orderId: order.id }));
+});
+
+test("a boosted offer refuses a missing game or insufficient real minutes", async () => {
+  const a = await account("boosted_apex", "JP", { games: [{ appId: 1172470, name: "Apex Legends", verifiedAt: new Date(), playtimeMinutes: 29999 }] });
+  const opts = { region: "JP", kind: "boosted", appId: 1172470, minHours: 500, accountIds: [String(a._id)] };
+  await assert.rejects(sales.createListing(opts, "test"), /not enough/);
+  await SteamAccount.updateOne({ _id: a._id }, { $set: { "games.0.playtimeMinutes": 30000 } });
+  const listing = await sales.createListing(opts, "test");
+  assert.match(listing.title, /500 Idle/); assert.equal(offers.get(listing.url.split('/oa/')[1]).section.gameId, "33");
+  await assert.rejects(sales.createListing({ ...opts, appId: 730 }, "test"), /not free stock|not been verified/);
 });

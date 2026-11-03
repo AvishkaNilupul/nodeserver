@@ -1,4 +1,17 @@
-# Steam account sales on Eldorado (v1: one offer per region)
+# Steam account sales on Eldorado
+
+## Current scope — 2026-11-03
+
+New account allocations are **Eldorado only**. Empty regional accounts go to
+Eldorado offers; overflow selected by the boost policy is reserved for hour boosting.
+Only Eldorado regional stock counts toward `keepPerRegion`. If Eldorado fails,
+accounts wait in stock for retry; they never fall back to G2G. Existing G2G
+inventory and sale tracking remain intact. The v2 routing below is historical.
+Accounts with games are excluded from empty-account offers; per-game offers and
+boosted-account sale handoff remain unfinished. This is a local code change, not
+a production deployment.
+
+## Original regional-sales implementation
 
 Owner's choices (2026-11-01): sell like el9in_store's Steam shelf, start with one
 offer per region in Steam › Accounts, **$1 each**, buyer gets Steam codes through our

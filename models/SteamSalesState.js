@@ -59,6 +59,25 @@ const steamSalesStateSchema = new mongoose.Schema(
     // market|region -> time until which that market is skipped for the region
     // (its offer could not be made or loaded).
     distributorSkip: { type: mongoose.Schema.Types.Mixed, default: {} },
+
+    // Hour boost (utils/steamBoost.js, docs/STEAM-BOOST.md). The distributor
+    // sends a new account to boosting when this is on, fewer than maxAccounts
+    // are boosting, and its country already has keepPerRegion unsold accounts
+    // on the region offers.
+    boost: {
+      enabled: { type: Boolean, default: true },
+      maxAccounts: { type: Number, default: 50 },
+      targetHours: { type: Number, default: 1000 },
+      prepareGames: { type: Boolean, default: true },
+      gamePriceUsd: { type: Number, default: 2 },
+      boostPriceUsd: { type: Number, default: 3 },
+      keepPerRegion: { type: Number, default: 2 },
+      games: { type: [Number], default: undefined }, // undefined = the default catalog
+      workerLastSeenAt: { type: Date, default: null },
+      workerNote: { type: String, default: "" },
+      workerVersion: { type: String, default: "" },
+      workerAlertAt: { type: Date, default: null }, // last "worker silent" Telegram
+    },
   },
   { timestamps: true },
 );

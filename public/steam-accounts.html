@@ -173,9 +173,17 @@
 
       <div class="st-stats" id="stats" aria-live="polite"></div>
 
-      <section class="st-card" aria-labelledby="sellTitle">
+      <div class="st-toolbar" role="tablist" aria-label="Steam account workflow">
+        <button type="button" class="btn" data-steam-tab="sales" role="tab" aria-selected="true">Eldorado sales</button>
+        <button type="button" class="btn" data-steam-tab="boost" role="tab" aria-selected="false">Game preparation &amp; hour boost</button>
+      </div>
+      <section class="st-card" id="steamBoostSection" hidden aria-labelledby="boostTitle">
+        <div class="st-card-hd"><h2 class="st-card-title" id="boostTitle">Game preparation &amp; hour boost</h2></div>
+        <div class="st-card-bd" id="steamBoostBody">Loading…</div>
+      </section>
+      <section class="st-card" id="steamSalesSection" aria-labelledby="sellTitle">
         <div class="st-card-hd">
-          <h2 class="st-card-title" id="sellTitle">Selling on Eldorado + G2G</h2>
+          <h2 class="st-card-title" id="sellTitle">Selling on Eldorado</h2>
           <span class="st-card-meta" id="sellMeta">Loading…</span>
           <div class="sell-hd-actions">
             <button type="button" class="btn btn-sm" id="sellSync" title="Read the Eldorado offers and orders now">Check now</button>
@@ -243,6 +251,7 @@
     <script src="/theme.js"></script>
     <script src="/admin-nav.js"></script>
     <script src="/steam-accounts.js?v=20261101b"></script>
-    <script src="/steam-sales.js?v=20261101c"></script>
+    <script src="/steam-sales.js?v=20261103"></script>
+    <script src="/steam-boost-panel.js?v=20261103"></script>
   </body>
 </html>

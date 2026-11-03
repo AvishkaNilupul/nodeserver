@@ -20,6 +20,8 @@ const SteamAccount = require("../models/SteamAccount");
 const SteamListing = require("../models/SteamListing");
 const SteamSale = require("../models/SteamSale");
 const SteamSalesState = require("../models/SteamSalesState");
+const SteamBoost = require("../models/SteamBoost");
+const boost = require("../utils/steamBoost");
 const SteamG2gUnit = require("../models/SteamG2gUnit");
 const BuyerMailSession = require("../models/BuyerMailSession");
 const sales = require("../utils/steamSales");
@@ -222,6 +224,7 @@ test.beforeEach(async () => {
   g2g._setDeps({ mp: fakeMp, notify, sleep: async () => {} });
   distributor._setDeps({ notify });
   await Promise.all([
+    SteamBoost.deleteMany({}),
     SteamAccount.deleteMany({}),
     SteamListing.deleteMany({}),
     SteamSale.deleteMany({}),
@@ -347,61 +350,53 @@ test("a G2G sale is read from the order's Account ID and recorded once", async (
   assert.match(r.skipped, /G2G delivers it/);
 });
 
-test("distributor rule: fewer unsold first, then recent sales, then G2G", () => {
-  const stock = (e, g) => ({ eldorado: new Map([["JP", e]]), g2g: new Map([["JP", g]]) });
-  const none = () => false;
-  assert.equal(distributor.choose("JP", stock(1, 0), { eldorado: 0, g2g: 0 }, none).market, "g2g");
-  assert.equal(distributor.choose("JP", stock(0, 2), { eldorado: 0, g2g: 9 }, none).market, "eldorado");
-  assert.equal(distributor.choose("JP", stock(1, 1), { eldorado: 3, g2g: 1 }, none).market, "eldorado");
-  assert.equal(distributor.choose("JP", stock(1, 1), { eldorado: 2, g2g: 2 }, none).market, "g2g");
-  assert.equal(distributor.choose("JP", stock(0, 5), { eldorado: 0, g2g: 0 }, (m) => m === "eldorado").market, "g2g");
-  assert.equal(distributor.choose("JP", stock(0, 0), {}, () => true), null);
+test("distributor chooses Eldorado regardless of other markets' stock or sales", () => {
+  const stock = { eldorado: new Map([["JP", 10]]), g2g: new Map() };
+  assert.equal(distributor.choose("JP", stock, { eldorado: 0, g2g: 100 }, () => false).market, "eldorado");
+  assert.equal(distributor.choose("JP", stock, {}, m => m === "eldorado"), null);
 });
 
-test("the distributor places new accounts across both markets and creates missing offers", async () => {
-  await account("kz_d1", "KZ", { signedUpAt: new Date(Date.now() - 3000) });
-  await account("kz_d2", "KZ", { signedUpAt: new Date(Date.now() - 2000) });
-  await account("kz_d3", "KZ", { signedUpAt: new Date(Date.now() - 1000) });
-
+test("new accounts go only to Eldorado in plan and live distribution", async () => {
+  await SteamSalesState.updateOne({ _id: "main" }, { $set: { "boost.enabled": false } }, { upsert: true });
+  for (let i = 1; i <= 3; i++) await account("kz_d" + i, "KZ");
   await distributor.setMode("plan");
   const plan = await distributor.run();
   assert.equal(plan.plan, true);
-  assert.deepEqual(plan.decisions.map((d) => d.market), ["g2g", "eldorado", "g2g"]);
-  assert.equal(await SteamAccount.countDocuments({ stage: "listed" }), 0, "plan places nothing");
-
+  assert.deepEqual(plan.decisions.map(d => d.market), ["eldorado", "eldorado", "eldorado"]);
+  assert.equal(await SteamAccount.countDocuments({ stage: "listed" }), 0);
   await distributor.setMode("on");
   const r = await distributor.run();
   assert.equal(r.placed, 3);
-  assert.equal(createCalls.length, 1, "one G2G offer created for KZ");
-  assert.equal(await SteamG2gUnit.countDocuments({ state: "listed" }), 2);
+  assert.equal(createCalls.length, 0, "no G2G offer created");
+  assert.equal(await SteamG2gUnit.countDocuments({}), 0);
   const eld = await SteamListing.findOne({ region: "KZ", status: "active" });
-  assert.ok(eld, "an Eldorado KZ listing was created");
-  assert.equal(eld.accounts.filter((u) => u.state === "listed").length, 1);
-  assert.equal(await SteamAccount.countDocuments({ stage: "listed" }), 3);
-  const v = await distributor.view();
-  assert.equal(v.mode, "on");
-  assert.ok(v.last.length >= 3);
-
-  // A new KZ account: Eldorado has 1, G2G 2 → Eldorado, added to its listing.
+  assert.equal(eld.accounts.filter(u => u.state === "listed").length, 3);
   await account("kz_d4", "KZ");
   await distributor.run();
-  const eld2 = await SteamListing.findById(eld._id);
-  assert.equal(eld2.accounts.filter((u) => u.state === "listed").length, 2);
-  assert.equal(await SteamListing.countDocuments({ region: "KZ" }), 1, "no second Eldorado listing");
+  assert.equal((await SteamListing.findById(eld._id)).accounts.filter(u => u.state === "listed").length, 4);
+  assert.equal(await SteamListing.countDocuments({ region: "KZ" }), 1);
+  assert.deepEqual((await distributor.view()).markets, ["eldorado"]);
 });
 
-test("when G2G can't take a country's accounts they go to Eldorado next pass", async () => {
-  await account("ua_d1", "UA");
-  failCreate = "G2G publish account offer failed (HTTP 400): bad";
-  const r1 = await distributor.run();
-  assert.equal(r1.placed, 0);
-  assert.match(r1.decisions[0].error, /HTTP 400/);
-  assert.equal((await SteamAccount.findOne({ accountName: "ua_d1" })).stage, "stock", "nothing half-placed");
-  assert.ok(telegrams.some((t) => /skipped for UA/.test(t)));
-  const r2 = await distributor.run();
-  assert.equal(r2.placed, 1);
-  assert.equal(r2.decisions[0].market, "eldorado");
-  assert.equal((await SteamAccount.findOne({ accountName: "ua_d1" })).stage, "listed");
+test("Eldorado failure holds accounts for retry without falling back to G2G", async () => {
+  const a = await account("ua_d1", "UA");
+  sales._setDeps({ eld: { ...fakeEld, createAccountOffer: async () => { throw Error("Eldorado unavailable"); } } });
+  try {
+    const r = await distributor.run();
+    assert.equal(r.placed, 0);
+    assert.match(r.decisions[0].error, /unavailable/);
+    assert.equal((await SteamAccount.findById(a._id)).stage, "stock");
+    assert.equal(createCalls.length, 0);
+    assert.ok(telegrams.some(t => /wait in stock/.test(t)));
+    const again = await distributor.run();
+    assert.equal(again.placed, 0);
+    assert.equal(again.decisions[0].market, "");
+    assert.equal(createCalls.length, 0);
+  } finally { sales._setDeps({ eld: fakeEld }); }
+  // After the pause expires the account goes to Eldorado.
+  const retry = await distributor.run({ now: Date.now() + 7 * 3600000 });
+  assert.equal(retry.placed, 1);
+  assert.equal(retry.decisions[0].market, "eldorado");
 });
 
 test("an account in G2G stock can't change stage by hand", async () => {
@@ -526,4 +521,94 @@ test("offers made before the Steam Country filter get it once, keeping their oth
   assert.equal(st.g2gOffers.find((l) => l.offerId === link.offerId).countrySet, true);
   await g2g.sweep();
   assert.equal(updateCalls.length, 1, "set once, never again");
+});
+
+
+test("boost allocation reserves an incoming account before either marketplace can list it", async () => {
+  await SteamBoost.init();
+  await SteamSalesState.updateOne({ _id: "main" }, { $set: {
+    "boost.enabled": true, "boost.keepPerRegion": 0, "boost.maxAccounts": 1, "boost.prepareGames": false,
+    "boost.games": [730, 1172470],
+  } }, { upsert: true });
+  const a = await account("boost_jp", "JP");
+  const r = await distributor.run();
+  assert.equal(r.placed, 1);
+  assert.equal(r.decisions[0].market, "boost");
+  assert.equal((await SteamAccount.findById(a._id)).stage, "boosting");
+  const b = await SteamBoost.findOne({ steamAccountId: a._id }).lean();
+  assert.ok(b);
+  assert.equal((await boost.assignments()).accounts[0].id, String(b._id));
+  assert.equal(await SteamG2gUnit.countDocuments({ steamAccountId: a._id }), 0);
+  assert.equal(await SteamListing.countDocuments({}), 0);
+  assert.equal((await sales._shared.stockView({ checkInboxes: false })).groups.length, 0);
+  // A delayed report cannot turn CS2-only hours into an Apex+CS2 tier.
+  boost._setDeps({ notify: async () => {} });
+  await boost.report({ accounts: [{ id: String(b._id), gen: b.gen, state: "playing",
+    playing: [730, 1172470], playtime: { 730: { minutes: 60000 }, 1172470: { minutes: 0 } },
+  }] });
+  const reported = await SteamBoost.findById(b._id).lean();
+  assert.equal(reported.hours, 0);
+  assert.equal(reported.reached1000At, null);
+  await boost.stop(String(b._id), "test completed", "test");
+  assert.equal((await boost.assignments()).accounts.length, 0);
+  assert.equal((await SteamAccount.findById(a._id)).stage, "boosting", "hold remains until logout acknowledgement");
+  await boost.report({ accounts: [{ id: String(b._id), gen: b.gen, stopped: true }] });
+  assert.equal((await SteamAccount.findById(a._id)).stage, "stock");
+  assert.equal((await sales._shared.stockView({ checkInboxes: false })).groups.length, 0,
+    "a stopped boosted account stays out of empty-account offers");
+});
+
+
+test("a stage edit cannot overwrite a boost reservation made after its initial checks", async () => {
+  const a = await account("boost_edit_race", "JP");
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => { req.session = { admin: { id: "test", role: "superadmin" } }; next(); });
+  app.use(require("../routes/steamAccountRoutes"));
+  const server = await new Promise(resolve => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  const original = SteamAccount.findOneAndUpdate;
+  let raced = false;
+  SteamAccount.findOneAndUpdate = function (...args) {
+    const query = original.apply(this, args);
+    const lean = query.lean.bind(query);
+    query.lean = async function (...leanArgs) {
+      // The distributor wins immediately before the editor's database write.
+      raced = true;
+      await SteamAccount.updateOne({ _id: a._id, stage: "stock" }, { $set: { stage: "boosting", boostedAt: new Date() } });
+      return lean(...leanArgs);
+    };
+    return query;
+  };
+  try {
+    const response = await fetch("http://127.0.0.1:" + server.address().port + "/api/steam/accounts/" + a._id, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stage: "sold" }),
+    });
+    assert.ok(raced);
+    assert.equal(response.status, 409);
+    assert.equal((await SteamAccount.findById(a._id)).stage, "boosting");
+  } finally {
+    SteamAccount.findOneAndUpdate = original;
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+
+test("only Eldorado regional stock counts before allocating overflow to boosting", async () => {
+  // Existing G2G inventory must not make an empty Eldorado shelf look stocked.
+  const old = await account("legacy_jp", "JP");
+  const link = await g2g.createRegionOffer("JP");
+  await g2g.loadAccounts(link, [String(old._id)]);
+  await SteamSalesState.updateOne({ _id: "main" }, { $set: {
+    "boost.enabled": true, "boost.keepPerRegion": 1, "boost.maxAccounts": 5,
+    "boost.games": [730, 1172470],
+  } }, { upsert: true });
+  await account("incoming_jp_empty", "JP", { signedUpAt: new Date(Date.now() - 1000) });
+  await account("incoming_jp_boost", "JP");
+  const loaded = await account("incoming_jp_loaded", "JP");
+  await SteamAccount.updateOne({ _id: loaded._id }, { $set: { games: [{ appId: 730, name: "Counter-Strike 2" }] } });
+  const r = await distributor.run();
+  assert.deepEqual(r.decisions.map(d => d.market), ["eldorado", "boost"]);
+  assert.equal((await SteamAccount.findById(loaded._id)).stage, "stock", "loaded stock waits for per-game selling");
+  assert.equal((await SteamAccount.findById(old._id)).stage, "listed", "existing G2G stock remains reserved");
+  assert.equal(await SteamG2gUnit.countDocuments({}), 1, "no new accounts sent to G2G");
 });

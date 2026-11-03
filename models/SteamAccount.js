@@ -3,7 +3,8 @@
 // on /steam-accounts.html. Contract: docs/STEAM-ACCOUNTS.md.
 const mongoose = require("mongoose");
 
-const STAGES = ["stock", "listed", "sold", "problem"];
+// boosting = in the hour-boost pool (utils/steamBoost.js), not on sale.
+const STAGES = ["stock", "listed", "sold", "problem", "boosting"];
 
 const gameSchema = new mongoose.Schema(
   {
@@ -11,6 +12,8 @@ const gameSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true, maxlength: 160 },
     priceUsd: { type: Number, default: 0, min: 0 },
     addedAt: { type: Date, default: Date.now },
+    playtimeMinutes: { type: Number, default: 0 },
+    verifiedAt: { type: Date, default: null },
   },
   { _id: false },
 );
@@ -37,6 +40,9 @@ const steamAccountSchema = new mongoose.Schema(
     notes: { type: String, default: "", maxlength: 2000 },
     soldAt: { type: Date, default: null },
     soldNote: { type: String, default: "", maxlength: 300 },
+    // Set when hour boosting starts, never cleared: the account now owns free
+    // games and idle hours, so the empty-account region offers refuse it.
+    boostedAt: { type: Date, default: null },
 
     source: { type: String, default: "generator" },
     signedUpAt: { type: Date, default: null },

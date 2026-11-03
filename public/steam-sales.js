@@ -145,7 +145,7 @@
     var d = view.distributor;
     if (!d) return "";
     var modes = [
-      ["on", "On", "places every new account on Eldorado or G2G by itself"],
+      ["on", "On", "allocates new accounts to Eldorado regional sales or hour boosting"],
       ["plan", "Plan only", "shows what it would do, places nothing"],
       ["off", "Off", "you list accounts yourself"],
     ];
@@ -156,7 +156,7 @@
       .join("");
     var last = (d.last || []).slice(0, 6)
       .map(function (x) {
-        var where = x.market === "g2g" ? "G2G" : x.market === "eldorado" ? "Eldorado" : "nowhere";
+        var where = x.market === "g2g" ? "G2G" : x.market === "eldorado" ? "Eldorado" : x.market === "boost" ? "Hour boost" : "waiting";
         return (
           "<li><b>" + esc(x.accountName) + '</b> <span class="cc">' + esc(x.region) + "</span> → " + where +
           (x.done ? "" : x.error ? ' <span class="st-warn">(failed: ' + esc(x.error) + ")</span>" : ' <span class="st-muted">(plan)</span>') +
@@ -173,7 +173,7 @@
       '<div class="sell-dist"><h3 class="sell-h">Where new accounts go</h3>' +
       '<div class="sell-dist-row"><div class="st-chips" role="group" aria-label="Distributor">' + chips + "</div>" +
       '<button type="button" class="btn btn-sm" data-sell="distribute">Run now</button></div>' +
-      '<p class="st-small st-muted sell-dist-note">Each new account goes to the market with fewer unsold accounts in its country; on a tie, the one that sold more in 14 days; then G2G. Missing offers are created by itself. ' +
+      '<p class="st-small st-muted sell-dist-note">New empty accounts go to Eldorado region offers or the hour-boost pool. Only Eldorado stock counts toward the regional reserve. If Eldorado is unavailable, accounts wait; other markets receive no new allocations. ' +
       "Last run " + esc(ago(d.lastRunAt)) + (d.lastNote ? ": " + esc(d.lastNote) : "") + ".</p>" +
       (skipped ? '<p class="st-small st-warn">' + esc(skipped) + "</p>" : "") +
       (last ? '<ul class="sell-last">' + last + "</ul>" : "") +
@@ -257,7 +257,7 @@
       "<p>Eldorado hands over the Steam login and password the moment the buyer pays. The email details open our mail page (" +
       esc(view.mailPage.url || "set PUBLIC_BASE_URL") + "), which shows only the emails Steam sends to that account, for " +
       esc(view.config.sessionDays) + " days after the sale. The Outlook inbox itself is never handed over.</p>" +
-      "<p>One offer per country on each market; each account sits on one offer only. On G2G the buyer gets the same mail page (14 days); G2G delivers instantly from the stock we load. Sales are recorded every few minutes and sent to Telegram.</p>" +
+      "<p>New sales focus on Eldorado: one regional offer per country and one reservation per account. Existing G2G inventory remains visible for sale tracking. Accounts with games await the separate per-game selling lane.</p>" +
       "</div></div></details>";
   }
 
