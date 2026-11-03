@@ -364,7 +364,7 @@ to OWCS campaign 13337; that bot's row was converted in place
 
 SOOP only issues a reward's code when it is claimed, and the inventory list
 never carries a code. Claim and "check info" are the same call
-(`POST drops.sooplive.com/api/get_drops_use_info.php` with `{ itemCodeIdx }`):
+(`POST drops.sooplive.com/api/get_drops_use_info.php` with `{ itemCodeIdx, itemIdx }`):
 on an unclaimed reward it claims it — which cannot be undone — and on a claimed
 one it only reads. The reply's `itemCode` is the code (or a URL for link-type
 rewards, or the literal `2차지급예정` when SOOP has run out and will deliver

@@ -578,8 +578,10 @@ it when you are done. It cannot reach the real database or sooplive.com.
 
 ## 15. Claiming (added 2026-10-06)
 
-- Client: `useInfo(itemCodeIdx) -> data` — SOOP's claim / check-info call. Claims an
+- Client: `useInfo(itemCodeIdx, itemIdx) -> data` — SOOP's claim / check-info call. Claims an
   unclaimed reward (irreversible); only reads a claimed one.
+  Both ids from the inventory row are required. A generic `result: -1` on this
+  endpoint is an API error; only a login message establishes an auth failure.
 - Inventory service: `claim(itemId) -> { ok, result: { kind, message, description,
   code, name, loginId } } | { ok: false, error }` with `kind` one of
   `code | link | ingame | pending | renewed`; `reveal(itemId) -> { code, claim } | null`,

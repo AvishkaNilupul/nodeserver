@@ -328,11 +328,18 @@ function makeClient(cookies, {
   // SOOP's "Claim" and "Check info" are the same call: on an unclaimed reward it
   // CLAIMS it (cannot be undone); on a claimed one it only reads. The reply
   // carries the code or link in `itemCode` — the inventory list never does.
-  async function useInfo(itemCodeIdx) {
-    const j = await postJson("/api/get_drops_use_info.php", "/inventory", { itemCodeIdx });
+  async function useInfo(itemCodeIdx, itemIdx) {
+    // SOOP's current inventory UI sends both the awarded-code id and the
+    // reward definition id. Omitting itemIdx now returns a generic result=-1.
+    if (!itemCodeIdx || !itemIdx) {
+      throw new SoopError("This reward is missing a SOOP item id — sync the account and try again", { code: "API" });
+    }
+    const j = await postJson("/api/get_drops_use_info.php", "/inventory", { itemCodeIdx, itemIdx });
     if (j && j.data) return j.data;
     const message = String((j && j.message) || "reward info unavailable");
-    const auth = (j && Number(j.result) === -1) || LOGIN_RE.test(message);
+    // On this endpoint -1 also means an invalid request or server error;
+    // only a login message establishes that the session was refused.
+    const auth = LOGIN_RE.test(message);
     throw new SoopError(message, { code: auth ? "AUTH" : "API" });
   }
 

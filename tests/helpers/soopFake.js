@@ -249,6 +249,7 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
       const t = now();
       const row = {
         itemCodeIdx: String(++seq), // the id SOOP's inventory really uses
+        itemIdx: `reward-${seq}`,
         ...{ itemType: "1", itemName: "Fake reward", itemImage: null, gameNo: "12", typeNm: null },
         ...{ ingameGiveYn: "N", acctConn: false, acctLinkPath: null, loginPath: null, useFlag: "N" },
         sendDate: kst(t - DAY),
@@ -470,7 +471,7 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
         },
         // Like SOOP: the first call on an unclaimed reward claims it, later
         // calls only read. The code lives here, never in the list rows.
-        async useInfo(itemCodeIdx) {
+        async useInfo(itemCodeIdx, itemIdx) {
           enter("useInfo", true);
           if (acct.claimsRefused === "HTTP") throw new SoopError("https://drops.sooplive.com/api/x -> HTTP 502: <html>Bad Gateway", { code: "HTTP" });
           if (acct.claimsRefused) throw new SoopError("Rewards cannot be handed out right now.", { code: "API" });
@@ -479,6 +480,9 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
           // One reward SOOP answers "log in" for while the login is fine
           // (`authOnClaim: true` on the row).
           const odd = DIVISIONS.flatMap((d) => acct.inventory[d]).find(match);
+          if (odd && String(odd.itemIdx) !== String(itemIdx)) {
+            throw new SoopError("An error occurred. Please try again later.", { code: "API" });
+          }
           if (odd && odd.authOnClaim) throw new SoopError("Please log in to continue.", { code: "AUTH" });
           // ...or refuses (`refuseOnClaim`), or never answers readably (`httpOnClaim`).
           if (odd && odd.refuseOnClaim) throw new SoopError("This reward cannot be handed out.", { code: "API" });

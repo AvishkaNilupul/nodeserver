@@ -658,26 +658,39 @@ test("the keepalive timer is also cleared when the server closes the socket", (t
   assert.deepEqual(ws.sent, []);
 });
 
-test("useInfo posts the item id to the drops site and returns SOOP's data, or says why not", async () => {
+test("useInfo posts both item ids to the drops site and returns SOOP's data, or says why not", async () => {
   const calls = [];
   const replies = [
     { result: 1, data: { itemCode: "ABCD-EFGH", itemType: "1", itemName: "Sun Tea Icon" } },
     { result: -1, message: "로그인 후 가능 합니다." },
     { result: 0, message: "Invalid item." },
+    { result: -1, message: "An error occurred. <br/> Please try again later." },
+    { result: -1, message: "Please log in to continue." },
   ];
   const transport = {
     proxied: false, ready: true, describe: () => "direct", wsOptions: () => ({}), stats: () => ({}),
     requestJson: async (url, opt) => { calls.push({ url, opt }); return replies.shift(); },
   };
   const client = makeClient([{ name: "AuthTicket", value: "t" }], { transport, geo: { get: async () => ({}) } });
-  const data = await client.useInfo("12345");
+  const data = await client.useInfo("12345", "678");
   assert.equal(data.itemCode, "ABCD-EFGH");
   assert.equal(calls[0].url, "https://drops.sooplive.com/api/get_drops_use_info.php");
   assert.equal(calls[0].opt.method, "POST");
-  assert.deepEqual(JSON.parse(calls[0].opt.body), { itemCodeIdx: "12345" });
+  assert.deepEqual(JSON.parse(calls[0].opt.body), { itemCodeIdx: "12345", itemIdx: "678" });
   assert.equal(calls[0].opt.headers.origin, "https://drops.sooplive.com");
-  await assert.rejects(() => client.useInfo("12345"), { code: "AUTH" });
-  await assert.rejects(() => client.useInfo("12345"), { code: "API", message: "Invalid item." });
+  await assert.rejects(() => client.useInfo("12345", "678"), { code: "AUTH" });
+  await assert.rejects(() => client.useInfo("12345", "678"), { code: "API", message: "Invalid item." });
+  await assert.rejects(() => client.useInfo("12345", "678"), { code: "API", message: "An error occurred. <br/> Please try again later." });
+  await assert.rejects(() => client.useInfo("12345", "678"), { code: "AUTH" });
+});
+
+test("useInfo refuses incomplete item ids before sending a request", async () => {
+  const t = fakeTransport();
+  const c = client(t);
+  for (const ids of [["12345"], [null, "678"], ["12345", ""]]) {
+    await assert.rejects(() => c.useInfo(...ids), { code: "API", message: /sync the account/ });
+  }
+  assert.equal(t.calls.length, 0);
 });
 
 test("categoryChannels only returns streams that carry drops, when SOOP says which do", async () => {

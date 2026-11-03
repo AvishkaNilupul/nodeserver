@@ -980,7 +980,7 @@ test("a code first seen long ago and claimed elsewhere since is still read back;
   // Stored forty days ago as unclaimed, claimed by hand yesterday.
   await SoopInventoryItem.collection.insertOne({
     loginId: "acc1", key: raw.itemCodeIdx, division: "acquired", kind: "code", name: "Old Row", hasCode: false, codeEnc: "",
-    raw: { itemCodeIdx: raw.itemCodeIdx }, claimedAt: null, receivedAt: new Date(s.clock.t - DAY), createdAt: longAgo, updatedAt: longAgo,
+    raw: { itemCodeIdx: raw.itemCodeIdx, itemIdx: raw.itemIdx }, claimedAt: null, receivedAt: new Date(s.clock.t - DAY), createdAt: longAgo, updatedAt: longAgo,
   });
   assert.equal((await s.claimer.account("acc1", { sync: false })).read, 1);
 

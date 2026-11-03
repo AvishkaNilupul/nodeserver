@@ -358,7 +358,7 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
     if (!idx) throw Object.assign(new Error("This reward has no SOOP item id, so it cannot be read from here"), { status: 400 });
     const client = await getClient(row.loginId);
     if (typeof client.useInfo !== "function") throw new Error("this client cannot claim rewards");
-    const out = readUseInfo(row, await client.useInfo(idx));
+    const out = readUseInfo(row, await client.useInfo(idx, row.raw.itemIdx));
     const set = { claim: out.claim, used: true };
     if (out.secret) Object.assign(set, { hasCode: true, codeEnc: encrypt(out.secret) });
     return { out, set };
