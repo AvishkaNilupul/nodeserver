@@ -1,9 +1,11 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 function browser({elapsed=10000,code=null,replaceError=false,lateCode=null,sendOk=true,tabUrl='https://chzzk.naver.com/'}={}){
-  const trace=[],clock=100000,store={active:{id:'signup-1',token:'token',tabId:7,windowId:3,number:{country:'canada'},sentAt:clock-elapsed,requestedAt:clock-elapsed-1000}};
+  const trace=[],clock=100000,proxy={scheme:'http',host:'proxy.test',port:8080,expiresAt:new Date(1000000).toISOString()},store={active:{id:'signup-1',token:'token',tabId:7,windowId:3,number:{country:'canada'},sentAt:clock-elapsed,requestedAt:clock-elapsed-1000,proxy,proxyVerified:true}};
   const page={smsPopup:true,phoneReady:true,terms:false,challenge:false,authenticated:false};
   const chrome={storage:{session:{get:async()=>structuredClone(store),set:async o=>Object.assign(store,structuredClone(o)),remove:async()=>{}},local:{set:async()=>{}}},
     tabs:{get:async()=>({url:tabUrl}),update:async(_id,opts)=>{trace.push('navigate:'+opts.url);},sendMessage:async(_id,m)=>{trace.push('browser:'+m.type);if(m.type==='inspect')return{...page};if(m.type==='identity')return{ready:false};if(m.type==='chzzk-status')return{ok:false};if(m.type==='send-sms')return{ok:sendOk};if(m.type==='back')page.smsPopup=false;return{ok:true};}},
+    proxy:{settings:{get:async()=>({levelOfControl:'controlled_by_this_extension',value:{mode:'fixed_servers',rules:{singleProxy:proxy}}})}},
+    webRequest:{onAuthRequired:{addListener:()=>{}},onCompleted:{addListener:()=>{}},onErrorOccurred:{addListener:()=>{}}},windows:{onRemoved:{addListener:()=>{}}},
     runtime:{onMessage:{addListener:()=>{}}},action:{onClicked:{addListener:()=>{}}}};
   const context=vm.createContext({chrome,URL,AbortSignal,Date:class extends Date{static now(){return clock;}},fetch:async(url,opts)=>{
     const action=url.split('/').at(-1);trace.push('api:'+action);

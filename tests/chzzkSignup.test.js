@@ -11,6 +11,7 @@ function fixture(t){
     order:async(id,action)=>{const o=orders.get(id);if(action==='cancel')o.status='CANCELED';if(action==='finish')o.status='FINISHED';return structuredClone(o);},
     history:async()=>[...orders.values()]};
   const engine=new Engine({vault,provider}),s=engine.start({name:'Test Owner',birthday:'19950102'});
+  s.signupProxy={expiresAt:new Date(Date.now()+600000).toISOString()};s.proxyVerifiedAt=new Date().toISOString();
   return{engine,vault,provider,s,orders,dir,bought:()=>bought};
 }
 test('price order uses live stock, not historical success or operator rate',()=>{

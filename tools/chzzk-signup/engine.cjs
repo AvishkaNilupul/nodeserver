@@ -23,7 +23,7 @@ class Engine {
     if(year<1900||d.getUTCFullYear()!==year||d.getUTCMonth()!==month-1||d.getUTCDate()!==day||d.getTime()>=this.now())throw problem('Enter a valid date of birth.');
     if(!Number.isFinite(maxPrice)||maxPrice<=0||maxPrice>1||!Number.isInteger(maxAttempts)||maxAttempts<1||maxAttempts>10||!Number.isFinite(budget)||budget<maxPrice||budget>5)throw problem('Check price, attempt and signup budget limits.');
     const s={id:crypto.randomUUID(),username:'n'+crypto.randomBytes(7).toString('hex'),password:crypto.randomBytes(9).toString('base64url')+'aA7!',name:name.trim(),birthday,maxPrice,maxAttempts,budget,status:'signup',createdAt:new Date(this.now()).toISOString(),attempts:[],spent:0,order:null,purchaseIntent:null};
-    s.manual=manual===true;this.vault.data.sessions.push(s);this.save();return s;
+    s.manual=manual===true;s.proxyRequired=true;this.vault.data.sessions.push(s);this.save();return s;
   }
   async refresh(s){
     if(!s.order)return null;
@@ -33,6 +33,7 @@ class Engine {
   }
   async number(id){return this.exclusive(async()=>{
     const s=this.current(id);
+    if(!s.proxyVerifiedAt||!s.signupProxy||!Number.isFinite(Date.parse(s.signupProxy.expiresAt))||Date.parse(s.signupProxy.expiresAt)<=this.now())throw problem('Verify the browser residential proxy before buying a number.');
     if(s.purchaseIntent)throw problem('Reconcile the uncertain purchase before buying another number.');
     if(s.order){
       await this.refresh(s);

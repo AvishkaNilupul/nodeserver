@@ -6,6 +6,21 @@ extension and enable **Allow in Incognito**. This is a separate generator and
 does not change Epic or Steam extensions or proxy settings. Close other private
 windows first because Chrome shares their cookie store.
 
+Install the helper dependency with `npm ci --prefix tools/chzzk-signup`.
+Every signup now requires the existing ProxyScrape residential configuration in
+`~/epic-claim/.env` (`RES_HOST`, `RES_PORT`, `RES_USER`, `RES_PASS`). The generator
+uses a fresh sticky session in its configured country (US when untargeted), checks
+it locally, then confirms the exact same exit from the assigned private browser.
+Naver opens only after that proof. Number purchases are blocked without it.
+The proxy stays on the private session throughout signup and clears on closure;
+regular Chrome tabs and other profiles retain their settings. Resume preserves
+the same exit and stops if its 25-minute verification lifetime expired.
+
+**Test residential proxy** performs the browser check without creating an account
+or buying a number. **Close helper session** clears stale browser credentials and
+recovery data even after a local signup has been removed. Reload the extension
+after updating it; Check extension displays the loaded version (0.2.0).
+
 Set the 5sim token as `fiveSimToken` in `settings.json` inside
 `~/Library/Application Support/ChzzkAccountGenerator/`, permissions 0600.
 The supplied token has already been saved there; it is never part of source code.
@@ -47,7 +62,7 @@ existing configured CHZZK egress and inserts new accounts without modifying
 existing accounts or their sold/paused state. Upload failures remain queued in
 the local vault. The farm supervisor discovers imported accounts normally.
 
-Tests: `node --test tests/chzzkSignup.test.js tests/chzzkSignupExtension.test.js tests/chzzkSignupForms.test.js`. Tests use fake 5sim responses,
+Tests: `node --test tests/chzzkSignup.test.js tests/chzzkSignupExtension.test.js tests/chzzkSignupForms.test.js tests/chzzkSignupProxy.test.js`. Tests use fake 5sim responses,
 temporary encrypted vaults and stub cloud models, without spending or contacting
 Naver/CHZZK. A real registration and earned drops are separate live checks.
 

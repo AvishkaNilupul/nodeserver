@@ -8,6 +8,32 @@ async function api(s,route,body={}){
 }
 const route=(s,a)=>'/session/'+s.id+'/'+a;
 async function stage(s,message){await api(s,route(s,'stage'),{stage:message});}
+const authAttempts=new Map();
+async function clearProxy(){
+  const state=await chrome.proxy.settings.get({incognito:true}).catch(()=>null);
+  if(state?.levelOfControl==='controlled_by_this_extension')await chrome.proxy.settings.clear({scope:'incognito_session_only'});
+  authAttempts.clear();
+}
+async function closeSession(){
+  const s=await load();await chrome.storage.session.remove('active');await chrome.storage.local.remove('recovery');
+  if(s?.windowId)await chrome.windows.remove(s.windowId).catch(()=>{});
+  await clearProxy();
+}
+async function requireProxy(s){
+  if(!s.proxyVerified||!s.proxy||!Number.isFinite(Date.parse(s.proxy.expiresAt))||Date.parse(s.proxy.expiresAt)<=Date.now())throw Error('Verify the residential proxy before continuing this signup.');
+  const setting=await chrome.proxy.settings.get({incognito:true}),p=setting.value?.rules?.singleProxy;
+  if(setting.levelOfControl!=='controlled_by_this_extension'||setting.value?.mode!=='fixed_servers'||p?.host!==s.proxy.host||p?.port!==s.proxy.port||p?.scheme!==s.proxy.scheme)throw Error('The private proxy changed. Signup is paused.');
+}
+async function startProxy(s){
+  s.paused=true;s.proxyVerified=false;await save(s);
+  if(s.probeTabId){await chrome.tabs.remove(s.probeTabId).catch(()=>{});delete s.probeTabId;await save(s);}
+  const setting=await chrome.proxy.settings.get({incognito:true});
+  if(['controlled_by_other_extensions','not_controllable'].includes(setting.levelOfControl))throw Error('Another extension or policy controls the private proxy.');
+  const prepared=await api(s,'/proxy/prepare',{sessionId:s.id||null});s.proxy=prepared.proxy;
+  const tab=await chrome.tabs.create({windowId:s.windowId,url:'about:blank',active:true});s.probeTabId=tab.id;await save(s);
+  await chrome.proxy.settings.set({scope:'incognito_session_only',value:{mode:'fixed_servers',rules:{singleProxy:{scheme:s.proxy.scheme,host:s.proxy.host,port:s.proxy.port},bypassList:['localhost','127.0.0.1','[::1]']}}});
+  await chrome.tabs.update(s.probeTabId,{url:'https://ipwho.is/'});
+}
 async function send(s,type,data={}){try{return await chrome.tabs.sendMessage(s.tabId,{type,...data});}catch{throw Error('Wait for the Naver page to finish loading, then Resume.');}}
 async function number(s){
   const page=await send(s,'inspect');if(!page.phoneReady)throw Error('Return to the phone-number screen in the same signup first.');
@@ -36,6 +62,7 @@ async function sms(s){
   return r.result;
 }
 async function capture(s){
+  await requireProxy(s);
   const identity=(await api(s,route(s,'identity'))).identity;
   const page=await send(s,'authenticated',{username:identity.username});
   if(!page.ok)throw Error('Open Naver’s home page in the signup window after creation; it must show the assigned ID and a logout link.');
@@ -57,6 +84,7 @@ async function cookiesFor(s){
   const unique=new Map();for(const c of cookies)if(/(^|\.)naver\.com$/i.test(c.domain))unique.set(c.domain+'|'+c.path+'|'+c.name,c);return[...unique.values()];
 }
 async function tick(s){
+  if(!s.manual||s.captureCookies)await requireProxy(s);
   if(s.captureCookies){
     const t=await chrome.tabs.get(s.tabId),url=new URL(t.url);
     if(url.hostname==='nid.naver.com'&&url.pathname==='/nidlogin.login'){
@@ -76,7 +104,7 @@ async function tick(s){
     await api(s,route(s,'sms'));
     await api(s,route(s,'complete'),{cookies:await cookiesFor(s),userIdHash:who.userIdHash,naverId:(await api(s,route(s,'identity'))).identity.username});
     // Account is durable before closing its private window.
-    const id=s.windowId;await chrome.storage.session.remove('active');await chrome.windows.remove(id);return;
+    await closeSession();return;
   }
   if(s.manual)return;
   if(s.replacing){await replace(s);return;}
@@ -115,6 +143,18 @@ async function tick(s){
 }
 async function handle(m,sender){
   const local=sender.tab?.url===BASE+'/';
+  if(m.type==='proxy-observed'){
+    const s=await load();
+    if(!s||sender.tab?.id!==s.probeTabId||sender.tab?.windowId!==s.windowId||!sender.tab.incognito||sender.frameId!==0||sender.url!=='https://ipwho.is/')return{ok:false};
+    try{
+      const result=await api(s,'/proxy/verify',{sessionId:s.id||null,ticket:s.proxy.ticket,location:m.location});
+      s.proxyVerified=true;s.paused=false;const probe=s.probeTabId;delete s.probeTabId;await save(s);
+      await chrome.tabs.remove(probe);
+      if(s.testOnly){await closeSession();return{ok:true,country:result.country};}
+      if(s.newSignupTab){delete s.newSignupTab;await save(s);await chrome.tabs.update(s.tabId,{url:'https://nid.naver.com/account/signup/term?lang=en_US&realname=N'});}
+      await chrome.tabs.update(s.tabId,{active:true});await stage(s,'Residential browser proxy verified · '+result.country);return{ok:true};
+    }catch(e){s.paused=true;s.proxyVerified=false;await save(s);await chrome.tabs.update(s.probeTabId,{url:'about:blank'}).catch(()=>{});if(s.id)await stage(s,'Proxy check failed; signup is paused').catch(()=>{});throw e;}
+  }
   if(m.type==='log-event'){
     const s=await load();if(!s||sender.tab?.id!==s.tabId||sender.tab?.windowId!==s.windowId||!sender.tab.incognito)return{ok:false};
     await api(s,route(s,'events'),m.event||{});return{ok:true};
@@ -129,9 +169,12 @@ async function handle(m,sender){
     if(!await chrome.extension.isAllowedIncognitoAccess())throw Error('Enable Allow in Incognito for the CHZZK extension.');
     return{ok:true,version:chrome.runtime.getManifest().version};
   }
-  if(m.type==='open'||m.type==='resume'){
+  if(m.type==='close'){await closeSession();return{ok:true};}
+  if(m.type==='open'||m.type==='resume'||m.type==='proxy-test'){
+    if(!await chrome.extension.isAllowedIncognitoAccess())throw Error('Enable Allow in Incognito for the CHZZK extension.');
     let s=await load();if(s&&s.id!==m.sessionId)throw Error('Close the previous signup before opening another.');
     if(s){try{await chrome.tabs.get(s.tabId);}catch{s=null;}}
+    if(s&&(await chrome.windows.getAll()).some(w=>w.incognito&&w.id!==s.windowId))throw Error('Close unrelated private windows before resuming CHZZK signup.');
     if(!s){
       const privateWindows=(await chrome.windows.getAll({populate:true})).filter(w=>w.incognito);
       if(m.type==='resume'&&privateWindows.length===1){
@@ -145,19 +188,20 @@ async function handle(m,sender){
       if(!s&&privateWindows.length)throw Error('Close unrelated private windows before starting CHZZK signup.');
     }
     if(!s){
-      s={id:m.sessionId,token:m.token};await api(s,route(s,'identity'));
-      const w=await chrome.windows.create({incognito:true,url:'https://nid.naver.com/account/signup/term?lang=en_US&realname=N'});
+      s={id:m.sessionId||null,token:m.token,testOnly:m.type==='proxy-test',newSignupTab:true};if(!s.testOnly)await api(s,route(s,'identity'));
+      const w=await chrome.windows.create({incognito:true,url:'about:blank'});
       s.windowId=w.id;s.tabId=w.tabs[0].id;
     }
-    s.token=m.token;s.paused=false;s.manual=(await api(s,route(s,'identity'))).identity.manual===true;await save(s);await chrome.windows.update(s.windowId,{focused:true});return{ok:true};
+    s.token=m.token;s.manual=s.testOnly?false:(await api(s,route(s,'identity'))).identity.manual===true;
+    await startProxy(s);await chrome.windows.update(s.windowId,{focused:true});return{ok:true};
   }
   const s=await load();if(!s)throw Error('Resume the signup window first.');
   if(m.sessionId&&s.id!==m.sessionId)throw Error('Wrong signup.');s.token=m.token;
+  await requireProxy(s);
   if(m.type==='number')await number(s);
   else if(m.type==='sms')await sms(s);
   else if(m.type==='replace')await replace(s);
   else if(m.type==='save')await capture(s);
-  else if(m.type==='close'){await chrome.storage.session.remove('active');await chrome.windows.remove(s.windowId);}
   else throw Error('Unknown command');
   return{ok:true};
 }
@@ -170,3 +214,14 @@ chrome.runtime.onMessage.addListener((m,sender,reply)=>{
   }).finally(()=>{busy=false;});return true;
 });
 chrome.action.onClicked.addListener(()=>chrome.tabs.create({url:BASE+'/'}));
+const proxyUrls=['*://*.naver.com/*','*://*.pstatic.net/*','https://ipwho.is/*'];
+chrome.webRequest.onAuthRequired.addListener((details,reply)=>{
+  (async()=>{
+    const s=await load(),p=s?.proxy;
+    if(!p||!details.isProxy||details.challenger?.host!==p.host||Number(details.challenger?.port)!==p.port||![s.tabId,s.probeTabId].includes(details.tabId))return reply({});
+    const attempts=(authAttempts.get(details.requestId)||0)+1;authAttempts.set(details.requestId,attempts);
+    reply(attempts>2?{cancel:true}:{authCredentials:{username:p.username,password:p.password}});
+  })().catch(()=>reply({cancel:true}));
+},{urls:proxyUrls},['asyncBlocking']);
+for(const event of [chrome.webRequest.onCompleted,chrome.webRequest.onErrorOccurred])event.addListener(d=>authAttempts.delete(d.requestId),{urls:proxyUrls});
+chrome.windows.onRemoved.addListener(async id=>{const s=await load();if(s?.windowId===id){await chrome.storage.session.remove('active');await chrome.storage.local.remove('recovery');await clearProxy();}});

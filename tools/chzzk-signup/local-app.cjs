@@ -2,7 +2,7 @@
 const express=require('express'),crypto=require('crypto'),fs=require('fs'),path=require('path'),os=require('os');
 const {LocalVault}=require('./vault.cjs'),{FiveSim,ProviderError}=require('./five-sim.cjs'),{Engine,summary,safeError}=require('./engine.cjs'),{Queue,uploader}=require('./cloud.cjs');
 const DEFAULT_DIR=path.join(os.homedir(),'Library/Application Support/ChzzkAccountGenerator');
-function createApp({dataDir=DEFAULT_DIR,port=4109,provider,upload}={}){
+function createApp({dataDir=DEFAULT_DIR,port=4109,provider,upload,prepareProxy=require('./proxy.cjs').prepareProxy}={}){
   const vault=new LocalVault(dataDir);let settings={};
   try{settings=JSON.parse(fs.readFileSync(path.join(dataDir,'settings.json'),'utf8'));}catch{}
   provider=provider||new FiveSim({token:settings.fiveSimToken});
@@ -21,7 +21,26 @@ function createApp({dataDir=DEFAULT_DIR,port=4109,provider,upload}={}){
   app.get('/',(_req,res)=>res.type('html').send(fs.readFileSync(path.join(__dirname,'local.html'),'utf8').replace('__TOKEN__',token)));
   for(const f of ['ui.js','style.css'])app.get('/'+f,(_req,res)=>res.sendFile(path.join(__dirname,f)));
   app.use('/api',auth);
-  app.get('/api/state',(_req,res)=>res.json({ok:true,active:summary(engine.active()),accounts:vault.data.accounts.map(summary),cloudEnabled:!!queue.upload}));
+  let proxyTest=null,lastProxyTest=null,proxyPreparing=false;
+  app.get('/api/state',(_req,res)=>res.json({ok:true,active:summary(engine.active()),accounts:vault.data.accounts.map(summary),cloudEnabled:!!queue.upload,proxyRequired:true,lastProxyTest}));
+  app.post('/api/proxy/prepare',async(req,res,next)=>{
+    if(proxyPreparing)return res.status(409).json({ok:false,error:'A proxy check is already running.'});proxyPreparing=true;
+    try{
+      const s=req.body.sessionId?engine.current(req.body.sessionId):null;
+      if(!s&&engine.active())throw require('./engine.cjs').problem('Finish or close the current signup before testing another proxy.');
+      let p=s?.signupProxy;
+      if(!p)p=await prepareProxy();
+      if(Date.parse(p.expiresAt)<=Date.now())throw require('./engine.cjs').problem('The signup proxy session expired. Keep this signup stopped for review.');
+      if(s){s.signupProxy=p;s.proxyVerifiedAt=null;engine.save();}else proxyTest=p;
+      res.json({ok:true,proxy:p});
+    }catch(e){next(e);}finally{proxyPreparing=false;}
+  });
+  app.post('/api/proxy/verify',(req,res,next)=>{try{
+    const s=req.body.sessionId?engine.current(req.body.sessionId):null;
+    const result=require('./proxy.cjs').verifyBrowser(s?s.signupProxy:proxyTest,req.body.ticket,req.body.location);
+    if(s){s.proxyVerifiedAt=result.verifiedAt;engine.save();}else{lastProxyTest=result;proxyTest=null;}
+    res.json({ok:true,...result});
+  }catch(e){next(e);}});
   app.get('/api/provider',async(_req,res,next)=>{try{
     const [profile,prices,countries]=await Promise.all([provider.profile(),provider.prices(),provider.countries()]);
     res.json({ok:true,balance:profile.balance,offers:require('./five-sim.cjs').candidates(prices,countries,[],1).slice(0,20)});

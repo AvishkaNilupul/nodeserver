@@ -1,0 +1,5 @@
+{
+  "name": "local-chzzk-signup",
+  "private": true,
+  "dependencies": { "https-proxy-agent": "7.0.6" }
+}

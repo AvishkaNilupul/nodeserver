@@ -4,6 +4,20 @@ Local app on 127.0.0.1:4109; separate extension and encrypted vault. One
 private browser window and one signup at a time. Interrupted identities stay
 reserved. No automatic batch until a single account has been verified end to end.
 
+Owner rule 2026-11-03: every future signup, including a logged manual signup,
+uses the existing residential proxy. Open only about:blank before configuration.
+Verify the prepared sticky exit on the local service AND in the assigned private
+browser before navigating to Naver. A mismatched, expired, missing or overridden
+proxy stops signup; no direct fallback and no number purchase. Proxy settings
+apply only to this profile's incognito session. No unrelated private window may
+coexist, including on Resume. Supply proxy authentication only to the exact
+configured challenger for the assigned signup/probe tabs. Clear helper session,
+recovery data and private proxy configuration when the window closes.
+
+Read proxy credentials from the existing protected ~/epic-claim/.env; never put
+them in git or normal UI state. Resume keeps the same unexpired sticky exit.
+The connection-only proxy test creates no signup or SMS order.
+
 5sim product is `naver`. Fetch current stock, sort available countries by their
 cheapest number, and buy with operator `any` plus a provider-enforced `maxPrice`.
 Default cap $0.05 per attempt, 10 attempts per signup, $0.25 gross purchase budget.

@@ -1,11 +1,12 @@
 {
-  "manifest_version":3,"name":"CHZZK Signup — Local 5sim","version":"0.1.4",
+  "manifest_version":3,"name":"CHZZK Signup — Local 5sim","version":"0.2.0",
   "description":"Naver signup with encrypted local storage, 5sim SMS and CHZZK farm handoff.",
-  "incognito":"spanning","permissions":["storage","tabs","cookies"],
-  "host_permissions":["http://127.0.0.1/*","*://*.naver.com/*"],
+  "incognito":"spanning","permissions":["storage","tabs","cookies","proxy","webRequest","webRequestAuthProvider"],
+  "host_permissions":["http://127.0.0.1/*","*://*.naver.com/*","*://*.pstatic.net/*","https://ipwho.is/*"],
   "background":{"service_worker":"background.js"},
   "action":{"default_title":"Open CHZZK generator"},
   "content_scripts":[
+    {"matches":["https://ipwho.is/"],"js":["proxy-check.js"],"run_at":"document_idle"},
     {"matches":["http://127.0.0.1/*"],"js":["bridge.js"],"run_at":"document_idle"},
     {"matches":["https://nid.naver.com/*","https://www.naver.com/*","https://chzzk.naver.com/*"],"js":["content.js"],"run_at":"document_idle"}
   ]
