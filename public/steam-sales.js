@@ -145,7 +145,7 @@
     var d = view.distributor;
     if (!d) return "";
     var modes = [
-      ["on", "On", "allocates new accounts to Eldorado regional sales or hour boosting"],
+      ["on", "On", "allocates new accounts to Eldorado regional sales, game preparation or hour boosting"],
       ["plan", "Plan only", "shows what it would do, places nothing"],
       ["off", "Off", "you list accounts yourself"],
     ];
@@ -156,7 +156,7 @@
       .join("");
     var last = (d.last || []).slice(0, 6)
       .map(function (x) {
-        var where = x.market === "g2g" ? "G2G" : x.market === "eldorado" ? "Eldorado" : x.market === "boost" ? "Hour boost" : "waiting";
+        var where = x.market === "g2g" ? "G2G" : x.market === "eldorado" ? "Eldorado" : x.market === "boost" ? "Preparation farm" : "waiting";
         return (
           "<li><b>" + esc(x.accountName) + '</b> <span class="cc">' + esc(x.region) + "</span> → " + where +
           (x.done ? "" : x.error ? ' <span class="st-warn">(failed: ' + esc(x.error) + ")</span>" : ' <span class="st-muted">(plan)</span>') +
@@ -173,7 +173,7 @@
       '<div class="sell-dist"><h3 class="sell-h">Where new accounts go</h3>' +
       '<div class="sell-dist-row"><div class="st-chips" role="group" aria-label="Distributor">' + chips + "</div>" +
       '<button type="button" class="btn btn-sm" data-sell="distribute">Run now</button></div>' +
-      '<p class="st-small st-muted sell-dist-note">New empty accounts go to Eldorado region offers or the hour-boost pool. Only Eldorado stock counts toward the regional reserve. If Eldorado is unavailable, accounts wait; other markets receive no new allocations. ' +
+      '<p class="st-small st-muted sell-dist-note">New accounts replenish empty regional stock on Eldorado first. Overflow is split between game preparation and hour boosting. Only Eldorado stock counts toward the regional reserve. If Eldorado is unavailable, accounts wait; other markets receive no new allocations. ' +
       "Last run " + esc(ago(d.lastRunAt)) + (d.lastNote ? ": " + esc(d.lastNote) : "") + ".</p>" +
       (skipped ? '<p class="st-small st-warn">' + esc(skipped) + "</p>" : "") +
       (last ? '<ul class="sell-last">' + last + "</ul>" : "") +
