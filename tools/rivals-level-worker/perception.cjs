@@ -2,7 +2,12 @@
 const {components}=require('./vision.cjs');
 
 function redWorldLabels(rgba,width,height){
-  const letters=components(rgba,width,height,(d,i)=>d[i]>150&&d[i]>d[i+1]*1.4&&d[i]>d[i+2]*1.3,{left:.08,right:.93,top:.15,bottom:.7})
+  const mask=Buffer.alloc(rgba.length);
+  for(let y=Math.floor(height*.15);y<height*.7;y++)for(let x=Math.floor(width*.08);x<width*.93;x++){
+    const i=(y*width+x)*4,r=rgba[i],g=rgba[i+1],b=rgba[i+2];
+    if(r>180&&g>65&&b>60&&r-g>85&&r-b>85&&g/b>.8&&g/b<1.3)for(let yy=y-1;yy<=y+1;yy++)mask[(yy*width+x)*4]=255;
+  }
+  const letters=components(mask,width,height,(d,i)=>d[i]>0,{left:.08,right:.93,top:.15,bottom:.7})
     .filter(b=>b.height>.003&&b.height<.023&&b.width>.001&&b.width<.025),rows=[];
   for(const b of letters.sort((a,b)=>a.y-b.y)){let row=rows.find(g=>Math.abs(g.y-b.y)<.006);if(!row)rows.push(row={y:b.y,boxes:[]});row.boxes.push(b);}
   const labels=[];

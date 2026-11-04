@@ -424,8 +424,10 @@ test('navigation levels the camera after losing an elevated target even with a d
 
 test('a red world-name pixel row identifies an opponent even when OCR misses its letters',()=>{
   const {redWorldLabels,outlinedEnemies}=require('../tools/rivals-level-worker/perception.cjs'),w=640,h=415,d=Buffer.alloc(w*h*4);
-  for(let k=0;k<8;k++)for(let y=140;y<147;y++)for(let x=280+k*6;x<283+k*6;x++){const i=(y*w+x)*4;d[i]=210;d[i+1]=75;d[i+2]=60;d[i+3]=255;}
+  for(let k=0;k<8;k++)for(let y=140;y<147;y++)for(let x=280+k*6;x<283+k*6;x++){const i=(y*w+x)*4;d[i]=230;d[i+1]=95;d[i+2]=95;d[i+3]=255;}
   assert.equal(redWorldLabels(d,w,h).length,1);assert.ok(outlinedEnemies(d,w,h,[],{requireOpponentLabel:true}).some(t=>t.source==='enemy-nameplate'));
+  for(let i=0;i<d.length;i+=4)if(d[i]){d[i]=230;d[i+1]=130;d[i+2]=75;}
+  assert.equal(redWorldLabels(d,w,h).length,0);
 });
 
 test('a flat wall above a late floor break is blocked while the side passage stays open',()=>{

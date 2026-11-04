@@ -1,6 +1,6 @@
 # Rivals leveling worker
 
-**Live commissioning is in progress. Repeated unattended play is not yet verified.**
+**Prototype. Repeated unattended play is not commissioned.**
 A supervised Practice vs AI match produced 227 account XP in 7m35s. That run
 included operator movement and had no verified positive combat damage. It is not
 a commissioning receipt. The current navigation and combat controller must pass
@@ -11,6 +11,9 @@ unattended match completion or account XP.
 A later AI calibration match with controller restarts earned another 227 account
 XP in 8m10s. Its named scoreboard showed zero damage. Repeated play remains
 uncommissioned.
+Route selection still stalls at walls and can confuse scenery with an exit.
+Recent full runs returned to menus or were removed without a completed-match
+receipt. Keep single-match limits; no unattended farming service is installed.
 
 This local macOS worker owns one existing encrypted claim-queue session. It
 checks the Career UID, reads the level badge, selects Practice vs AI, selects The
@@ -36,8 +39,8 @@ The optional depth helper uses Apple's [Core ML Depth Anything V2 Small](https:/
 under Apache-2.0, pinned to revision
 `cfef6f6f2a70783dedc0bfae40cecbc2052285d3`. Weights, compiled model cache, checksums,
 credentials and game receipts stay outside git in
-`~/Library/Application Support/RivalsLevelWorker/`. No screenshots are uploaded
-for inference. Warm newly built native/model helpers before entering a match.
+`~/Library/Application Support/RivalsLevelWorker/`. The worker performs its OCR,
+segmentation and depth inference locally. Warm newly built native/model helpers before entering a match.
 First-use model compilation can exceed the live screenshot freshness budget.
 
 ## Run one benchmark

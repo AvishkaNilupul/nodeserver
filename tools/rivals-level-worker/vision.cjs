@@ -145,14 +145,14 @@ function features(rgba, width, height) {
   // Spawn barriers are green rectangles in the real Spider-Islands receipt.
   // This is only an exit hint when a sizeable green connected border surrounds
   // the forward view; small scenery patches are excluded.
-  const exits=components(rgba,width,height,(d,i)=>d[i+1]>60&&d[i]<d[i+1]*1.3&&d[i+2]<d[i+1]*.75,play)
+  const exits=components(rgba,width,height,(d,i)=>d[i+1]>60&&d[i]<d[i+1]*.95&&d[i+2]<d[i+1]*.75,play)
     .filter(b=>b.width>.06&&b.width<.45&&b.height>.12&&b.height<.75&&b.pixels>40)
     .filter(b=>{
       // A portal has green side rails; a tree concentrates green in its center.
       const green=[0,0,0],area=[0,0,0],left=b.x-b.width/2;
       for(let y=Math.max(0,Math.ceil((b.y-b.height/2)*height));y<Math.min(height,(b.y+b.height/2)*height);y++)for(let x=Math.max(0,Math.ceil(left*width));x<Math.min(width,(b.x+b.width/2)*width);x++){
         const relative=(x/width-left)/b.width,k=relative<.15?0:relative>.85?1:2,i=(y*width+x)*4;
-        area[k]++;if(rgba[i+1]>60&&rgba[i]<rgba[i+1]*1.3&&rgba[i+2]<rgba[i+1]*.75)green[k]++;
+        area[k]++;if(rgba[i+1]>60&&rgba[i]<rgba[i+1]*.95&&rgba[i+2]<rgba[i+1]*.75)green[k]++;
       }
       const density=green.map((n,i)=>n/Math.max(1,area[i]));return Math.min(density[0],density[1])>Math.max(.08,density[2]*.7);
     });
