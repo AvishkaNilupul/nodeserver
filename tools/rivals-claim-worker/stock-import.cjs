@@ -16,7 +16,8 @@ function transport({request,target,keyFile=path.join(os.homedir(),'.ssh/claude_p
 if(require.main===module)(async()=>{
  let raw='';for await(const c of process.stdin){raw+=c;if(raw.length>4096)throw Error('Input too large');}
  const request=JSON.parse(raw),target=JSON.parse(fs.readFileSync(path.join(os.homedir(),'Library/Application Support/SteamAccountGenerator/cloud.json'),'utf8'));
- const pair=await transport({request,target});
+ const pair=await transport({request:process.argv.includes('--prepare')?{...request,action:'prepare'}:request,target});
+ if(process.argv.includes('--prepare')){console.log(JSON.stringify({ok:true,result:pair}));return;}
  const q=new Queue(process.env.RIVALS_WORKER_DIR||path.join(os.homedir(),'Library/Application Support/RivalsClaimWorker'));
  const job=q.import(pair);console.log(JSON.stringify({ok:true,job}));
 })().catch(e=>{console.log(JSON.stringify({ok:false,error:e.message.startsWith('Stock hold refused:')?e.message:'Canary import failed; preserve remote holds and inspect their state before retrying.'}));process.exitCode=1;});

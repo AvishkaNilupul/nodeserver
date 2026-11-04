@@ -38,3 +38,18 @@ Credential copy buttons are available on the authenticated loopback page. They c
 Unexpected UI becomes a blocked job with an exact reason. A blocked signed-in job retains exclusive use of the game session. Resume keeps the pairing and phase; five attempts require review. Before starting a different account, verify the previous game/client identity has cleared.
 
 Pause the queue on the dashboard to prevent new leases. Stop the local service using its LaunchAgent label `com.avishka.rivals-claim-worker`; account data and server holds remain intact. Remove only the task's own temporary keep-awake assertion when overnight work ends. The same-chat automation must be disabled when this commissioning task is complete or genuinely blocked. Bulk processing requires its own measured commissioning decision.
+
+
+## Repeated account preparation
+
+The owner can commission additional sequential jobs after the canary. For an
+explicit unlisted pair, run the same private request first with `--prepare`.
+A pending result means the canonical booster must acknowledge logout; repeat that
+exact request. A held-for-import result allows the ordinary importer above. This
+command never releases linked drops or converts a listed account into preparation.
+The UI agent then processes the durable queue one account at a time and uses
+Steam's native Remember me for interruptions during that unsold job. See CONTRACT.md
+for identity rechecks, session expiry, sign-out and per-account screenshot rules.
+Compile the authorized native helper with macOS swiftc when Wine windows cannot be
+controlled through CUA. Its physical `keys` mode reads ASCII input exclusively from
+stdin; credentials must never appear in arguments, command logs or screenshots.
