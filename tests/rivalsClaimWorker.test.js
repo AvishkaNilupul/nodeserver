@@ -33,6 +33,16 @@ test('Steam code retrieval is restricted to a recent prepared login and its exac
  for(const delta of [{from:{emailAddress:{address:'noreply@steampowered.com.attacker.test'}}},{from:{emailAddress:{address:'fake@other.test'}}},{subject:'New Steam Account Email Verification'},{receivedDateTime:new Date(f.time()-120000).toISOString()},{body:'An ordinary WORD or 12345 is not a code'}])assert.equal(guardCode([{...mail,...delta}],context.since),null);
  let target;const code=await readGuard({email:'assigned@outlook.com',since:context.since},{fetcher:async(url,options)=>{target=url;assert.equal(options.method,'POST');return{ok:true,json:async()=>({ok:true,messages:[mail]})};}});assert.equal(code,'BCDF2');assert(target.includes('assigned%40outlook.com'));assert(!JSON.stringify(f.q.status()).includes('BCDF2'));f.advance(900001);assert.throws(()=>f.q.loginContext(lease.job.id),/Prepare/);
 });
+test('linked accounts can prepare a fresh login after recovery without losing pairing or evidence',t=>{
+ const f=fixture(t),first=start(f);f.q.beginLogin(first.job.id,first.leaseToken);
+ observe(f,first,'signed-in',{kind:'game-profile'});observe(f,first,'linked',{kind:'linked-profile',twitchLogin:'test_twitch'});
+ const before=f.q.status();f.advance(900001);assert.throws(()=>f.q.loginContext(first.job.id),/Prepare/);
+ const recovered=f.q.acquire('recovery-worker',first.job.id);
+ assert.throws(()=>f.q.beginLogin(first.job.id,first.leaseToken),/lease expired/);
+ const renewed=f.q.beginLogin(first.job.id,recovered.leaseToken),context=f.q.loginContext(first.job.id);
+ assert.equal(context.since,new Date(f.time()).toISOString());assert.equal(renewed.phase,'linked');assert.equal(renewed.rivalsUid,'123456789');assert.equal(renewed.twitchLogin,'test_twitch');
+ assert.deepEqual(f.q.status().observations,before.observations);assert.deepEqual(renewed.expectedRewards,before.jobs[0].expectedRewards);assert.deepEqual(renewed.verifiedRewards,[]);
+});
 test('dead process lock recovers; live process lock does not get stolen',t=>{const f=fixture(t),lock=path.join(f.dir,'queue.lock');fs.writeFileSync(lock,JSON.stringify({pid:process.pid,nonce:'existing'}));assert.throws(()=>f.q.pause(false),/busy/);fs.writeFileSync(lock,JSON.stringify({pid:2147483647,nonce:'dead'}));assert.equal(f.q.pause(false).enabled,false);assert(!fs.existsSync(lock));});
 test('stock selection refuses duplicate, reserved, copied and buyer-history accounts',()=>{
  const clean={version:1,steam:{stage:'problem',holdNote:true},steamListingRefs:0,steamSaleRefs:0,steamG2gRefs:0,steamBoostActive:false,steamLogoutAt:new Date(),twitchTwins:1,twitch:{hasPassword:true,lastScanStatus:'ok',copiedCount:0,login:'old_twitch',twitchId:'42'},twitchCommittedDrops:0,twitchConnectedDrops:0,twitchListingRefs:0,twitchLeaseRefs:0,twitchResellerRefs:0,twitchUnclaimedRefs:0,pool:[],liveLogin:'old_twitch',liveTwitchId:'42',liveRewards:[{id:'costume',connected:false}]};

@@ -117,7 +117,7 @@ class Queue {
   beginLogin(id,token) {
     return this.store.transact(d=>{
       const j=this.owned(d,id,token);
-      if(j.phase!=='queued')fail('The game identity has already been checked',409);
+      if(j.phase==='logged-out')fail('A completed game session cannot sign in again',409);
       if(!j.loginStartedAt||this.now()-stamp(j.loginStartedAt)>900000){j.loginStartedAt=new Date(this.now()).toISOString();j.revision++;}
       return publicJob(j);
     });
