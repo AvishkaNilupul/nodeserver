@@ -114,6 +114,15 @@ class Queue {
   heartbeat(id, token) {
     return this.store.transact(d => { const j = this.owned(d,id,token); j.lease.expiresAt = this.now()+900000; return publicJob(j); });
   }
+  releaseLease(id, token) {
+    return this.store.transact(d => {
+      const j = this.owned(d,id,token);
+      // Handoff the same signed-in account without changing phase, readiness,
+      // attempts, stock holds, or the exclusive active account selection.
+      j.lease=null;j.revision++;j.updatedAt=new Date(this.now()).toISOString();
+      return publicJob(j);
+    });
+  }
   beginLogin(id,token) {
     return this.store.transact(d=>{
       const j=this.owned(d,id,token);

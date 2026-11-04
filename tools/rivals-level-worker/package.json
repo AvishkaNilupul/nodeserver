@@ -1,0 +1,11 @@
+{
+  "name": "rivals-level-worker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local screen-driven Rivals leveling benchmark and controller",
+  "engines": {"node": ">=20"},
+  "dependencies": {
+    "sharp": "0.35.2",
+    "tesseract.js": "7.0.0"
+  }
+}
