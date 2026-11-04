@@ -59,7 +59,7 @@ class Navigator{
         return {action:control([this.detourSide,'space'],1200,{dx:this.detourSide==='a'?-50:50}),reason:'Objective distance stalled; taking a different passage'};
       }
     }
-    if(!goal&&Math.abs(this.pitchDelta)>70){const dy=-clamp(this.pitchDelta,-100,100);this.pitchDelta+=dy;return {action:control([],350,{dy}),reason:'Restoring the exploration camera toward its starting pitch'};}
+    if(Math.abs(this.pitchDelta)>70){const dy=-clamp(this.pitchDelta,-100,100);this.pitchDelta+=dy;return {action:control([],350,{dy}),reason:'Restoring the exploration camera toward its starting pitch'};}
     if(!goal&&this.exploreSteps>=3){this.exploreSteps=0;return {action:control([],350,{dx:-130}),reason:'No objective or enemy after advancing; searching the adjacent passage'};}
     const paths=corridors(hints.depth,goal?.x??.5);
     if(!paths.length)throw Error('No valid depth map for navigation');

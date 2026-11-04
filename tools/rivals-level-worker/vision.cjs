@@ -92,9 +92,8 @@ function classify(frame) {
   if (/CAREER/.test(text) && /OVERVIEW/.test(text) && /BASIC STATS|TIME PLAYED|MATCHES PLAYED|ACCOUNT LEVEL/.test(text)) return 'career';
   if (/SELECT YOUR HERO|HERO SELECTION|CONFIRM SELECTION|CONFIRM YOUR HERO|ASSEMBLE YOUR TEAM/.test(text)) return 'hero-select';
   const hud=frame.lines.some(l=>l.x>.4&&l.x<.65&&l.y>.8&&/^\d+\s*\/\s*\d+$/.test(l.text));
-  const clock=frame.lines.some(l=>l.x>.35&&l.x<.65&&l.y<.16&&/^\d{1,2}:\d{2}$/.test(l.text.trim()));
   const ammoHud=frame.lines.some(l=>l.x<.3&&l.y>.85&&/\d+\s*\/\s*4/.test(l.text));
-  if(ammoHud&&(clock||find(frame,/^LSHIFT$/,{left:.7,top:.85})))return 'combat';
+  if(ammoHud)return 'combat';
   if (/PREPARE TO/.test(text)&&hud) return 'combat';
   if (/PREPARE TO|WAITING FOR PLAYERS|MISSION STARTS|BATTLE STARTS|IGNITING THE TIMESTREAM|LOADING/.test(text)) return 'preparing';
   if (/RESPAWN|SPECTATING|ELIMINATED BY/.test(text)) return 'respawn';

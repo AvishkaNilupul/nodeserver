@@ -415,3 +415,9 @@ test('fast combat only fires after centering and stops on a fresh-frame focus mi
   assert.equal(await track({driver:{async request(p){calls.push(p);return {frontmostPid:999,capturedAt:new Date().toISOString()};}},target:{pid:123},seed:{x:.5,y:.5},reference:{lines:[]},directory:root,prefix:'fixture',guard(){}}),0);
   assert.deepEqual(calls.map(c=>c.command),['capture']);assert.equal(calls[0].ocr,false);assert.equal(calls[0].maxWidth,1280);
 });
+
+test('navigation levels the camera after losing an elevated target even with a destination',()=>{
+  const {Navigator}=require('../tools/rivals-level-worker/navigator.cjs'),n=new Navigator(),f=gameFrame();n.pitchDelta=-100;f.lines.push({text:'82M',x:.5,y:.5,width:.03,height:.02,confidence:.99});
+  const d=n.step(f,{enemies:[]},1000);assert.equal(d.action.dy,100);assert.deepEqual(d.action.keys,[]);
+  const onlyAmmo=frame('');onlyAmmo.lines.push({text:'0 08 40/40',x:.11,y:.91,width:.1,height:.02,confidence:.99});assert.equal(classify(onlyAmmo),'combat');
+});
