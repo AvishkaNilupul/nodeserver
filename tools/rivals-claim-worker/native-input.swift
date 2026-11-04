@@ -1,7 +1,7 @@
 import Cocoa
 import ApplicationServices
 let args = CommandLine.arguments
-guard (args.count == 5 || args.count == 6), let pid = Int32(args[1]), let x = Double(args[3]), let y = Double(args[4]), AXIsProcessTrusted() else { exit(2) }
+guard (args.count == 5 || args.count == 6), ["click", "click-current", "keys", "text"].contains(args[2]), let pid = Int32(args[1]), let x = Double(args[3]), let y = Double(args[4]), AXIsProcessTrusted() else { exit(2) }
 func event(_ type:CGEventType,_ point:CGPoint)->CGEvent {
  let e=CGEvent(mouseEventSource:nil,mouseType:type,mouseCursorPosition:point,mouseButton:.left)!
  e.flags=[];e.setIntegerValueField(.mouseEventClickState,value:1);return e
@@ -28,7 +28,7 @@ usleep(120000)
 event(.leftMouseUp,pt).post(tap:.cghidEventTap)
 if args[2] == "keys" {
  let value=String(data:FileHandle.standardInput.readDataToEndOfFile(),encoding:.utf8) ?? ""
- guard value.utf16.count <= 256 else { exit(5) }
+ guard value.utf16.count <= 256, value.utf8.allSatisfy({ $0 < 128 }) else { exit(5) }
  let plain: [Character:CGKeyCode] = ["a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,"v":9,"b":11,"q":12,"w":13,"e":14,"r":15,"y":16,"t":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"=":24,"9":25,"7":26,"-":27,"8":28,"0":29,"]":30,"o":31,"u":32,"[":33,"i":34,"p":35,"l":37,"j":38,"\'":39,"k":40,";":41,"\\":42,",":43,"/":44,"n":45,"m":46,".":47,"`":50," ":49]
  let shifted=Array("!@#$%^&*()_+{}|:\"<>?~")
  let bases=Array("1234567890-=[]\\;\',./`")
