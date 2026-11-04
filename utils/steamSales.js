@@ -1311,6 +1311,8 @@ module.exports = {
     descriptionFooter,
     readBack,
     listingView,
+    offerFields,
+    rebuildEntries,
     LIVE_LISTING,
     REGION_WARNING,
     dec,

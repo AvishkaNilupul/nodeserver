@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const express = require("express");
 const logic = require("../utils/rivalsAccounts");
+const presentationLogic = require("../utils/rivalsPresentation");
 const { createRouter } = require("../routes/rivalsAccountRoutes");
 const {
   importReport,
@@ -108,6 +109,92 @@ test("draft uses Fresh PC category, does not infer store country from signup, ex
     logic
       .blockers(p, { ...steam, stage: "listed" }, { canSell: true })
       .includes("Steam hold changed"),
+  );
+});
+test("costume names lead the title, and only a game receipt can add received currency", () => {
+  const proofs = [
+    { hero: "Rogue", costume: "Will of Galacta" },
+    { hero: "Storm", costume: "Will of Galacta" },
+    { hero: "Daredevil MSF26", costume: "IGNITE Daredevil (2026)" },
+  ];
+  const p = {
+    gameReport: { proofs },
+    rewardAudit: { receivedChronoTokens: 1100 },
+  };
+  const unverified = logic.draft(p, {});
+  assert.match(unverified.title, /^Will of Galacta \+ IGNITE Daredevil 2026/);
+  assert.ok(unverified.title.length <= 160);
+  assert.equal(unverified.description.match(/Will of Galacta/g).length, 1);
+  assert.ok(!unverified.description.includes("1,100"));
+  const verified = logic.draft(
+    {
+      ...p,
+      rewardAudit: {
+        ...p.rewardAudit,
+        currencyEvidence: { kind: "game-claim-receipt" },
+      },
+    },
+    {},
+  );
+  assert.match(verified.description, /1,100 Chrono Tokens received/);
+  assert.match(verified.description, /not Units or Lattice/);
+});
+test("presentation import does not convert Twitch claim history into verified game inventory", () => {
+  const p = { ...prep(), gameReport: logic.validateReport(prep(), report()) };
+  const receipt = {
+    file: "receipt.png",
+    sha256: "a".repeat(64),
+    kind: "original-receipt",
+    label: "Actual receipt",
+  };
+  const manifest = {
+    createdAt: "2026-11-04T07:00:00Z",
+    sourceManifestUid: "123456789",
+    images: [receipt],
+    receiptSha256: receipt.sha256,
+    receivedChronoTokens: 1100,
+  };
+  const audit = {
+    rivalsUid: "123456789",
+    observedAt: "2026-11-04T07:00:00Z",
+    drops: [
+      { id: "reward", name: "Rogue Costume", count: 1, state: "connected" },
+      {
+        id: "other",
+        name: "Unverified extra Costume",
+        count: 1,
+        state: "connected",
+      },
+    ],
+  };
+  const result = presentationLogic.validate(p, manifest, audit);
+  assert.equal(result.rewardAudit.total, 2);
+  assert.equal(result.rewardAudit.groups["Costume rewards"], 2);
+  assert.equal(result.gameReport, undefined);
+  assert.equal(p.gameReport.proofs.length, 1);
+  assert.throws(() =>
+    presentationLogic.validate(
+      p,
+      { ...manifest, sourceManifestUid: "999999" },
+      audit,
+    ),
+  );
+  assert.throws(() =>
+    presentationLogic.validate(
+      p,
+      { ...manifest, images: [{ ...receipt, file: "../bad.png" }] },
+      audit,
+    ),
+  );
+  assert.throws(() =>
+    presentationLogic.validate(p, manifest, { ...audit, drops: [] }),
+  );
+  assert.throws(() =>
+    presentationLogic.validate(
+      p,
+      { ...manifest, receiptSha256: "b".repeat(64) },
+      audit,
+    ),
   );
 });
 async function serve(t, admin, deps = {}) {

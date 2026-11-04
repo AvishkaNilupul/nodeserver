@@ -110,16 +110,53 @@ function draft(prep, steam) {
   const proofs = prep.gameReport?.proofs || [];
   const price = Number(prep.draftPriceUsd) || 7.99;
   const country = steam?.storeCountry || null;
-  const title = `Marvel Rivals PC Steam | ${proofs.length} Claimed Costumes | Fresh Account`;
+  const groups = new Map();
+  for (const p of proofs) {
+    if (!groups.has(p.costume)) groups.set(p.costume, []);
+    groups.get(p.costume).push(p.hero.replace(/\s+MSF26$/i, ""));
+  }
+  const tail = ` | ${proofs.length} Skins | Marvel Rivals PC Steam`;
+  const costumeNames = [...groups.keys()].map((n) => n.replace(/[()]/g, ""));
+  let leading = costumeNames.join(" + ");
+  if (leading.length + tail.length > 160)
+    leading =
+      costumeNames.find((n) => n.length + tail.length <= 160) ||
+      "Verified Costumes";
+  const heroes = [];
+  for (const p of proofs) {
+    const h = p.hero.replace(/\s+MSF26$/i, "");
+    if (leading.toLowerCase().includes(h.toLowerCase()) || heroes.includes(h))
+      continue;
+    if ((leading + " | " + [...heroes, h].join(" ") + tail).length <= 160)
+      heroes.push(h);
+  }
+  const title = proofs.length
+    ? leading + (heroes.length ? " | " + heroes.join(" ") : "") + tail
+    : "Marvel Rivals PC Steam | Verification pending";
+  const currency =
+    prep.rewardAudit?.currencyEvidence?.kind === "game-claim-receipt"
+      ? prep.rewardAudit.receivedChronoTokens
+      : null;
   const description = [
     "Marvel Rivals game account on PC through Steam.",
     `Steam country: ${country || "not yet verified"}. Store purchases may depend on this country.`,
     "Fresh game profile; no ranked-ready or ranked progression claim.",
     "",
     "Costumes already claimed and verified in the actual game inventory:",
-    ...proofs.map((p) => `- ${p.hero}: ${p.costume}`),
+    ...[...groups].map(
+      ([name, heroes]) =>
+        `- ${name}${heroes.length === 1 && name.toLowerCase().includes(heroes[0].toLowerCase()) ? "" : ": " + heroes.join(", ")}`,
+    ),
     "",
     "The screenshots show this account's actual owned costumes. These rewards are already in game; no Twitch watch or drop claim is required for the listed costumes.",
+    ...(Number.isSafeInteger(currency) && currency > 0
+      ? [
+          "",
+          "BONUS REWARDS",
+          `${currency.toLocaleString("en-US")} Chrono Tokens received in the recorded Claim-All receipt. These are seasonal Battle Pass tokens, not Units or Lattice; the receipt records the amount received, not a permanent currency balance.`,
+          "Additional claimed Twitch cosmetics include sprays, nameplates, emotes, emojis and moods. The seven costumes above are the inventory-verified skin promise.",
+        ]
+      : []),
     ...(prep.deliveryAudit?.ok
       ? [
           "",
@@ -178,6 +215,21 @@ function publicRow(prep, steam, permission, listing = null) {
     completedAt: r?.completedAt || null,
     expectedCount: prep.expectedRewards?.length || 0,
     verifiedCount: r?.proofs?.length || 0,
+    presentation: (prep.presentation?.images || []).map((p) => ({
+      label: p.label,
+      kind: p.kind,
+      url: `/api/rivals/preparations/${encodeURIComponent(prep._id)}/proof/${encodeURIComponent(p.file)}`,
+    })),
+    rewards: prep.rewardAudit
+      ? {
+          source:
+            "Twitch claim history; game inventory verification is separate",
+          total: prep.rewardAudit.total,
+          groups: prep.rewardAudit.groups,
+          items: prep.rewardAudit.items,
+          receivedChronoTokens: prep.rewardAudit.receivedChronoTokens,
+        }
+      : null,
     proofs: (r?.proofs || []).map((p) => ({
       hero: p.hero,
       costume: p.costume,

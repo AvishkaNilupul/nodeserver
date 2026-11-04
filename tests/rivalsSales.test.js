@@ -33,6 +33,7 @@ const fakeEld = {
   epicPermission: async () => ({ canSell: true, error: "" }),
   uploadImage: async () => {
     if (uploadFail) throw Error("upload failed");
+    if (uploadObserver) uploadObserver();
     return {
       smallImage: "s.png",
       largeImage: "l.png",
@@ -58,6 +59,21 @@ const fakeEld = {
     return { id };
   },
   getAccountOffer: async (id) => offers.get(id),
+  updateAccountOffer: async (id, o) => {
+    updateCount++;
+    assert.ok(1 + o.offerImages.length <= 5);
+    const old = offers.get(id);
+    Object.assign(old, {
+      offerTitle: o.title,
+      title: o.title,
+      description: o.description,
+      pricePerUnit: { currency: "USD", amount: o.priceUsd },
+      mainOfferImage: o.mainOfferImage,
+      offerImages: o.offerImages,
+      entries: o.entries,
+      quantity: o.entries.length,
+    });
+  },
   getAccountEntries: async (id) =>
     offers.get(id).entries.map((e, i) => ({
       ...e,
@@ -103,6 +119,8 @@ test.beforeEach(async () => {
   offers = new Map();
   orders = [];
   createCount = 0;
+  updateCount = 0;
+  uploadObserver = null;
   uploadFail = createFail = mismatch = false;
   service = createService({
     db,
@@ -112,6 +130,67 @@ test.beforeEach(async () => {
     Listing,
     proofDir: dir,
   });
+});
+let updateCount = 0,
+  uploadObserver = null;
+async function attachPresentation(id) {
+  const p = await db.collection("rivalspreparations").findOne({ _id: id });
+  await db
+    .collection("rivalspreparations")
+    .updateOne(
+      { _id: id },
+      {
+        $set: {
+          presentation: {
+            sourceManifestUid: p.gameReport.rivalsUid,
+            images: [
+              {
+                file: "rogue.png",
+                sha256: digest(Buffer.from("image")),
+                kind: "overview",
+                label: "Combined proof",
+              },
+            ],
+          },
+          rewardAudit: {
+            receivedChronoTokens: 1100,
+            currencyEvidence: { kind: "game-claim-receipt" },
+          },
+        },
+      },
+    );
+}
+test("title and combined-photo update preserves every delivery field, price and stock unit", async () => {
+  const { id } = await seed();
+  const l = await service.publish(id);
+  await attachPresentation(id);
+  const offerId = l.url.split("/oa/")[1],
+    before = JSON.stringify(await fakeEld.getAccountEntries(offerId));
+  const sessions = await BuyerMailSession.countDocuments();
+  const result = await service.updatePresentation(id);
+  assert.equal(updateCount, 1);
+  assert.equal(result.deliveryUnchanged, true);
+  assert.equal(
+    JSON.stringify(await fakeEld.getAccountEntries(offerId)),
+    before,
+  );
+  assert.equal(result.priceUsd, 7.99);
+  assert.equal(await BuyerMailSession.countDocuments(), sessions);
+  assert.match(result.title, /^Will of Galacta/);
+  assert.match(offers.get(offerId).description, /1,100 Chrono Tokens received/);
+});
+test("an account leaving remote stock while images upload is never re-added by the edit", async () => {
+  const { id } = await seed();
+  const l = await service.publish(id);
+  await attachPresentation(id);
+  const offer = offers.get(l.url.split("/oa/")[1]);
+  uploadObserver = () => {
+    offer.entries = [];
+    offer.quantity = 0;
+  };
+  await assert.rejects(service.updatePresentation(id), /Stock changed/);
+  assert.equal(updateCount, 0);
+  assert.equal(offer.entries.length, 0);
 });
 async function seed() {
   const id = "rivals-test-preparation";
@@ -320,27 +399,23 @@ test("seven verified costumes retain all evidence while the offer obeys the five
       costume: i === 6 ? "IGNITE event costume" : "Will of Galacta",
     });
   }
-  await db
-    .collection("rivalspreparations")
-    .updateOne(
-      { _id: id },
-      {
-        $set: {
-          expectedRewards: proofs.map((p) => ({ id: p.rewardId })),
-          reservedCount: 7,
-          "gameReport.proofs": proofs,
-        },
+  await db.collection("rivalspreparations").updateOne(
+    { _id: id },
+    {
+      $set: {
+        expectedRewards: proofs.map((p) => ({ id: p.rewardId })),
+        reservedCount: 7,
+        "gameReport.proofs": proofs,
       },
-    );
+    },
+  );
   for (let i = 0; i < 6; i++)
-    await db
-      .collection("droplogs")
-      .insertOne({
-        account: prep.twitchId,
-        soldSetId: "test-hold",
-        soldToUsername: "manual",
-        soldAt: new Date(),
-      });
+    await db.collection("droplogs").insertOne({
+      account: prep.twitchId,
+      soldSetId: "test-hold",
+      soldToUsername: "manual",
+      soldAt: new Date(),
+    });
   await service.publish(id);
   assert.equal(offers.values().next().value.offerImages.length, 4);
   assert.equal(
@@ -351,13 +426,11 @@ test("seven verified costumes retain all evidence while the offer obeys the five
 });
 test("another account using the same inbox cannot have its buyer session replaced", async () => {
   const { id } = await seed();
-  await db
-    .collection("buyermailsessions")
-    .insertOne({
-      steamAccountId: new mongoose.Types.ObjectId(),
-      inboxAddress: "inbox@example.test",
-      revokedAt: null,
-    });
+  await db.collection("buyermailsessions").insertOne({
+    steamAccountId: new mongoose.Types.ObjectId(),
+    inboxAddress: "inbox@example.test",
+    revokedAt: null,
+  });
   await assert.rejects(
     service.publish(id),
     /another active buyer mail session/,

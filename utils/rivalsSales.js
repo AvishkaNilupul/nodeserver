@@ -123,7 +123,10 @@ function createService(over = {}) {
     if (permission.error || permission.canSell !== true)
       throw fail("Eldorado account category access is unavailable");
     const root = over.proofDir || proofRoot();
-    for (const p of prep.gameReport.proofs)
+    for (const p of [
+      ...prep.gameReport.proofs,
+      ...(prep.presentation?.images || []),
+    ])
       if (digest(await fs.readFile(path.join(root, id, p.file))) !== p.sha256)
         throw fail("Costume screenshot changed");
     const cfg = await sales().getConfig();
@@ -199,7 +202,9 @@ function createService(over = {}) {
         )
           throw fail("Invalid draft price");
         const copy = draft(prep, steam);
-        const selectedProofs = listingProofs(prep);
+        const selectedProofs = prep.presentation?.images?.length
+          ? prep.presentation.images
+          : listingProofs(prep);
         listing = new (Listing())({
           market: "eldorado",
           kind: "rivals",
@@ -372,7 +377,178 @@ function createService(over = {}) {
       }
     });
   }
-  return { checkDelivery, publish, preflight };
+  async function updatePresentation(id) {
+    return sales()._shared.withLock(async () => {
+      const prep = await db()
+        .collection("rivalspreparations")
+        .findOne({ _id: id });
+      if (
+        prep?.publishState !== "listed" ||
+        !prep.listingId ||
+        prep.presentation?.sourceManifestUid !== prep.gameReport?.rivalsUid
+      )
+        throw fail("Import this account’s verified presentation first");
+      const listing = await Listing().findById(prep.listingId);
+      if (
+        !listing ||
+        listing.kind !== "rivals" ||
+        listing.preparationId !== id ||
+        !listing.externalId ||
+        !["active", "paused"].includes(listing.status)
+      )
+        throw fail("No editable live Rivals listing");
+      const steam = await db()
+        .collection("steamaccounts")
+        .findOne(
+          { _id: prep.steamId },
+          {
+            projection: {
+              stage: 1,
+              soldAt: 1,
+              storeCountry: 1,
+              signupCountry: 1,
+            },
+          },
+        );
+      if (!steam || steam.stage !== "listed" || steam.soldAt)
+        throw fail("Account has already left listed stock");
+      const selected = prep.presentation.images;
+      if (!selected.length || selected.length > 5)
+        throw fail("Eldorado allows up to five images");
+      const images = [];
+      for (const p of selected) {
+        if (
+          !/^[a-z0-9-]+\.png$/.test(p.file) ||
+          !/^[a-f0-9]{64}$/.test(p.sha256)
+        )
+          throw fail("Invalid presentation asset");
+        const file = path.join(over.proofDir || proofRoot(), id, p.file),
+          bytes = await fs.readFile(file);
+        if (bytes.length > 10000000 || digest(bytes) !== p.sha256)
+          throw fail("Presentation evidence changed");
+        images.push(await eld().uploadImage(file));
+      }
+      // Upload before the final stock read, so large transfers cannot leave
+      // an old snapshot waiting to be written back.
+      const remote = await eld().getAccountEntries(listing.externalId),
+        offer = await eld().getAccountOffer(listing.externalId);
+      if (
+        offer.quantity !== 1 ||
+        remote.length !== 1 ||
+        listing.accounts.filter((u) => u.state === "listed").length !== 1 ||
+        !listing.accounts.some(
+          (u) =>
+            u.state === "listed" &&
+            u.login === remote[0].accountLogin.toLowerCase(),
+        )
+      )
+        throw fail("Stock changed; do not rewrite delivery entries");
+      const cfg = await sales().getConfig();
+      const entries = await sales()._shared.rebuildEntries(
+        listing,
+        remote,
+        cfg,
+        { offer },
+      );
+      const fingerprint = (rows) =>
+        digest(
+          Buffer.from(
+            JSON.stringify(
+              rows
+                .map((e) =>
+                  [
+                    "id",
+                    "accountLogin",
+                    "accountPassword",
+                    "emailProviderUrl",
+                    "emailLogin",
+                    "emailPassword",
+                    "additionalInfo",
+                  ].map((k) => e[k] ?? ""),
+                )
+                .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+            ),
+          ),
+        );
+      const beforeHash = fingerprint(remote);
+      if (fingerprint(entries) !== beforeHash)
+        throw fail("Delivery fields differ; presentation edit stopped");
+      const copy = draft(prep, steam);
+      if (copy.title.length > 160 || copy.description.length > 2000)
+        throw fail("Presentation text exceeds Eldorado limits");
+      const fields = sales()._shared.offerFields(listing, offer, {
+        title: copy.title,
+        description: copy.description,
+      });
+      const before = {
+        title: offer.offerTitle,
+        description: offer.description,
+        priceUsd: offer.pricePerUnit?.amount,
+        quantity: offer.quantity,
+        state: offer.offerState,
+        mainOfferImage: offer.mainOfferImage,
+        offerImages: offer.offerImages || [],
+        stockFingerprint: beforeHash,
+      };
+      await eld().updateAccountOffer(listing.externalId, {
+        ...fields,
+        mainOfferImage: images[0],
+        offerImages: images.slice(1),
+        entries,
+      });
+      const after = await sales()._shared.readBack(listing);
+      const stockChanged =
+        after.offer.quantity === 0 && after.entries.length === 0;
+      if (!stockChanged && fingerprint(after.entries) !== beforeHash)
+        throw fail(
+          "Remote delivery verification changed; reconcile before another edit",
+          502,
+        );
+      if (
+        after.offer.offerTitle !== copy.title ||
+        after.offer.description !== copy.description ||
+        Number(after.offer.pricePerUnit?.amount) !== Number(before.priceUsd) ||
+        (after.offer.offerImages || []).length !== images.length - 1
+      )
+        throw fail("Remote presentation verification incomplete", 502);
+      listing.title = copy.title;
+      listing.description = copy.description;
+      listing.mainOfferImage = images[0];
+      listing.coverSource = `/api/rivals/preparations/${id}/proof/${selected[0].file}`;
+      listing.lastSyncAt = new Date();
+      listing.lastError = "";
+      await listing.save();
+      await db()
+        .collection("rivalspreparations")
+        .updateOne(
+          { _id: id, listingId: listing._id },
+          {
+            $set: {
+              "presentation.remoteImages": images,
+              presentationUpdatedAt: new Date(),
+              presentationUpdateAudit: {
+                before,
+                after: {
+                  title: copy.title,
+                  description: copy.description,
+                  images: images.length,
+                  priceUsd: before.priceUsd,
+                  stockFingerprint: stockChanged ? null : beforeHash,
+                  stockChanged,
+                },
+              },
+            },
+          },
+        );
+      return {
+        ...sales()._shared.listingView(listing.toObject()),
+        images: images.length,
+        stockChanged,
+        deliveryUnchanged: !stockChanged,
+      };
+    });
+  }
+  return { checkDelivery, publish, preflight, updatePresentation };
 }
 module.exports = createService();
 module.exports.createService = createService;

@@ -33,6 +33,24 @@
       ),
       el("p", "Steam · " + a.phase + " · Twitch " + a.twitchLogin),
     );
+    if (a.presentation?.length) {
+      c.append(el("h3", "Combined listing pictures"));
+      const combined = el("div", undefined, "proofs");
+      for (const p of a.presentation) {
+        const link = el("a");
+        link.href = p.url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        const img = el("img");
+        img.src = p.url;
+        img.alt = p.label;
+        img.loading = "lazy";
+        link.append(img, el("span", p.label));
+        combined.append(link);
+      }
+      c.append(combined);
+    }
+    c.append(el("h3", "Original costume proof"));
     const gallery = el("div", undefined, "proofs");
     for (const p of a.proofs) {
       const link = el("a");
@@ -47,6 +65,39 @@
       gallery.append(link);
     }
     c.append(gallery);
+    if (a.rewards) {
+      const history = el("details");
+      history.append(
+        el(
+          "summary",
+          a.rewards.total + " Twitch reward records · view full list",
+        ),
+        el(
+          "p",
+          "Twitch claim history; the " +
+            a.verifiedCount +
+            " inventory-verified costumes above are the listing promise.",
+        ),
+        el(
+          "p",
+          a.rewards.receivedChronoTokens.toLocaleString() +
+            " Chrono Tokens received in the saved game claim receipt. This records a claim, not a permanent balance.",
+        ),
+      );
+      const groups = el(
+          "p",
+          Object.entries(a.rewards.groups)
+            .map(([k, v]) => v + " " + k)
+            .join(" · "),
+        ),
+        list = el("ul");
+      for (const item of a.rewards.items)
+        list.append(
+          el("li", item.name + (item.count > 1 ? " × " + item.count : "")),
+        );
+      history.append(groups, list);
+      c.append(history);
+    }
     const cols = el("div", undefined, "columns"),
       left = el("section"),
       right = el("section");
@@ -130,6 +181,29 @@
         link.rel = "noopener";
         right.append(link);
       }
+      const update = el("button", "Update listing content");
+      update.disabled =
+        !a.presentation?.length ||
+        !["active", "paused"].includes(a.listing.status);
+      update.onclick = async () => {
+        update.disabled = true;
+        status.textContent = "Updating listing pictures and copy…";
+        try {
+          await api(
+            "/api/rivals/preparations/" +
+              encodeURIComponent(a.id) +
+              "/update-listing",
+            "POST",
+            {},
+          );
+          await load();
+        } catch (e) {
+          status.textContent = e.message;
+        } finally {
+          update.disabled = false;
+        }
+      };
+      right.append(update);
     } else {
       const check = el("button", "Check site email delivery");
       check.onclick = async () => {

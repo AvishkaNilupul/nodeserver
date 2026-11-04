@@ -49,6 +49,8 @@ function createRouter({
                 listingId: 1,
                 publishState: 1,
                 deliveryAudit: 1,
+                presentation: 1,
+                rewardAudit: 1,
               },
             },
           )
@@ -121,10 +123,14 @@ function createRouter({
     try {
       const p = await getDb()
         .collection("rivalspreparations")
-        .findOne({ _id: req.params.id }, { projection: { gameReport: 1 } });
-      const proof = p?.gameReport?.proofs?.find(
-        (x) => x.file === req.params.file,
-      );
+        .findOne(
+          { _id: req.params.id },
+          { projection: { gameReport: 1, presentation: 1 } },
+        );
+      const proof = [
+        ...(p?.gameReport?.proofs || []),
+        ...(p?.presentation?.images || []),
+      ].find((x) => x.file === req.params.file);
       if (!proof) return res.sendStatus(404);
       const bytes = await fs.readFile(
         path.join(proofRoot(), req.params.id, proof.file),
@@ -228,6 +234,7 @@ function createRouter({
   for (const [action, fn] of [
     ["delivery/check", "checkDelivery"],
     ["publish", "publish"],
+    ["update-listing", "updatePresentation"],
   ]) {
     router.post("/api/rivals/preparations/:id/" + action, async (req, res) => {
       try {
@@ -238,14 +245,12 @@ function createRouter({
         );
         res.json({ success: true, result });
       } catch (e) {
-        res
-          .status(e.user ? e.status || 409 : 502)
-          .json({
-            success: false,
-            message: e.user
-              ? e.message
-              : "Rivals operation failed; account remains reserved for review",
-          });
+        res.status(e.user ? e.status || 409 : 502).json({
+          success: false,
+          message: e.user
+            ? e.message
+            : "Rivals operation failed; account remains reserved for review",
+        });
       }
     });
   }

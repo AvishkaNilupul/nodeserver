@@ -30,3 +30,25 @@ publish without touching its cookie jar: refresh blocked, Set-Cookie stripped,
 settings writes refused. Never print delivery entries or credential responses.
 The standard10% account fee estimate rounds up to a cent. Net excludes stock,
 support and withdrawal costs. A draft price is not evidence of market demand.
+
+## Listing presentation and reward history
+
+Titles lead with verified costume names, then hero names that fit the160-character
+limit. Repeated costume sets are grouped once in the description. Twitch inventory
+is a separate claim-history audit; it cannot promote extra costumes to game-verified
+stock. Received Chrono Tokens are included only with an original game claim receipt,
+and are described as seasonal Battle Pass currency rather than a permanent balance.
+
+`build-listing-images.cjs` makes a cropped overview and two full original contact
+sheets plus the original claim receipt. It validates source hashes and compares the
+visible decoded pixels at1:1 in every sheet. Original files remain untouched. This
+layout currently expects1600x1035 source captures. No generated artwork is used.
+`import-presentation.cjs` verifies profile/reward mapping, all image hashes and the
+five-image/10MB limits before attaching metadata to the existing preparation.
+
+The guarded operator `publish-eldorado.cjs --update ID` uploads images first, then
+reads current stock, rebuilds entries using Steam's normal delivery flow, and
+refuses any changed credential/session/note fingerprint. It preserves price and
+existing entry IDs. If the unit sold before that read, it never puts it back.
+The update audit stores old public offer fields and a stock hash, never passwords.
+Any rollback must use current unsold entries, not the historical stock snapshot.

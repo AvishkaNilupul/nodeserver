@@ -28,10 +28,12 @@ settings.saveSettings = () => {
 async function main() {
   const [action, id] = process.argv.slice(2);
   if (
-    !["--check", "--publish"].includes(action) ||
+    !["--check", "--publish", "--update"].includes(action) ||
     !require("../../utils/rivalsAccounts").validId(id)
   )
-    throw Error("Usage: publish-eldorado.cjs --check|--publish PREPARATION_ID");
+    throw Error(
+      "Usage: publish-eldorado.cjs --check|--publish|--update PREPARATION_ID",
+    );
   const mongoose = require("mongoose");
   await mongoose.connect(process.env.MONGO_URI, {
     autoIndex: false,
@@ -40,9 +42,11 @@ async function main() {
   try {
     const sales = require("../../utils/rivalsSales");
     const result =
-      action === "--publish"
-        ? await sales.publish(id, "rivals-operator")
-        : await sales.checkDelivery(id);
+      action === "--update"
+        ? await sales.updatePresentation(id)
+        : action === "--publish"
+          ? await sales.publish(id, "rivals-operator")
+          : await sales.checkDelivery(id);
     console.log(JSON.stringify({ success: true, result, guards: counts }));
   } finally {
     await mongoose.disconnect();
