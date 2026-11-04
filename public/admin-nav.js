@@ -69,6 +69,14 @@
     epicAccounts:
       '<rect x="2" y="4" width="20" height="16" ' +
       'rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path>',
+    steamAccounts:
+      '<circle cx="12" cy="12" r="10"></circle>' +
+      '<circle cx="15.5" cy="9.5" r="2.5"></circle>' +
+      '<circle cx="8.5" cy="15" r="1.8"></circle>' +
+      '<path d="M10.1 14.1l3.4-2.9"></path>',
+    soop:
+      '<circle cx="12" cy="12" r="10"></circle>' +
+      '<polygon points="10 8 16 12 10 16 10 8"></polygon>',
     backup:
       '<ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>' +
       '<path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>' +
@@ -90,6 +98,12 @@
       '<circle cx="12" cy="12" r="10"></circle>' +
       '<line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>',
     chevron: '<path d="M9 18l6-6-6-6"></path>',
+    aiChat:
+      '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 ' +
+      '2z"></path><path d="M9.5 9.5l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"></path>',
+    proposals:
+      '<path d="M9 11l3 3L22 4"></path>' +
+      '<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>',
   };
 
   // Every href this script manages (either as a standalone link or grouped
@@ -109,26 +123,50 @@
           superOnly: true,
         },
         {
+          href: "/twitch-claim.html",
+          label: "Claim race",
+          icon:
+            '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>',
+          superOnly: true,
+        },
+        {
           href: "/bots.html",
           label: "Bots",
           icon: ICONS.bots,
           superOnly: true,
         },
         {
-          href: "/noclaim-farm.html",
-          label: "No-claim farming",
+          href: "/do-servers.html",
+          label: "DO servers",
           icon:
-            '<path d="M12 2v6M12 22v-6M4.9 4.9l4.2 4.2M14.9 14.9l4.2 4.2M2 ' +
-            '12h6M22 12h-6M4.9 19.1l4.2-4.2M14.9 9.1l4.2-4.2"></path>',
+            '<rect x="2" y="2" width="20" height="8" rx="2"></rect>' +
+            '<rect x="2" y="14" width="20" height="8" rx="2"></rect>' +
+            '<path d="M6 6h.01M6 18h.01"></path>',
           superOnly: true,
         },
         {
-          href: "/webbot-farm.html",
-          label: "Web-token farm",
+          href: "/farm2.html",
+          label: "Auto farm engine",
           icon:
-            '<circle cx="12" cy="12" r="10"></circle>' +
-            '<path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 ' +
-            '10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>',
+            '<path d="M3 6h18M3 12h18M3 18h18"></path>' +
+            '<circle cx="7" cy="6" r="1.6"></circle>' +
+            '<circle cx="13" cy="12" r="1.6"></circle>' +
+            '<circle cx="9" cy="18" r="1.6"></circle>',
+          superOnly: true,
+        },
+        {
+          href: "/farm-sizing.html",
+          label: "Fleet sizing",
+          icon:
+            '<path d="M3 20V10M9 20V4M15 20v-7M21 20v-11"></path>',
+          superOnly: true,
+        },
+        {
+          href: "/unclaimed-farms.html",
+          label: "Unclaimed farms",
+          icon:
+            '<path d="M12 2v6M12 22v-6M4.9 4.9l4.2 4.2M14.9 14.9l4.2 4.2M2 ' +
+            '12h6M22 12h-6M4.9 19.1l4.2-4.2M14.9 9.1l4.2-4.2"></path>',
           superOnly: true,
         },
         {
@@ -140,6 +178,12 @@
         {
           href: "/account-pool.html",
           label: "Account pool",
+          icon: ICONS.accountPool,
+          superOnly: true,
+        },
+        {
+          href: "/spent-accounts.html",
+          label: "Spent accounts",
           icon: ICONS.accountPool,
           superOnly: true,
         },
@@ -181,8 +225,26 @@
           superOnly: true,
         },
         {
+          href: "/playerauctions.html",
+          label: "PlayerAuctions",
+          icon: ICONS.listings,
+          superOnly: true,
+        },
+        {
+          href: "/funpay-resale.html",
+          label: "FunPay Resale",
+          icon: ICONS.listings,
+          superOnly: true,
+        },
+        {
           href: "/bulk-orders.html",
           label: "Bulk orders",
+          icon: ICONS.bulkOrders,
+          superOnly: true,
+        },
+        {
+          href: "/bulk-packs.html",
+          label: "Bulk packs",
           icon: ICONS.bulkOrders,
           superOnly: true,
         },
@@ -223,6 +285,49 @@
           icon: ICONS.epicAccounts,
           superOnly: true,
         },
+        {
+          href: "/steam-accounts.html",
+          label: "Steam accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/valorant-accounts.html",
+          label: "Valorant accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/outlook/",
+          label: "Outlook inboxes",
+          icon: ICONS.epicAccounts,
+          superOnly: true,
+        },
+      ],
+    },
+    {
+      key: "soop",
+      label: "SOOP",
+      icon: ICONS.soop,
+      items: [
+        {
+          href: "/admin/discord-farm",
+          label: "Discord Farm",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
+        {
+          href: "/soop.html",
+          label: "SOOP farm",
+          icon: ICONS.soop,
+          superOnly: true,
+        },
+        {
+          href: "/chzzk.html",
+          label: "CHZZK farm",
+          icon: ICONS.soop,
+          superOnly: true,
+        },
       ],
     },
     {
@@ -230,6 +335,44 @@
       label: "Admin",
       icon: ICONS.admins,
       items: [
+        {
+          href: "/system-health.html",
+          label: "System health",
+          // A heartbeat, matching the activity log's pulse line beside it —
+          // these two are the pair you open when something feels wrong.
+          icon:
+            '<path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>',
+          superOnly: true,
+        },
+        {
+          href: "/market-console.html",
+          label: "Marketplace console",
+          // Sits between health and the activity log on purpose: health says
+          // whether something is wrong, this says what a marketplace actually
+          // sold, sent and made, and the activity log is the raw feed.
+          icon:
+            '<path d="M3 3h18l-2 5H5L3 3z"></path>' +
+            '<path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"></path>' +
+            '<path d="M9 13h6"></path>',
+          superOnly: true,
+        },
+        {
+          href: "/price-tracker.html",
+          label: "Price tracker",
+          // Right under the console: the console says what a market sold and
+          // made, this says what each market really pays for the same items and
+          // what a listing should cost. Read-only.
+          icon:
+            '<path d="M3 17l6-6 4 4 8-8"></path>' +
+            '<path d="M14 7h7v7"></path>',
+          superOnly: true,
+        },
+        {
+          href: "/activity.html",
+          label: "Activity log",
+          icon: '<path d="M3 12h4l3 8 4-16 3 8h4"></path>',
+          superOnly: true,
+        },
         {
           href: "/backup.html",
           label: "Backup",
@@ -265,6 +408,28 @@
     },
   ];
   var STANDALONE = [
+    {
+      href: "/ai-chat.html",
+      label: "AI Chat",
+      icon: ICONS.aiChat,
+      superOnly: false,
+    },
+    {
+      href: "/ai-proposals.html",
+      label: "Coworker proposals",
+      icon: ICONS.proposals,
+      superOnly: true,
+    },
+    {
+      // Personal kanji study page (public/kanji/): its own phone-first app,
+      // no server routes, works offline.
+      href: "/kanji/",
+      label: "Kanji practice",
+      icon:
+        '<path d="M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2z"></path>' +
+        '<path d="M22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8z"></path>',
+      superOnly: false,
+    },
     {
       href: "/settings.html",
       label: "Settings",
@@ -317,14 +482,20 @@
       icon(ICONS.chevron) +
       "</span>";
 
+    // The menu is a 0fr/1fr grid so opening and closing can animate; the
+    // links live in an inner track so the group's padding and rule line
+    // collapse with it instead of leaving a sliver behind when closed.
     var menu = document.createElement("div");
     menu.className = "nav-group-menu";
+    var inner = document.createElement("div");
+    inner.className = "nav-group-menu-inner";
+    menu.appendChild(inner);
 
     var hasActive = false;
     items.forEach(function (it) {
       var a = buildLink(it);
       if (a.className === "active") hasActive = true;
-      menu.appendChild(a);
+      inner.appendChild(a);
     });
 
     if (hasActive) {
@@ -390,6 +561,16 @@
       var label = isSuper ? "Super Admin" : "Seller";
       roleEl.innerText = label + (admin && admin.id ? " · " + admin.id : "");
     }
+
+    // The group holding the current page is expanded above, so settle the
+    // sidebar in its final shape first, then let later toggles animate.
+    revealActiveLink();
+    var nav = links.closest(".nav");
+    if (nav) {
+      requestAnimationFrame(function () {
+        nav.classList.add("nav-anim");
+      });
+    }
   }
 
   // Mobile navigation: on small screens the left sidebar becomes an
@@ -413,10 +594,15 @@
       ".mobile-topbar .hamburger{width:40px;height:40px;border-radius:10px;" +
       "border:1px solid var(--line);background:var(--surface);color:var(--ink);" +
       "display:grid;place-items:center;cursor:pointer;flex-shrink:0;}" +
+      // admin-nav.css (linked in each page's <head>) carries a copy of the
+      // closed drawer below, so phones never see the sidebar flash on load.
       ".nav{position:fixed;top:0;left:0;bottom:0;z-index:200;width:264px;" +
-      "transform:translateX(-100%);transition:transform .25s ease;" +
+      "height:auto;min-height:0;" +
+      "transform:translateX(-100%);transition:transform .25s ease;}" +
+      // Shadow only while open: on the closed drawer it bled back over the
+      // page's left edge as a grey strip.
+      ".nav.open{transform:translateX(0);" +
       "box-shadow:0 0 50px rgba(15,23,42,.3);}" +
-      ".nav.open{transform:translateX(0);}" +
       ".nav-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.45);" +
       "z-index:180;}" +
       ".nav-backdrop.show{display:block;}" +
@@ -443,13 +629,20 @@
     function open() {
       nav.classList.add("open");
       backdrop.classList.add("show");
+      // Lock the page underneath, or a flick that runs past the end of the
+      // menu carries on scrolling the content behind the drawer.
+      document.documentElement.classList.add("nav-drawer-open");
     }
     function close() {
       nav.classList.remove("open");
       backdrop.classList.remove("show");
+      document.documentElement.classList.remove("nav-drawer-open");
     }
     bar.querySelector(".hamburger").addEventListener("click", open);
     backdrop.addEventListener("click", close);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && nav.classList.contains("open")) close();
+    });
     // Delegated (not per-link) so links added dynamically by apply() —
     // including everything inside the dropdown groups — are covered without
     // needing their own listener. A group's toggle button is intentionally
@@ -477,18 +670,132 @@
       ".nav-group-toggle .chev svg{width:14px;height:14px;}" +
       ".nav-group.open>.nav-group-toggle .chev{transform:rotate(90deg);}" +
       ".nav-group.has-active>.nav-group-toggle{color:var(--accent);font-weight:600;}" +
-      ".nav-group-menu{display:none;flex-direction:column;gap:2px;" +
-      "padding:2px 0 4px 21px;border-left:1px solid var(--line);margin-left:24px;}" +
-      ".nav-group.open>.nav-group-menu{display:flex;}" +
+      ".nav-group-menu{display:grid;grid-template-rows:0fr;overflow:hidden;}" +
+      ".nav-group.open>.nav-group-menu{grid-template-rows:1fr;}" +
+      // Vertical padding only while open — a 0fr track can't shrink below its
+      // item's padding, so leaving it on would keep every closed group a few
+      // pixels tall and leave a stub of the rule line behind.
+      ".nav-group-menu-inner{min-height:0;overflow:hidden;display:flex;" +
+      "flex-direction:column;gap:2px;padding:0 0 0 21px;" +
+      "border-left:1px solid var(--line);margin-left:24px;}" +
+      ".nav-group.open>.nav-group-menu>.nav-group-menu-inner{padding-top:2px;" +
+      "padding-bottom:4px;}" +
       ".nav-group-menu a{font-size:13.5px;padding:8px 10px;}" +
-      ".nav-group-menu a svg{width:15px;height:15px;flex-shrink:0;}";
+      ".nav-group-menu a svg{width:15px;height:15px;flex-shrink:0;}" +
+      // Only animate once the sidebar has painted, so the group holding the
+      // current page doesn't slide open every single navigation.
+      ".nav.nav-anim .nav-group-menu{transition:grid-template-rows .18s ease;}" +
+      ".nav.nav-anim .nav-group-menu-inner{transition:padding .18s ease;}" +
+      "@media (prefers-reduced-motion:reduce){" +
+      ".nav.nav-anim .nav-group-menu,.nav.nav-anim .nav-group-menu-inner{" +
+      "transition:none;}" +
+      ".nav-group-toggle .chev{transition:none;}}" +
+      navScrollCss();
     var style = document.createElement("style");
     style.id = "nav-group-style";
     style.textContent = css;
     document.head.appendChild(style);
   }
 
+  // Sidebar scrolling.
+  //
+  // Every page writes its own ".nav" styles, and almost all of them left the
+  // link list with no scroll container of its own. Once the dropdown groups
+  // are expanded the list is far taller than the sidebar — on a 1280x800
+  // screen roughly 650-960px of it lands past the bottom edge — and because
+  // the pages that pin the sidebar to the viewport also lock the document
+  // (body{height:100vh;overflow:hidden}) or pin it with position:sticky,
+  // there is no scroll anywhere in the chain that can bring those links back.
+  // The wheel does nothing, touch does nothing: the bottom of the menu is
+  // simply unreachable.
+  //
+  // These rules give the list its own scroll region on every page and pin the
+  // sidebars the page left in normal flow so they stop sliding away with the
+  // main column. They are qualified by class so they outrank each page's own
+  // ".nav .links" rules no matter which stylesheet came first.
+  function navScrollCss() {
+    return (
+      ".nav.nav-scroll{overflow:hidden;}" +
+      ".nav.nav-scroll>.brand,.nav.nav-scroll>.me{flex-shrink:0;}" +
+      ".nav.nav-scroll>.links{flex:1 1 auto;min-height:0;overflow-y:auto;" +
+      "overflow-x:hidden;overscroll-behavior:contain;" +
+      "-webkit-overflow-scrolling:touch;scrollbar-width:thin;" +
+      "scrollbar-color:var(--line) transparent;}" +
+      ".nav.nav-scroll>.links::-webkit-scrollbar{width:8px;}" +
+      ".nav.nav-scroll>.links::-webkit-scrollbar-track{background:transparent;}" +
+      ".nav.nav-scroll>.links::-webkit-scrollbar-thumb{border-radius:8px;" +
+      "background:var(--line);border:2px solid transparent;background-clip:content-box;}" +
+      ".nav.nav-scroll>.links:hover::-webkit-scrollbar-thumb{background:var(--muted);" +
+      "background-clip:content-box;}" +
+      // Desktop only: mobile turns .nav into a fixed off-canvas drawer, which
+      // already spans the viewport and must not be re-positioned here.
+      "@media (min-width:769px){" +
+      ".nav.nav-scroll{max-height:100vh;max-height:100dvh;}" +
+      ".nav.nav-pin{position:sticky;top:0;align-self:flex-start;" +
+      "height:100vh;height:100dvh;}}" +
+      // Holding the drawer open shouldn't let the page behind it scroll.
+      "@media (max-width:768px){" +
+      "html.nav-drawer-open,html.nav-drawer-open body{overflow:hidden;}}"
+    );
+  }
+
+  // Give the sidebar its scroll region, and pin it if the page left it in
+  // normal flow. Read the position before any of our own CSS is injected:
+  // the mobile drawer rules below make every .nav position:fixed, which would
+  // otherwise hide whether the page itself wanted a flow-positioned sidebar.
+  //
+  // On a phone admin-nav.css has already set those drawer rules from <head>.
+  // The pin only matters on wide screens (its rules sit in a min-width:769px
+  // block), so a phone reads the position later, once the screen is wide (a
+  // rotated tablet, a widened window). Never switch the drawer rules off to
+  // peek: that gives the closed drawer a starting point, and it slides shut on
+  // every page load.
+  function markNavScroll() {
+    var nav = document.querySelector(".nav");
+    if (!nav) return;
+    nav.classList.add("nav-scroll");
+    function pinIfInFlow() {
+      var pos = window.getComputedStyle(nav).position;
+      if (pos === "static" || pos === "relative") {
+        nav.classList.add("nav-pin");
+      }
+    }
+    var phone = window.matchMedia("(max-width:768px)");
+    if (!phone.matches) return pinIfInFlow();
+    function onChange() {
+      if (phone.matches) return;
+      if (phone.removeEventListener) phone.removeEventListener("change", onChange);
+      else phone.removeListener(onChange);
+      pinIfInFlow();
+    }
+    if (phone.addEventListener) phone.addEventListener("change", onChange);
+    else phone.addListener(onChange);
+  }
+
+  // Bring the current page's link into view when it sits below the fold of a
+  // scrolled sidebar — scrolling the list itself (never the page), and only
+  // as far as it takes, so the top of the menu stays put whenever it already
+  // fits.
+  function revealActiveLink() {
+    var links = document.querySelector(".nav .links");
+    if (!links) return;
+    var active = links.querySelector("a.active");
+    if (!active || links.scrollHeight <= links.clientHeight + 1) return;
+
+    var pad = 12; // don't leave the link flush against the edge
+    var top = active.offsetTop - links.offsetTop;
+    var bottom = top + active.offsetHeight;
+    if (bottom + pad > links.scrollTop + links.clientHeight) {
+      links.scrollTop = bottom + pad - links.clientHeight;
+    } else if (top - pad < links.scrollTop) {
+      links.scrollTop = Math.max(0, top - pad);
+    }
+  }
+
   function run() {
+    // Before anything of ours is injected, so the sidebar's own position is
+    // still what the page's stylesheet says it is.
+    markNavScroll();
     injectGroupCss();
     setupMobileNav();
     fetch("/whoami", { credentials: "same-origin" })
