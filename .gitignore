@@ -1,5 +1,6 @@
 node_modules
 .env
+.rivals-proof/
 
 # macOS Finder metadata
 .DS_Store

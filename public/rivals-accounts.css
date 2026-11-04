@@ -3,12 +3,83 @@
   font-family: system-ui, sans-serif;
   background: #101319;
   color: #edf1f8;
+  --surface: #191f29;
+  --line: #30394a;
+  --ink: #edf1f8;
+  --muted: #adb8c9;
+  --accent: #7767da;
+  --surface-2: #242d3b;
 }
 * {
   box-sizing: border-box;
 }
 body {
   margin: 0;
+  display: flex;
+  min-height: 100vh;
+}
+.nav {
+  width: 232px;
+  flex: none;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 14px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+.nav .brand {
+  padding: 10px 8px 22px;
+}
+.nav .brand b {
+  font-size: 19px;
+}
+.nav .brand span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.nav .links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nav .links a {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 9px;
+  border-radius: 8px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+}
+.nav .links a.active {
+  background: var(--accent);
+  color: white;
+}
+.nav .links a:hover {
+  background: var(--surface-2);
+}
+.nav .me {
+  margin-top: auto;
+  padding: 15px 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.nav .me a {
+  color: inherit;
+}
+main {
+  flex: 1;
+  min-width: 0;
 }
 main {
   max-width: 1250px;
@@ -161,6 +232,9 @@ ul {
   color: #ff9d9d;
 }
 @media (max-width: 760px) {
+  body {
+    display: block;
+  }
   main {
     padding: 24px 14px;
   }
