@@ -1,0 +1,164 @@
+(() => {
+  "use strict";
+  const $ = (s) => document.querySelector(s),
+    status = $("#status");
+  const el = (tag, text, cls) => {
+    const e = document.createElement(tag);
+    if (text !== undefined) e.textContent = text;
+    if (cls) e.className = cls;
+    return e;
+  };
+  async function api(url, method = "GET", body) {
+    const r = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (r.status === 401) {
+      location.href = "/admin-login.html";
+      throw Error("Sign in required");
+    }
+    const x = await r.json();
+    if (!r.ok || !x.success) throw Error(x.message || "Request failed");
+    return x;
+  }
+  function render(a) {
+    const c = el("article", undefined, "account");
+    c.append(
+      el("h2", a.rivalsUid ? "Profile " + a.rivalsUid : a.id),
+      el(
+        "span",
+        a.verifiedCount + " / " + a.expectedCount + " costumes verified",
+        "pill",
+      ),
+      el("p", "Steam · " + a.phase + " · Twitch " + a.twitchLogin),
+    );
+    const gallery = el("div", undefined, "proofs");
+    for (const p of a.proofs) {
+      const link = el("a");
+      link.href = p.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      const img = el("img");
+      img.src = p.url;
+      img.alt = p.hero + " — " + p.costume + " owned inventory";
+      img.loading = "lazy";
+      link.append(img, el("span", p.hero + " · " + p.costume));
+      gallery.append(link);
+    }
+    c.append(gallery);
+    const cols = el("div", undefined, "columns"),
+      left = el("section"),
+      right = el("section");
+    left.append(
+      el("h3", "Eldorado draft"),
+      el(
+        "p",
+        a.draft.categoryLabel +
+          " · Steam country: " +
+          (a.draft.country || "Needs verification"),
+      ),
+    );
+    const title = el("input");
+    title.value = a.draft.title;
+    title.readOnly = true;
+    const desc = el("textarea");
+    desc.value = a.draft.description;
+    desc.readOnly = true;
+    left.append(el("label", "Title"), title, el("label", "Description"), desc);
+    const copy = el("button", "Copy title and description");
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(title.value + "\n\n" + desc.value);
+        status.textContent = "Draft copied.";
+      } catch {
+        status.textContent = "Select the draft text to copy it.";
+      }
+    };
+    left.append(copy);
+    right.append(el("h3", "Trial price"), el("label", "USD"));
+    const price = el("input");
+    price.type = "number";
+    price.min = ".05";
+    price.step = ".01";
+    price.value = a.draft.priceUsd;
+    const save = el("button", "Save draft price");
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        await api(
+          "/api/rivals/preparations/" + encodeURIComponent(a.id) + "/draft",
+          "PATCH",
+          { priceUsd: Number(price.value) },
+        );
+        await load();
+      } catch (e) {
+        status.textContent = e.message;
+      } finally {
+        save.disabled = false;
+      }
+    };
+    right.append(
+      price,
+      save,
+      el(
+        "p",
+        `Estimated balance after 10% seller fee: $${a.draft.estimatedNetUsd.toFixed(2)}. Excludes stock, support and withdrawal costs.`,
+      ),
+      el("h3", "Before publishing"),
+    );
+    const list = el("ul");
+    for (const b of a.blockers) list.append(el("li", b));
+    right.append(
+      list,
+      el(
+        "p",
+        "This account is held exclusively. Its linked Twitch rewards remain consumed.",
+      ),
+    );
+    cols.append(left, right);
+    c.append(cols);
+    return c;
+  }
+  async function load() {
+    try {
+      const x = await api("/api/rivals/preparations");
+      $("#total").textContent = x.summary.total;
+      $("#verified").textContent = x.summary.verified;
+      $("#permission").textContent =
+        x.permission.canSell === true
+          ? "Access available"
+          : x.permission.canSell === false
+            ? "Needs attention"
+            : "Not checked";
+      const host = $("#accounts");
+      host.replaceChildren(...x.accounts.map(render));
+      if (!x.accounts.length)
+        host.append(
+          el(
+            "p",
+            "No completed game reports imported yet. Held preparations stay protected.",
+            "empty",
+          ),
+        );
+      status.textContent = "Updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      status.textContent = e.message;
+    }
+  }
+  $("#refresh").onclick = load;
+  $("#check").onclick = async () => {
+    const b = $("#check");
+    b.disabled = true;
+    status.textContent = "Checking Eldorado access…";
+    try {
+      await api("/api/rivals/eldorado/check", "POST", {});
+      await load();
+    } catch (e) {
+      status.textContent = e.message;
+    } finally {
+      b.disabled = false;
+    }
+  };
+  load();
+})();

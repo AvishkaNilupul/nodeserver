@@ -71,6 +71,7 @@ const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const steamAccountRoutes = require("./routes/steamAccountRoutes");
 const valorantAccountRoutes = require("./routes/valorantAccountRoutes");
+const rivalsAccountRoutes = require("./routes/rivalsAccountRoutes");
 const steamSalesRoutes = require("./routes/steamSalesRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
@@ -575,6 +576,9 @@ app.get("/steam-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
 app.get("/valorant-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "valorant-accounts.html"));
 });
+app.get("/rivals-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "rivals-accounts.html"));
+});
 
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -842,6 +846,7 @@ app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, steamAccountRoutes);
 app.use(enforce2fa, valorantAccountRoutes);
+app.use(enforce2fa, rivalsAccountRoutes);
 app.use(enforce2fa, steamSalesRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
 // Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that
@@ -882,6 +887,11 @@ mongoose
       .catch(() => {});
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
+      // Initial Rivals category check stays in the process owning seller cookies.
+      // Only an imported ready hold without a saved check triggers this read.
+      rivalsAccountRoutes.refreshSellerAccess({ onlyMissing: true }).catch(() => {
+        console.error("[rivals] initial seller access check failed");
+      });
       // Catalog v2 boot sequence: restore the persisted public snapshot so
       // the storefront serves instantly, then rebuild it as before, then
       // start the pre-order sync loop. Every step logs its own failure and

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Rivals accounts</title>
+    <link rel="stylesheet" href="/admin-nav.css" />
+    <link rel="stylesheet" href="/rivals-accounts.css" />
+  </head>
+  <body>
+    <div id="adminNav"></div>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">ACCOUNT WORKSHOP</p>
+          <h1>Marvel Rivals</h1>
+          <p>Game claims, owned costumes and the first Eldorado draft.</p>
+        </div>
+        <button id="refresh">Refresh</button>
+      </header>
+      <p id="status" role="status"></p>
+      <section class="stats">
+        <div><span>Held accounts</span><strong id="total">—</strong></div>
+        <div>
+          <span>Inventory verified</span><strong id="verified">—</strong>
+        </div>
+        <div>
+          <span>Eldorado access</span
+          ><strong id="permission">Not checked</strong
+          ><button id="check">Check access</button>
+        </div>
+      </section>
+      <div id="accounts"></div>
+      <p class="foot">
+        Screenshots are private evidence from the actual game. Drafts do not
+        create marketplace offers.
+      </p>
+    </main>
+    <script src="/admin-nav.js"></script>
+    <script src="/rivals-accounts.js"></script>
+  </body>
+</html>

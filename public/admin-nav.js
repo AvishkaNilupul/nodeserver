@@ -298,6 +298,12 @@
           superOnly: true,
         },
         {
+          href: "/rivals-accounts.html",
+          label: "Rivals accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
           href: "/outlook/",
           label: "Outlook inboxes",
           icon: ICONS.epicAccounts,
