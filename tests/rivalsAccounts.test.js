@@ -87,6 +87,62 @@ test("worker export cannot substitute another profile or omit actual costume evi
   assert.throws(() => reportFromWorker(j, { ...m, rivalsUid: "999999" }));
   assert.throws(() => reportFromWorker(j, { ...m, verifiedCostumes: [] }));
 });
+test("owner-retained session keeps truthful verified phase and still requires every inventory proof", () => {
+  const retention = {
+    mode: "owner-retained",
+    requestedAt: "2026-11-04T06:00:00Z",
+    reason:
+      "Owner requested this exact account remain signed in for another test and be listed.",
+  };
+  const j = {
+    ...report(),
+    state: "running",
+    phase: "verified",
+    completedAt: undefined,
+    expectedRewards: prep().expectedRewards,
+  };
+  const m = {
+    jobId: j.id,
+    rivalsUid: j.rivalsUid,
+    sessionRetention: retention,
+    verifiedCostumes: [{ ...report().proofs[0], hero: "rogue" }],
+  };
+  const exported = reportFromWorker(j, m);
+  const valid = logic.validateReport(prep(), exported);
+  assert.equal(valid.phase, "verified");
+  assert.equal(valid.state, "verified");
+  assert.equal(valid.completedAt, null);
+  assert.equal(valid.sessionRetention.mode, "owner-retained");
+  assert.equal(
+    logic.publicRow({ ...prep(), gameReport: valid }, steam, { canSell: true })
+      .sessionRetention.mode,
+    "owner-retained",
+  );
+  for (const change of [
+    { sessionRetention: undefined },
+    { sessionRetention: { ...retention, requestedAt: "invalid" } },
+    { sessionRetention: { ...retention, reason: "" } },
+    { phase: "collected" },
+    { verifiedRewards: [] },
+    { proofs: [] },
+  ])
+    assert.throws(() =>
+      logic.validateReport(prep(), { ...exported, ...change }),
+    );
+  assert.throws(() =>
+    logic.validateReport(
+      prep(),
+      reportFromWorker({ ...j, phase: "linked" }, m),
+    ),
+  );
+  assert.ok(
+    !logic.blockers(
+      { ...prep(), gameReport: valid, deliveryAudit: { ok: true } },
+      steam,
+      { canSell: true },
+    ).length,
+  );
+});
 test("draft uses Fresh PC category, does not infer store country from signup, exposes no secrets", () => {
   const p = {
     ...prep(),
@@ -168,6 +224,25 @@ test("presentation import does not convert Twitch claim history into verified ga
     ],
   };
   const result = presentationLogic.validate(p, manifest, audit);
+  const retained = {
+    ...p,
+    gameReport: {
+      ...p.gameReport,
+      state: "verified",
+      phase: "verified",
+      completedAt: null,
+      sessionRetention: {
+        mode: "owner-retained",
+        requestedAt: new Date(),
+        reason:
+          "Owner requested keeping this account signed in and publishing it.",
+      },
+    },
+  };
+  assert.equal(
+    presentationLogic.validate(retained, manifest, audit).rewardAudit.total,
+    2,
+  );
   assert.equal(result.rewardAudit.total, 2);
   assert.equal(result.rewardAudit.groups["Costume rewards"], 2);
   assert.equal(result.gameReport, undefined);

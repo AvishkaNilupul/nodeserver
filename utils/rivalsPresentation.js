@@ -1,6 +1,6 @@
 const fs = require("node:fs/promises"),
   path = require("node:path");
-const { digest, validId } = require("./rivalsAccounts");
+const { digest, validId, publishableReport } = require("./rivalsAccounts");
 function category(name) {
   return /chrono/i.test(name)
     ? "Chrono Token drops"
@@ -28,8 +28,7 @@ function validate(prep, manifest, audit) {
     !prep ||
     prep.status !== "held" ||
     !validId(prep._id) ||
-    prep.gameReport?.state !== "ready" ||
-    prep.gameReport.phase !== "logged-out"
+    !publishableReport(prep.gameReport)
   )
     throw Error("Completed held preparation required");
   if (

@@ -47,21 +47,29 @@ async function build({ sourceDir, outDir, receiptPath, chronoTokensReceived }) {
     await fs.readFile(path.join(sourceDir, "manifest.json"), "utf8"),
   );
   const inputs = new Map();
+  let resized = false;
+  async function displayCapture(bytes) {
+    const meta = await sharp(bytes).metadata();
+    if (
+      !meta.width ||
+      !meta.height ||
+      Math.abs(meta.width / meta.height - 1600 / 1035) > 0.01
+    )
+      throw Error("Capture aspect ratio does not match the costume layout");
+    if (meta.width === 1600 && meta.height === 1035) return bytes;
+    resized = true;
+    return sharp(bytes).resize(1600, 1035, { fit: "fill" }).png().toBuffer();
+  }
   for (const p of manifest.verifiedCostumes) {
     if (!names[p.hero] || !/^[a-z0-9-]+\.png$/.test(p.file))
       throw Error("Unknown screenshot mapping");
     const bytes = await fs.readFile(path.join(sourceDir, p.file));
     if (hash(bytes) !== p.sha256) throw Error("Original screenshot changed");
-    const meta = await sharp(bytes).metadata();
-    if (meta.width !== 1600 || meta.height !== 1035)
-      throw Error("This layout expects original1600x1035 captures");
-    inputs.set(p.hero, { ...p, bytes });
+    inputs.set(p.hero, { ...p, bytes: await displayCapture(bytes) });
   }
   if (inputs.size !== 7) throw Error("All seven original captures required");
-  const receipt = await fs.readFile(receiptPath);
-  const receiptMeta = await sharp(receipt).metadata();
-  if (receiptMeta.width !== 1600 || receiptMeta.height !== 1035)
-    throw Error("Unexpected claim receipt size");
+  const receiptSource = await fs.readFile(receiptPath);
+  const receipt = await displayCapture(receiptSource);
   if (!Number.isSafeInteger(chronoTokensReceived) || chronoTokensReceived < 0)
     throw Error("Supply manually verified received-token amount");
   await fs.mkdir(outDir, { recursive: true, mode: 0o700 });
@@ -166,6 +174,7 @@ async function build({ sourceDir, outDir, receiptPath, chronoTokensReceived }) {
       create: { width: 2000, height: 1504, channels: 4, background: "#10182a" },
     })
       .composite(coverLayers)
+      .removeAlpha()
       .png({ compressionLevel: 9 })
       .toBuffer(),
     "overview",
@@ -193,7 +202,9 @@ async function build({ sourceDir, outDir, receiptPath, chronoTokensReceived }) {
     labels += text(
       28,
       2410,
-      "Original capture pixels preserved · Headers and borders added outside the screenshots",
+      resized
+        ? "Full screenshots resized for this sheet · Unmodified originals retained privately"
+        : "Original capture pixels preserved · Headers and borders added outside the screenshots",
       26,
       'class="muted"',
     );
@@ -202,6 +213,7 @@ async function build({ sourceDir, outDir, receiptPath, chronoTokensReceived }) {
       create: { width: 3264, height: 2440, channels: 4, background: "#10182a" },
     })
       .composite(layers)
+      .removeAlpha()
       .png({ compressionLevel: 9 })
       .toBuffer();
     // Verify that the layout introduced no repainting or altered inventory text.
@@ -259,6 +271,10 @@ async function build({ sourceDir, outDir, receiptPath, chronoTokensReceived }) {
     images,
     receivedChronoTokens: chronoTokensReceived,
     receiptSha256: hash(receipt),
+    receiptSourceSha256: hash(receiptSource),
+    captureLayout: resized
+      ? "Full captures resized to1600x1035; source files unchanged"
+      : "Original1600x1035 pixels preserved",
   };
   await fs.writeFile(
     path.join(outDir, "presentation-manifest.json"),
@@ -284,7 +300,8 @@ if (require.main === module) {
             sha256,
           })),
           pixelVerification:
-            "all seven originals and receipt match exactly in contact sheets",
+            r.captureLayout +
+            "; all seven display captures and receipt match exactly in contact sheets",
         }),
       ),
     )

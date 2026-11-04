@@ -10,6 +10,10 @@ const {
 function reportFromWorker(job, manifest) {
   if (!job || manifest.jobId !== job.id || manifest.rivalsUid !== job.rivalsUid)
     throw Error("Evidence profile mismatch");
+  const retained =
+    job.phase === "verified" &&
+    job.state === "running" &&
+    manifest.sessionRetention?.mode === "owner-retained";
   const proofs = job.expectedRewards.map((r) => {
     const slug = r.name
       .replace(/ Costume$/i, "")
@@ -31,11 +35,12 @@ function reportFromWorker(job, manifest) {
     steamAccountId: job.steamAccountId,
     twitchAccountId: job.twitchAccountId,
     rivalsUid: job.rivalsUid,
-    state: job.state,
+    state: retained ? "verified" : job.state,
     phase: job.phase,
     verifiedRewards: job.verifiedRewards,
     verifiedAt: job.verifiedAt,
     completedAt: job.completedAt,
+    ...(retained ? { sessionRetention: manifest.sessionRetention } : {}),
     proofs,
   };
 }
@@ -78,14 +83,12 @@ async function importReport(db, report, sourceDir, targetRoot) {
   ]);
   if (conflicts.some(Boolean))
     throw Error("Steam account has another commitment");
-  const held = await db
-    .collection("droplogs")
-    .countDocuments({
-      account: prep.twitchId,
-      soldSetId: prep.holdId,
-      soldToUsername: "manual",
-      soldAt: { $ne: null },
-    });
+  const held = await db.collection("droplogs").countDocuments({
+    account: prep.twitchId,
+    soldSetId: prep.holdId,
+    soldToUsername: "manual",
+    soldAt: { $ne: null },
+  });
   if (!prep.reservedCount || held !== prep.reservedCount)
     throw Error("Twitch reservation changed");
   if (

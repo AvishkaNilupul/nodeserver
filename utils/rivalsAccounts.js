@@ -9,6 +9,24 @@ function sameSet(a, b) {
     a.every((v) => b.includes(v))
   );
 }
+function hasRetainedSession(report) {
+  const s = report?.sessionRetention;
+  return (
+    report?.state === "verified" &&
+    report.phase === "verified" &&
+    s?.mode === "owner-retained" &&
+    Number.isFinite(Date.parse(s.requestedAt)) &&
+    typeof s.reason === "string" &&
+    s.reason.trim().length >= 20 &&
+    s.reason.length <= 500
+  );
+}
+function publishableReport(report) {
+  return (
+    (report?.state === "ready" && report.phase === "logged-out") ||
+    hasRetainedSession(report)
+  );
+}
 function validateReport(prep, report) {
   if (!prep || prep.status !== "held" || !validId(prep._id))
     throw Error("Existing stock hold required");
@@ -20,12 +38,10 @@ function validateReport(prep, report) {
     report.twitchAccountId !== String(prep.twitchId)
   )
     throw Error("Held account pair mismatch");
-  if (
-    report.state !== "ready" ||
-    report.phase !== "logged-out" ||
-    !/^\d{6,20}$/.test(report.rivalsUid || "")
-  )
-    throw Error("Complete game verification and sign-out first");
+  if (!publishableReport(report) || !/^\d{6,20}$/.test(report.rivalsUid || ""))
+    throw Error(
+      "Complete game verification and sign-out or record the owner's session-retention request first",
+    );
   if (
     !prep.expectedRewards?.length ||
     !sameSet(
@@ -62,16 +78,29 @@ function validateReport(prep, report) {
       p.costume.length > 120
     )
       throw Error("Invalid costume proof");
-  for (const k of ["completedAt", "verifiedAt"])
+  for (const k of hasRetainedSession(report)
+    ? ["verifiedAt"]
+    : ["completedAt", "verifiedAt"])
     if (!Number.isFinite(Date.parse(report[k])))
       throw Error("Verification dates required");
   return {
     version: 1,
     rivalsUid: report.rivalsUid,
-    phase: "logged-out",
-    state: "ready",
+    phase: report.phase,
+    state: report.state,
     verifiedAt: new Date(report.verifiedAt),
-    completedAt: new Date(report.completedAt),
+    completedAt: hasRetainedSession(report)
+      ? null
+      : new Date(report.completedAt),
+    ...(hasRetainedSession(report)
+      ? {
+          sessionRetention: {
+            mode: "owner-retained",
+            requestedAt: new Date(report.sessionRetention.requestedAt),
+            reason: report.sessionRetention.reason.trim(),
+          },
+        }
+      : {}),
     proofs: report.proofs.map((p) => ({
       rewardId: p.rewardId,
       file: p.file,
@@ -88,11 +117,7 @@ function blockers(prep, steam, permission) {
       : [];
   const b = [];
   if (prep.status !== "held") b.push("Stock hold needs review");
-  if (
-    !prep.gameReport ||
-    prep.gameReport.state !== "ready" ||
-    prep.gameReport.phase !== "logged-out"
-  )
+  if (!publishableReport(prep.gameReport))
     b.push("Finish game claims, inventory checks and sign-out");
   if (
     !steam ||
@@ -213,6 +238,7 @@ function publicRow(prep, steam, permission, listing = null) {
     phase: r?.phase || "Not imported",
     verifiedAt: r?.verifiedAt || null,
     completedAt: r?.completedAt || null,
+    sessionRetention: r?.sessionRetention || null,
     expectedCount: prep.expectedRewards?.length || 0,
     verifiedCount: r?.proofs?.length || 0,
     presentation: (prep.presentation?.images || []).map((p) => ({
@@ -243,6 +269,8 @@ function digest(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 module.exports = {
+  hasRetainedSession,
+  publishableReport,
   validId,
   validateReport,
   publicRow,

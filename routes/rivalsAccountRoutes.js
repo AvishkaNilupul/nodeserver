@@ -164,8 +164,14 @@ function createRouter({
           {
             _id: req.params.id,
             status: "held",
-            "gameReport.state": "ready",
-            "gameReport.phase": "logged-out",
+            $or: [
+              { "gameReport.state": "ready", "gameReport.phase": "logged-out" },
+              {
+                "gameReport.state": "verified",
+                "gameReport.phase": "verified",
+                "gameReport.sessionRetention.mode": "owner-retained",
+              },
+            ],
             listingId: { $exists: false },
           },
           { $set: { draftPriceUsd: price } },
@@ -192,7 +198,10 @@ function createRouter({
         db
           .collection("rivalspreparations")
           .findOne(
-            { status: "held", "gameReport.state": "ready" },
+            {
+              status: "held",
+              "gameReport.state": { $in: ["ready", "verified"] },
+            },
             { projection: { _id: 1 } },
           ),
         db

@@ -50,6 +50,14 @@
       }
       c.append(combined);
     }
+    if (a.sessionRetention)
+      c.append(
+        el(
+          "p",
+          "Session kept signed in at your request. The local preparation queue remains locked to this account.",
+          "muted",
+        ),
+      );
     c.append(el("h3", "Original costume proof"));
     const gallery = el("div", undefined, "proofs");
     for (const p of a.proofs) {

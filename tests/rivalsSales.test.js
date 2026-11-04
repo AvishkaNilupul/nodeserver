@@ -135,30 +135,28 @@ let updateCount = 0,
   uploadObserver = null;
 async function attachPresentation(id) {
   const p = await db.collection("rivalspreparations").findOne({ _id: id });
-  await db
-    .collection("rivalspreparations")
-    .updateOne(
-      { _id: id },
-      {
-        $set: {
-          presentation: {
-            sourceManifestUid: p.gameReport.rivalsUid,
-            images: [
-              {
-                file: "rogue.png",
-                sha256: digest(Buffer.from("image")),
-                kind: "overview",
-                label: "Combined proof",
-              },
-            ],
-          },
-          rewardAudit: {
-            receivedChronoTokens: 1100,
-            currencyEvidence: { kind: "game-claim-receipt" },
-          },
+  await db.collection("rivalspreparations").updateOne(
+    { _id: id },
+    {
+      $set: {
+        presentation: {
+          sourceManifestUid: p.gameReport.rivalsUid,
+          images: [
+            {
+              file: "rogue.png",
+              sha256: digest(Buffer.from("image")),
+              kind: "overview",
+              label: "Combined proof",
+            },
+          ],
+        },
+        rewardAudit: {
+          receivedChronoTokens: 1100,
+          currencyEvidence: { kind: "game-claim-receipt" },
         },
       },
-    );
+    },
+  );
 }
 test("title and combined-photo update preserves every delivery field, price and stock unit", async () => {
   const { id } = await seed();
@@ -178,6 +176,32 @@ test("title and combined-photo update preserves every delivery field, price and 
   assert.equal(await BuyerMailSession.countDocuments(), sessions);
   assert.match(result.title, /^Will of Galacta/);
   assert.match(offers.get(offerId).description, /1,100 Chrono Tokens received/);
+});
+test("an explicitly retained verified session can list without inventing game logout", async () => {
+  const { id } = await seed();
+  await db.collection("rivalspreparations").updateOne(
+    { _id: id },
+    {
+      $set: {
+        "gameReport.state": "verified",
+        "gameReport.phase": "verified",
+        "gameReport.completedAt": null,
+        "gameReport.sessionRetention": {
+          mode: "owner-retained",
+          requestedAt: new Date(),
+          reason:
+            "Owner requested this account remain signed in for another test and be listed.",
+        },
+      },
+    },
+  );
+  const result = await service.publish(id);
+  assert.equal(result.status, "active");
+  const p = await db.collection("rivalspreparations").findOne({ _id: id });
+  assert.equal(p.gameReport.phase, "verified");
+  assert.equal(p.gameReport.completedAt, null);
+  assert.equal(p.gameReport.sessionRetention.mode, "owner-retained");
+  assert.equal(createCount, 1);
 });
 test("an account leaving remote stock while images upload is never re-added by the edit", async () => {
   const { id } = await seed();

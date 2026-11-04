@@ -53,3 +53,19 @@ for identity rechecks, session expiry, sign-out and per-account screenshot rules
 Compile the authorized native helper with macOS swiftc when Wine windows cannot be
 controlled through CUA. Its physical `keys` mode reads ASCII input exclusively from
 stdin; credentials must never appear in arguments, command logs or screenshots.
+
+An explicit owner request may retain the current verified game session for further
+testing while listing that account. Export a manifest `sessionRetention` object with
+`mode: "owner-retained"`, the actual `requestedAt` and the owner's reason. The trusted
+report importer accepts this only at phase `verified` with all expected costume proofs;
+it records state/phase `verified`, no completion/logout timestamp and the retention
+request. Pause the local queue and preserve its active account. This is an operator
+exception, never an inferred logout and never permission to switch accounts. Ordinary
+preparations still require normal observed sign-out. Listing/delivery/stock guards apply
+to both dispositions.
+
+If native Steam stalls on restart, sample it before changing graphics. A confirmed
+winecoreaudio AudioUnit/HAL initialization wait can be isolated with a Steam-only
+`HKCU\\Software\\Wine\\AppDefaults\\steam.exe\\DllOverrides` empty `winecoreaudio.drv`
+value. Back up the bottle registry first. This disables Steam client audio only; it
+does not alter game audio or anti-cheat. Roll back by deleting only that value.
