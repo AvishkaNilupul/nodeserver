@@ -421,3 +421,15 @@ test('navigation levels the camera after losing an elevated target even with a d
   const d=n.step(f,{enemies:[]},1000);assert.equal(d.action.dy,100);assert.deepEqual(d.action.keys,[]);
   const onlyAmmo=frame('');onlyAmmo.lines.push({text:'0 08 40/40',x:.11,y:.91,width:.1,height:.02,confidence:.99});assert.equal(classify(onlyAmmo),'combat');
 });
+
+test('a red world-name pixel row identifies an opponent even when OCR misses its letters',()=>{
+  const {redWorldLabels,outlinedEnemies}=require('../tools/rivals-level-worker/perception.cjs'),w=640,h=415,d=Buffer.alloc(w*h*4);
+  for(let k=0;k<8;k++)for(let y=140;y<147;y++)for(let x=280+k*6;x<283+k*6;x++){const i=(y*w+x)*4;d[i]=210;d[i+1]=75;d[i+2]=60;d[i+3]=255;}
+  assert.equal(redWorldLabels(d,w,h).length,1);assert.ok(outlinedEnemies(d,w,h,[],{requireOpponentLabel:true}).some(t=>t.source==='enemy-nameplate'));
+});
+
+test('a flat wall above a late floor break is blocked while the side passage stays open',()=>{
+  const {corridors}=require('../tools/rivals-level-worker/perception.cjs'),w=72,h=48,d=[];
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++)d.push(x<w*.65?(y<h*.62?.21:.21+(y/h-.62)*2):.03+y*.008);
+  const routes=corridors({width:w,height:h,inverseDepth:d});assert.equal(routes.find(p=>p.x===.5).groundRisk,1);assert.equal(routes.find(p=>p.x===.77).groundRisk,0);
+});

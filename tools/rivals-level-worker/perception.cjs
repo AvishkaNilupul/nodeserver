@@ -1,6 +1,23 @@
 'use strict';
 const {components}=require('./vision.cjs');
 
+function redWorldLabels(rgba,width,height){
+  const letters=components(rgba,width,height,(d,i)=>d[i]>150&&d[i]>d[i+1]*1.4&&d[i]>d[i+2]*1.3,{left:.08,right:.93,top:.15,bottom:.7})
+    .filter(b=>b.height>.003&&b.height<.023&&b.width>.001&&b.width<.025),rows=[];
+  for(const b of letters.sort((a,b)=>a.y-b.y)){let row=rows.find(g=>Math.abs(g.y-b.y)<.006);if(!row)rows.push(row={y:b.y,boxes:[]});row.boxes.push(b);}
+  const labels=[];
+  for(const row of rows){
+    let group=[];
+    const flush=()=>{
+      if(group.length<5)return;
+      const left=Math.min(...group.map(b=>b.x-b.width/2)),right=Math.max(...group.map(b=>b.x+b.width/2)),top=Math.min(...group.map(b=>b.y-b.height/2)),bottom=Math.max(...group.map(b=>b.y+b.height/2));
+      if(right-left>.03&&right-left<.22&&bottom-top<.03&&(right-left)*width/((bottom-top)*height)>4.5)labels.push({x:left,y:top,width:right-left,height:bottom-top,confidence:.75,pixelLabel:true});
+    };
+    for(const b of row.boxes.sort((a,b)=>a.x-b.x)){if(group.length&&b.x-b.width/2-(group.at(-1).x+group.at(-1).width/2)>.012){flush();group=[];}group.push(b);}flush();
+  }
+  return labels;
+}
+
 function coralCandidates(rgba,width,height,minRed){
   // Preserve thin coral outlines before joining adjacent outline pixels. A
   // 384px thumbnail erased them in the first live trial.
@@ -19,14 +36,14 @@ function outlinedEnemies(rgba,width,height,lines=[],{requireOpponentLabel=false}
   const strong=coralCandidates(rgba,width,height,205);
   // Dim outlines alone overlap warm plants. Accept those only beneath an
   // independently observed red world-name label in the same fresh frame.
-  const labels=lines.filter(l=>{
+  const labels=[...redWorldLabels(rgba,width,height),...lines.filter(l=>{
     if(l.confidence<.6||l.y<.18||l.y>.7||l.width>.2||l.height>.05)return false;
     let red=0;
     for(let y=Math.max(0,Math.floor(l.y*height));y<Math.min(height,Math.ceil((l.y+l.height)*height));y++)for(let x=Math.max(0,Math.floor(l.x*width));x<Math.min(width,Math.ceil((l.x+l.width)*width));x++){
       const i=(y*width+x)*4,r=rgba[i],g=rgba[i+1],b=rgba[i+2];if(r>150&&r>g*1.4&&r>b*1.3)red++;
     }
     return red>10;
-  });
+  })];
   if(!labels.length)return requireOpponentLabel?[]:strong;
   for(const t of coralCandidates(rgba,width,height,175)){
     if(!labels.some(l=>t.x>=l.x-.02&&t.x<=l.x+l.width+.02&&t.y>l.y&&t.y<l.y+.22))continue;
@@ -36,13 +53,13 @@ function outlinedEnemies(rgba,width,height,lines=[],{requireOpponentLabel=false}
   for(const label of labels){
     // AI opponents keep a red Easy label even when a large hero's glow breaks
     // the thin-outline shape. Aim below that fresh world label, never kill feed.
-    if(!/[- ]EAS[YV]?$/i.test(label.text.trim()))continue;
+    if(!label.pixelLabel&&!/[- ]EAS[YV]?$/i.test(label.text.trim()))continue;
     const x=label.x+label.width/2,y=label.y+Math.max(.045,Math.min(.09,label.height*5));
-    if(strong.some(t=>t.source==='named-coral-outline'&&Math.hypot(t.x-x,t.y-y)<.08))continue;
+    if(strong.some(t=>['named-coral-outline','enemy-nameplate'].includes(t.source)&&Math.hypot(t.x-x,t.y-y)<.05))continue;
     strong.push({x,y,width:.035,height:.1,source:'enemy-nameplate',confidence:.8});
   }
   if(!requireOpponentLabel)return strong;
-  const opponents=labels.filter(l=>/[- ]EAS[YV]?$/i.test(l.text.trim()));
+  const opponents=labels.filter(l=>l.pixelLabel||/[- ]EAS[YV]?$/i.test(l.text.trim()));
   return strong.filter(t=>t.source==='enemy-nameplate'||opponents.some(l=>t.x>l.x-.06&&t.x<l.x+l.width+.06&&t.y>l.y&&t.y<l.y+.3));
 }
 function excludeFriendlyNameplates(targets,rgba,width,height,lines=[]){
@@ -108,10 +125,11 @@ function corridors(depth,goalX=.5){
     // near strip is a wall/railing; a sudden reverse is a ledge or occluder.
     // Looking only above the crosshair falsely treated space beyond rails as a route.
     const jump=Math.max(...ground.slice(1).map((v,i)=>(v-ground[i])/span));
-    const groundRisk=backward<-.12||rise>.08&&jump/rise>.65&&near>.18?1:rise<.08?(near>.2?1:.6):0;
+    const flatLead=(ground[1]-ground[0])/span<rise*.08;
+    const groundRisk=backward<-.12||rise>.08&&near>.18&&(jump/rise>.65||flatLead&&jump/rise>.35)?1:rise<.08?(near>.2?1:.6):0;
     const obstruction=Math.max(upper,groundRisk);
     candidates.push({x,obstruction,groundRise:rise,groundRisk,ground,score:upper*.65+groundRisk*1.8+Math.abs(x-goalX)*.9+Math.abs(x-.5)*.15});
   }
   return candidates.sort((a,b)=>a.score-b.score);
 }
-module.exports={outlinedEnemies,excludeFriendlyNameplates,objectiveArrows,corridors,quantile};
+module.exports={outlinedEnemies,excludeFriendlyNameplates,objectiveArrows,corridors,quantile,redWorldLabels};

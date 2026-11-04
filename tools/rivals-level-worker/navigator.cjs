@@ -33,7 +33,6 @@ class Navigator{
     }
     this.target=null;
     const portal=(hints.exits??[]).filter(p=>p.x>.1&&p.x<.9).sort((a,b)=>Math.abs(a.x-.5)-Math.abs(b.x-.5))[0];
-    if(!portal&&this.portalWalked)this.leftSpawn=true;
     if(portal&&!this.leftSpawn&&now-this.spawnAt<90000){
       const dx=Math.round(clamp((portal.x-.5)*400,-140,140));
       if(Math.abs(portal.x-.5)>.04)return {action:control([],350,{dx}),reason:'Aligning with the visible green spawn exit',target:portal};
@@ -55,7 +54,7 @@ class Navigator{
       this.lastDistance=meters;
       if(this.progressAt!==null&&now-this.progressAt>12000){
         this.detours++;const routes=corridors(hints.depth,goal?.x??.5),left=routes.find(p=>p.x===.23),right=routes.find(p=>p.x===.77);
-        this.detourSide=left&&right?(left.obstruction<right.obstruction?'a':'d'):(this.detours%2?'a':'d');this.detourUntil=now+12000;this.progressAt=now;
+        this.detourSide=this.detours>1?(this.detourSide==='a'?'d':'a'):left&&right?(left.obstruction<right.obstruction?'a':'d'):'a';this.detourUntil=now+12000;this.progressAt=now;
         return {action:control([this.detourSide,'space'],1200,{dx:this.detourSide==='a'?-50:50}),reason:'Objective distance stalled; taking a different passage'};
       }
     }
