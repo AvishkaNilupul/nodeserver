@@ -123,6 +123,20 @@ class Queue {
       return publicJob(j);
     });
   }
+  acquireRetainedTest(owner,id,{rivalsUid,holdId,confirmedAt,authorizedUntil}={}) {
+    const until=authorizedUntil?stamp(authorizedUntil):stamp(confirmedAt)+10800000;
+    if(!text(owner,80)||!text(holdId,100)||!Number.isFinite(stamp(confirmedAt))||!Number.isFinite(until)||until<=this.now()||until>stamp(confirmedAt)+28800000||stamp(confirmedAt)>this.now()+60000)fail('Explicit current owner handoff is required');
+    return this.store.transact(d=>{
+      const j=d.jobs.find(x=>x.id===id);
+      if(!j||d.config.activeJobId!==id||j.state!=='running'||j.phase!=='verified'||j.rivalsUid!==rivalsUid||j.verifiedRewards.length!==j.expectedRewards.length)fail('Only the exact verified retained session can be tested',409);
+      if(j.lease&&j.lease.expiresAt>this.now())fail('Another worker still holds this game session',409);
+      // Leave the global queue paused. This exception owns only the explicitly
+      // retained account, with a separate remote paused-offer hold checked by IO.
+      j.lease={owner,token:crypto.randomBytes(32).toString('base64url'),expiresAt:this.now()+900000};
+      j.levelingHandoff={holdId,confirmedAt,...(authorizedUntil?{authorizedUntil}: {})};j.revision++;j.updatedAt=new Date(this.now()).toISOString();
+      return {job:publicJob(j),leaseToken:j.lease.token,recovered:true};
+    });
+  }
   beginLogin(id,token) {
     return this.store.transact(d=>{
       const j=this.owned(d,id,token);

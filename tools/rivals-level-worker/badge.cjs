@@ -33,18 +33,34 @@ class BadgeReader {
     this.worker??=await createWorker('eng',1,{cachePath:this.cachePath});
     await this.worker.setParameters({tessedit_pageseg_mode:PSM.SINGLE_LINE,tessedit_char_whitelist:'0123456789',user_defined_dpi:'300'});
   }
-  async read(file){
+  async read(file,region={left:.055,top:.235,width:.035,height:.028}){
     await this.warm();
     const metadata=await sharp(file).metadata();
-    const crop={left:Math.round(metadata.width*.055),top:Math.round(metadata.height*.235),width:Math.round(metadata.width*.035),height:Math.round(metadata.height*.028)};
+    const crop={left:Math.round(metadata.width*region.left),top:Math.round(metadata.height*region.top),width:Math.round(metadata.width*region.width),height:Math.round(metadata.height*region.height)};
     const {data,info}=await sharp(file).extract(crop).greyscale().raw().toBuffer({resolveWithObject:true});
     const g=glyphMask(data,info.width,info.height);
     await this.worker.setParameters({tessedit_pageseg_mode:g.count===1?PSM.SINGLE_CHAR:PSM.SINGLE_WORD});
-    const image=await sharp(g.mask,{raw:{width:info.width,height:info.height,channels:1}}).extract({left:g.left,top:g.top,width:g.width,height:g.height})
-      .resize({height:160,kernel:'nearest'}).negate({alpha:false}).extend({top:20,bottom:20,left:20,right:20,background:'white'}).png().toBuffer();
-    const result=await this.worker.recognize(image),text=result.data.text.trim();
-    if(!/^[1-9]\d{0,2}$/.test(text)||text.length!==g.count||Number(text)>100||result.data.confidence<60)throw Error('Account level badge was not read confidently');
-    return {level:Number(text),confidence:result.data.confidence,crop,glyphCount:g.count};
+    const glyph=await sharp(g.mask,{raw:{width:info.width,height:info.height,channels:1}}).extract({left:g.left,top:g.top,width:g.width,height:g.height})
+      .resize({height:160,kernel:'nearest'}).negate({alpha:false}).png().toBuffer();
+    // Materialize inversion first: libvips otherwise also negates new padding.
+    const candidates=[];
+    for(const background of ['white','black']){
+      const image=await sharp(glyph).extend({top:20,bottom:20,left:20,right:20,background}).png().toBuffer(),result=await this.worker.recognize(image),text=result.data.text.trim();
+      if(/^[1-9]\d{0,2}$/.test(text)&&text.length===g.count&&Number(text)<=100&&result.data.confidence>=60)candidates.push({level:Number(text),confidence:result.data.confidence,background});
+    }
+    if(!candidates.length||new Set(candidates.map(c=>c.level)).size!==1)throw Error('Account level badge was not read confidently');
+    candidates.sort((a,b)=>b.confidence-a.confidence);return {...candidates[0],crop,glyphCount:g.count};
+  }
+  async orangeNumber(file,region){
+    await this.warm();const metadata=await sharp(file).metadata(),crop={left:Math.round(metadata.width*region.left),top:Math.round(metadata.height*region.top),width:Math.round(metadata.width*region.width),height:Math.round(metadata.height*region.height)};
+    const {data,info}=await sharp(file).extract(crop).removeAlpha().raw().toBuffer({resolveWithObject:true}),mask=Buffer.alloc(info.width*info.height,255);let ink=0,left=info.width,top=info.height,right=0,bottom=0;
+    for(let i=0;i<mask.length;i++){const j=i*info.channels,r=data[j],g=data[j+1],b=data[j+2];if(r>180&&g>65&&g<200&&b<120&&r>g*1.2){mask[i]=0;ink++;const x=i%info.width,y=Math.floor(i/info.width);left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);}}
+    if(ink<3)throw Error('Owned scoreboard number has no readable orange glyph');
+    const glyph=await sharp(mask,{raw:{width:info.width,height:info.height,channels:1}}).extract({left,top,width:right-left+1,height:bottom-top+1}).resize({height:160,kernel:'nearest'}).png().toBuffer();
+    const image=await sharp(glyph).extend({top:20,bottom:20,left:20,right:20,background:'white'}).png().toBuffer();
+    await this.worker.setParameters({tessedit_pageseg_mode:PSM.SINGLE_WORD,tessedit_char_whitelist:'0123456789'});const result=await this.worker.recognize(image),text=result.data.text.trim().replace(/\s/g,'');
+    if(!/^\d{1,7}$/.test(text)||result.data.confidence<60)throw Error('Owned scoreboard number was not read confidently');
+    return {value:Number(text),confidence:result.data.confidence,crop};
   }
   async close(){if(this.worker){await this.worker.terminate();this.worker=null;}}
 }

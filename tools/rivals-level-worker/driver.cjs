@@ -17,7 +17,7 @@ class Driver {
   request(payload) {
     if(this.closed)return Promise.reject(Error('Native driver unavailable'));
     return new Promise((resolve,reject)=>{
-      const item={resolve,reject,timeout:setTimeout(()=>{reject(Error('Native driver response timed out'));this.process.kill('SIGTERM');},payload.command==='analyze'?60000:15000)};
+      const item={resolve,reject,timeout:setTimeout(()=>{reject(Error('Native driver response timed out'));this.process.kill('SIGTERM');},payload.command==='analyze'?180000:15000)};
       this.pending.push(item);this.process.stdin.write(JSON.stringify(payload)+'\n');
     });
   }
