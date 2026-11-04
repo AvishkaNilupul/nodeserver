@@ -22,7 +22,8 @@ Rivals listings have kind `rivals`; normal Steam add-stock cannot mix in account
 without matching costumes, description refresh retains the verified costume copy,
 and delisting restores the internal problem hold rather than generic free stock.
 One verified preparation is one offer/unit. Listing uses game227, Fresh Account/PC,
-all seven original inventory pictures and no claim of ranked readiness or rank.
+all seven original inventory proofs retained, up to five originals published
+(Eldorado's screenshot limit), and no claim of ranked readiness or rank.
 
 Seller access uses the main application's connector. A guarded operator CLI can
 publish without touching its cookie jar: refresh blocked, Set-Cookie stripped,

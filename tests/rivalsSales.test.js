@@ -41,6 +41,10 @@ const fakeEld = {
   },
   offerUrl: (id) => "https://www.eldorado.gg/marvel-rivals-accounts/oa/" + id,
   createAccountOffer: async (o) => {
+    assert.ok(
+      1 + o.offerImages.length <= 5,
+      "Eldorado permits five account screenshots",
+    );
     createCount++;
     if (createFail) throw Error("connection reset after send");
     const id = "test-offer-" + createCount;
@@ -55,13 +59,11 @@ const fakeEld = {
   },
   getAccountOffer: async (id) => offers.get(id),
   getAccountEntries: async (id) =>
-    offers
-      .get(id)
-      .entries.map((e, i) => ({
-        ...e,
-        id: "entry" + i,
-        ...(mismatch ? { accountPassword: "wrong" } : {}),
-      })),
+    offers.get(id).entries.map((e, i) => ({
+      ...e,
+      id: "entry" + i,
+      ...(mismatch ? { accountPassword: "wrong" } : {}),
+    })),
   pauseAccountOffer: async (id) => {
     offers.get(id).offerState = "Paused";
   },
@@ -125,41 +127,37 @@ async function seed() {
   const twitchId = new mongoose.Types.ObjectId();
   await fs.mkdir(path.join(dir, id), { recursive: true });
   await fs.writeFile(path.join(dir, id, "rogue.png"), "image");
-  await db
-    .collection("rivalspreparations")
-    .insertOne({
-      _id: id,
-      holdId: "test-hold",
-      steamId: steam._id,
-      twitchId,
-      status: "held",
-      expectedRewards: [{ id: "reward1" }],
-      reservedCount: 1,
-      gameReport: {
-        state: "ready",
-        phase: "logged-out",
-        rivalsUid: "123456789",
-        verifiedAt: new Date(),
-        completedAt: new Date(),
-        proofs: [
-          {
-            rewardId: "reward1",
-            file: "rogue.png",
-            sha256: digest(Buffer.from("image")),
-            hero: "Rogue",
-            costume: "Will of Galacta",
-          },
-        ],
-      },
-    });
-  await db
-    .collection("droplogs")
-    .insertOne({
-      account: twitchId,
-      soldSetId: "test-hold",
-      soldToUsername: "manual",
-      soldAt: new Date(),
-    });
+  await db.collection("rivalspreparations").insertOne({
+    _id: id,
+    holdId: "test-hold",
+    steamId: steam._id,
+    twitchId,
+    status: "held",
+    expectedRewards: [{ id: "reward1" }],
+    reservedCount: 1,
+    gameReport: {
+      state: "ready",
+      phase: "logged-out",
+      rivalsUid: "123456789",
+      verifiedAt: new Date(),
+      completedAt: new Date(),
+      proofs: [
+        {
+          rewardId: "reward1",
+          file: "rogue.png",
+          sha256: digest(Buffer.from("image")),
+          hero: "Rogue",
+          costume: "Will of Galacta",
+        },
+      ],
+    },
+  });
+  await db.collection("droplogs").insertOne({
+    account: twitchId,
+    soldSetId: "test-hold",
+    soldToUsername: "manual",
+    soldAt: new Date(),
+  });
   return { id, steam };
 }
 test("publishes exact game category with site-only email delivery and idempotent preparation", async () => {
@@ -306,4 +304,63 @@ test("Rivals purchase uses existing sale sync exactly once and starts the seven-
     await db.collection("droplogs").countDocuments({ soldSetId: "test-hold" }),
     1,
   );
+});
+test("seven verified costumes retain all evidence while the offer obeys the five-image limit", async () => {
+  const { id } = await seed();
+  const prep = await db.collection("rivalspreparations").findOne({ _id: id });
+  const proofs = [];
+  for (let i = 0; i < 7; i++) {
+    const file = "costume-" + i + ".png";
+    await fs.writeFile(path.join(dir, id, file), "image");
+    proofs.push({
+      rewardId: "reward-" + i,
+      file,
+      sha256: digest(Buffer.from("image")),
+      hero: "Hero " + i,
+      costume: i === 6 ? "IGNITE event costume" : "Will of Galacta",
+    });
+  }
+  await db
+    .collection("rivalspreparations")
+    .updateOne(
+      { _id: id },
+      {
+        $set: {
+          expectedRewards: proofs.map((p) => ({ id: p.rewardId })),
+          reservedCount: 7,
+          "gameReport.proofs": proofs,
+        },
+      },
+    );
+  for (let i = 0; i < 6; i++)
+    await db
+      .collection("droplogs")
+      .insertOne({
+        account: prep.twitchId,
+        soldSetId: "test-hold",
+        soldToUsername: "manual",
+        soldAt: new Date(),
+      });
+  await service.publish(id);
+  assert.equal(offers.values().next().value.offerImages.length, 4);
+  assert.equal(
+    (await db.collection("rivalspreparations").findOne({ _id: id })).gameReport
+      .proofs.length,
+    7,
+  );
+});
+test("another account using the same inbox cannot have its buyer session replaced", async () => {
+  const { id } = await seed();
+  await db
+    .collection("buyermailsessions")
+    .insertOne({
+      steamAccountId: new mongoose.Types.ObjectId(),
+      inboxAddress: "inbox@example.test",
+      revokedAt: null,
+    });
+  await assert.rejects(
+    service.publish(id),
+    /another active buyer mail session/,
+  );
+  assert.equal(createCount, 0);
 });

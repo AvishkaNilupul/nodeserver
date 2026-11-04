@@ -13,6 +13,16 @@ const fail = (message, status = 409) =>
   Object.assign(new Error(message), { user: true, status });
 const proofRoot = () =>
   process.env.RIVALS_PROOF_DIR || path.join(__dirname, "../.rivals-proof");
+// Eldorado's account form permits five screenshots total. Keep every original
+// proof privately; lead with the event costume and publish at most five.
+function listingProofs(prep) {
+  return [...prep.gameReport.proofs]
+    .sort(
+      (a, b) =>
+        Number(/IGNITE/i.test(b.costume)) - Number(/IGNITE/i.test(a.costume)),
+    )
+    .slice(0, 5);
+}
 function createService(over = {}) {
   const db = () => over.db || require("mongoose").connection.db;
   const sales = () => over.sales || require("./steamSales");
@@ -96,6 +106,10 @@ function createService(over = {}) {
       email = sales()._shared.dec(steam.email).toLowerCase();
     if (!password || !/@/.test(email))
       throw fail("Saved Steam login is incomplete");
+    if (
+      await count("buyermailsessions", { inboxAddress: email, revokedAt: null })
+    )
+      throw fail("Inbox already belongs to another active buyer mail session");
     const inbox = await sales()._shared.checkInbox(email, { fresh: true });
     if (!inbox.ok) throw fail("Steam-only inbox verification failed");
     // Same restricted Steam reader the buyer page uses. Never return messages.
@@ -185,6 +199,7 @@ function createService(over = {}) {
         )
           throw fail("Invalid draft price");
         const copy = draft(prep, steam);
+        const selectedProofs = listingProofs(prep);
         listing = new (Listing())({
           market: "eldorado",
           kind: "rivals",
@@ -197,7 +212,7 @@ function createService(over = {}) {
           title: copy.title,
           description: copy.description,
           priceUsd: price,
-          coverSource: `/api/rivals/preparations/${id}/proof/${prep.gameReport.proofs[0].file}`,
+          coverSource: `/api/rivals/preparations/${id}/proof/${selectedProofs[0].file}`,
           createdBy: String(actor),
           accounts: [],
         });
@@ -247,7 +262,7 @@ function createService(over = {}) {
         });
         await listing.save();
         const images = [];
-        for (const p of prep.gameReport.proofs)
+        for (const p of selectedProofs)
           images.push(await eld().uploadImage(path.join(root, id, p.file)));
         listing.mainOfferImage = images[0];
         await listing.save();
@@ -317,7 +332,15 @@ function createService(over = {}) {
           }
           await db()
             .collection("rivalspreparations")
-            .updateOne({ _id: id }, { $set: { publishState: "uncertain" } });
+            .updateOne(
+              { _id: id },
+              {
+                $set: {
+                  publishState: "uncertain",
+                  publishErrorStatus: Number(e.status) || 0,
+                },
+              },
+            );
           throw fail(
             "Publication outcome needs reconciliation. Account and mail delivery remain reserved.",
             502,
@@ -354,3 +377,4 @@ function createService(over = {}) {
 module.exports = createService();
 module.exports.createService = createService;
 module.exports.SECTION = SECTION;
+module.exports.listingProofs = listingProofs;
