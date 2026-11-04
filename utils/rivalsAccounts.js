@@ -82,6 +82,10 @@ function validateReport(prep, report) {
   };
 }
 function blockers(prep, steam, permission) {
+  if (prep.listingId)
+    return prep.publishState === "uncertain"
+      ? ["Publication needs reconciliation; do not retry"]
+      : [];
   const b = [];
   if (prep.status !== "held") b.push("Stock hold needs review");
   if (
@@ -98,7 +102,8 @@ function blockers(prep, steam, permission) {
   )
     b.push("Steam hold changed");
   if (permission?.canSell !== true) b.push("Check Eldorado selling access");
-  b.push("Configure and verify buyer account/email delivery before publishing");
+  if (!prep.deliveryAudit?.ok)
+    b.push("Check site email delivery before publishing");
   return b;
 }
 function draft(prep, steam) {
@@ -115,7 +120,19 @@ function draft(prep, steam) {
     ...proofs.map((p) => `- ${p.hero}: ${p.costume}`),
     "",
     "The screenshots show this account's actual owned costumes. These rewards are already in game; no Twitch watch or drop claim is required for the listed costumes.",
-    "Buyer account and email delivery details must be finalized before this draft is published.",
+    ...(prep.deliveryAudit?.ok
+      ? [
+          "",
+          "INSTANT DELIVERY",
+          "Steam username and password plus a private mail-page login are delivered on your Eldorado order.",
+          `${prep.deliveryAudit.sessionDays} days of access to Steam Guard and email-change emails from purchase. The original Outlook inbox is not included.`,
+          "Change the Steam password and linked email to your own after delivery. Use the private mail page for the confirmation codes.",
+          "Steam signup country: " +
+            (steam?.signupCountry || "unverified") +
+            ". Finalized Steam Store country is not guaranteed. Please wait at least 1 month after receiving the account before making purchases on the Steam Store.",
+          "For support, contact us through your Eldorado order.",
+        ]
+      : ["Check the existing site email delivery flow before publishing."]),
   ].join("\n");
   return {
     title,
@@ -131,11 +148,27 @@ function draft(prep, steam) {
     country,
   };
 }
-function publicRow(prep, steam, permission) {
+function publicRow(prep, steam, permission, listing = null) {
   const r = prep.gameReport;
   return {
     id: prep._id,
     status: prep.status,
+    publishState: prep.publishState || "draft",
+    delivery: prep.deliveryAudit
+      ? {
+          ok: prep.deliveryAudit.ok,
+          days: prep.deliveryAudit.sessionDays,
+          checkedAt: prep.deliveryAudit.checkedAt,
+        }
+      : null,
+    listing: listing
+      ? {
+          id: String(listing._id),
+          url: listing.url,
+          status: listing.status,
+          priceUsd: listing.priceUsd,
+        }
+      : null,
     steamAccountId: String(prep.steamId),
     twitchAccountId: String(prep.twitchId),
     twitchLogin: prep.twitchLogin,

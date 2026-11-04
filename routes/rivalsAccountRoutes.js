@@ -46,6 +46,9 @@ function createRouter({
                 expectedRewards: 1,
                 gameReport: 1,
                 draftPriceUsd: 1,
+                listingId: 1,
+                publishState: 1,
+                deliveryAudit: 1,
               },
             },
           )
@@ -72,8 +75,24 @@ function createRouter({
         )
         .toArray();
       const map = new Map(steam.map((s) => [String(s._id), s]));
+      const listingIds = preps.map((p) => p.listingId).filter(Boolean);
+      const listings = listingIds.length
+        ? await db
+            .collection("steamlistings")
+            .find(
+              { _id: { $in: listingIds } },
+              { projection: { _id: 1, url: 1, status: 1, priceUsd: 1 } },
+            )
+            .toArray()
+        : [];
+      const listingMap = new Map(listings.map((l) => [String(l._id), l]));
       const accounts = preps.map((p) =>
-        logic.publicRow(p, map.get(String(p.steamId)), permission),
+        logic.publicRow(
+          p,
+          map.get(String(p.steamId)),
+          permission,
+          listingMap.get(String(p.listingId)),
+        ),
       );
       res.json({
         success: true,
@@ -85,7 +104,7 @@ function createRouter({
             (a) => a.verifiedCount === a.expectedCount && a.expectedCount > 0,
           ).length,
         },
-        publishEnabled: false,
+        publishEnabled: true,
       });
     } catch {
       res
@@ -206,6 +225,30 @@ function createRouter({
         .json({ success: false, message: "Could not check Eldorado access" });
     }
   });
+  for (const [action, fn] of [
+    ["delivery/check", "checkDelivery"],
+    ["publish", "publish"],
+  ]) {
+    router.post("/api/rivals/preparations/:id/" + action, async (req, res) => {
+      try {
+        const sales = require("../utils/rivalsSales");
+        const result = await sales[fn](
+          req.params.id,
+          String(req.session.admin.username || req.session.admin.id || "admin"),
+        );
+        res.json({ success: true, result });
+      } catch (e) {
+        res
+          .status(e.user ? e.status || 409 : 502)
+          .json({
+            success: false,
+            message: e.user
+              ? e.message
+              : "Rivals operation failed; account remains reserved for review",
+          });
+      }
+    });
+  }
   return router;
 }
 module.exports = createRouter();

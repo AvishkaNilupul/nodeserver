@@ -83,6 +83,8 @@
     price.step = ".01";
     price.value = a.draft.priceUsd;
     const save = el("button", "Save draft price");
+    price.disabled = !!a.listing;
+    save.disabled = !!a.listing;
     save.onclick = async () => {
       save.disabled = true;
       try {
@@ -116,6 +118,60 @@
         "This account is held exclusively. Its linked Twitch rewards remain consumed.",
       ),
     );
+    if (a.listing) {
+      right.append(
+        el("h3", "Eldorado listing"),
+        el("p", a.listing.status + " · $" + a.listing.priceUsd.toFixed(2)),
+      );
+      if (a.listing.url) {
+        const link = el("a", "Open Eldorado listing");
+        link.href = a.listing.url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        right.append(link);
+      }
+    } else {
+      const check = el("button", "Check site email delivery");
+      check.onclick = async () => {
+        check.disabled = true;
+        try {
+          await api(
+            "/api/rivals/preparations/" +
+              encodeURIComponent(a.id) +
+              "/delivery/check",
+            "POST",
+            {},
+          );
+          await load();
+        } catch (e) {
+          status.textContent = e.message;
+        } finally {
+          check.disabled = false;
+        }
+      };
+      const publish = el("button", "Publish on Eldorado");
+      publish.disabled =
+        !!a.blockers.length ||
+        ["publishing", "uncertain"].includes(a.publishState);
+      publish.onclick = async () => {
+        publish.disabled = true;
+        status.textContent =
+          "Publishing the verified account and costume pictures…";
+        try {
+          await api(
+            "/api/rivals/preparations/" + encodeURIComponent(a.id) + "/publish",
+            "POST",
+            {},
+          );
+          await load();
+        } catch (e) {
+          status.textContent = e.message;
+        } finally {
+          publish.disabled = false;
+        }
+      };
+      right.append(check, publish);
+    }
     cols.append(left, right);
     c.append(cols);
     return c;

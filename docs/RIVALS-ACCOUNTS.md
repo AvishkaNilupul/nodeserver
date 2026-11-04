@@ -1,19 +1,31 @@
 # Rivals accounts
 
-The admin page reads the existing `rivalspreparations` holds. It does not create
-another credential pool, release Twitch reservations, start farming or publish
-offers. Steam credentials remain in SteamAccount and its existing delivery flow.
+The admin page reads existing `rivalspreparations` holds. Publishing reuses
+SteamListing, SteamSale and BuyerMailSession kind `steam`, including the existing
+seven-day Steam Guard/email-change viewer, sale sync and order-fulfiller exclusion.
+Original Outlook credentials are not delivered. Description and delivery note
+state this explicitly. Linked Twitch reservations remain consumed permanently.
 
-Only the local worker's completed, logged-out report can supply game ownership
-evidence. Import requires the same preparation, Steam/Twitch pair, hold ID and
-complete expected reward IDs. Screenshots are retained outside public assets,
-hashed and served only through a superadmin/2FA route. No promotion editor exists.
+Only the local worker's completed, logged-out report can supply ownership proof.
+Import checks exact preparation, Steam/Twitch pair, hold ID and complete expected
+reward IDs. Private screenshots are hashed and served only through superadmin/2FA.
 
-The first market is Eldorado game 227, Account, Fresh Account / PC. A draft is
-separate from a published offer. Seller access is checked in the main application
-process through the existing connector. Never probe its cookie jar from a side
-process. Publishing still requires correct account/email delivery and current
-stock exclusivity; a verified game report alone does not establish delivery.
+Publishing checks the real Steam-only inbox ledger and live mail reader, all
+proof hashes, exact reserved pair, no other sales/listings/active booster, and
+normal game sign-out. The preparation's durable publishing marker and conditional
+Steam problem-to-listed reservation prevent duplicate publication across processes.
+After a create request may have reached Eldorado, uncertain outcomes retain the
+reservation and mail session for reconciliation; they never retry automatically.
+Only failures before create release back to the original problem hold.
 
-The standard 10% account fee estimate rounds up to a cent. Net shown excludes
-account acquisition, Twitch stock opportunity cost, support and withdrawal.
+Rivals listings have kind `rivals`; normal Steam add-stock cannot mix in accounts
+without matching costumes, description refresh retains the verified costume copy,
+and delisting restores the internal problem hold rather than generic free stock.
+One verified preparation is one offer/unit. Listing uses game227, Fresh Account/PC,
+all seven original inventory pictures and no claim of ranked readiness or rank.
+
+Seller access uses the main application's connector. A guarded operator CLI can
+publish without touching its cookie jar: refresh blocked, Set-Cookie stripped,
+settings writes refused. Never print delivery entries or credential responses.
+The standard10% account fee estimate rounds up to a cent. Net excludes stock,
+support and withdrawal costs. A draft price is not evidence of market demand.

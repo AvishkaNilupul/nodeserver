@@ -419,9 +419,9 @@ async function reserve(ids) {
   return got;
 }
 
-async function release(ids) {
+async function release(ids, { held = false } = {}) {
   if (!ids.length) return;
-  await SteamAccount.updateMany({ _id: { $in: ids }, stage: "listed" }, { $set: { stage: "stock" } });
+  await SteamAccount.updateMany({ _id: { $in: ids }, stage: "listed" }, { $set: { stage: held ? "problem" : "stock" } });
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +711,7 @@ async function rebuildEntries(listing, remote, cfg, { dropAccountId = null, offe
 async function addAccounts(listingId, accountIds, actor) {
   return withLock(async () => {
     const listing = await loadListing(listingId);
+    if (listing.kind === "rivals") throw userError("Rivals stock requires its own verified costume preparation. Use the Rivals page.");
     requireLive(listing);
     const cfg = await getConfig();
     const vetted = await vetAccounts({ region: listing.region, accountIds, kind: listing.kind, appId: listing.appId, minHours: listing.minHours });
@@ -787,7 +788,7 @@ async function removeAccount(listingId, accountId, actor) {
     unit.removedAt = new Date();
     unit.removedReason = "removed by " + (actor || "operator");
     await revokeSessions([unit.sessionId], "unlisted");
-    await release([String(unit.steamAccountId)]);
+    await release([String(unit.steamAccountId)], { held: listing.kind === "rivals" });
     await readBack(listing).catch(() => {});
     await listing.save();
     return listingView(listing.toObject());
@@ -831,7 +832,7 @@ async function updateText(listingId, { title, description } = {}) {
 async function refreshDescription(listingId) {
   const listing = await loadListing(listingId);
   const cfg = await getConfig();
-  return updateText(listingId, { description: listing.kind === "region" ? suggestDescription(listing.region, cfg.sessionDays) : products.text(products.normalize(listing), listing.region, regionName(listing.region), descriptionFooter(cfg.sessionDays)).description });
+  return updateText(listingId, { description: listing.kind === "rivals" ? listing.description : listing.kind === "region" ? suggestDescription(listing.region, cfg.sessionDays) : products.text(products.normalize(listing), listing.region, regionName(listing.region), descriptionFooter(cfg.sessionDays)).description });
 }
 
 async function setPrice(listingId, priceUsd) {
@@ -909,7 +910,7 @@ async function deleteListing(listingId, actor) {
       back.push(String(u.steamAccountId));
     }
     await revokeSessions(sessions, "unlisted");
-    await release(back);
+    await release(back, { held: listing.kind === "rivals" });
     listing.status = "removed";
     await listing.save();
     return listingView(listing.toObject());
@@ -1303,6 +1304,13 @@ module.exports = {
   isSteamOffer,
   // shared with utils/steamG2g.js and utils/steamDistributor.js
   _shared: {
+    withLock,
+    mintListedSession,
+    revokeSessions,
+    entryFor,
+    descriptionFooter,
+    readBack,
+    listingView,
     LIVE_LISTING,
     REGION_WARNING,
     dec,

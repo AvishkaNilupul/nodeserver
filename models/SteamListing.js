@@ -32,7 +32,8 @@ const listedAccountSchema = new mongoose.Schema(
 const steamListingSchema = new mongoose.Schema(
   {
     market: { type: String, default: "eldorado", index: true },
-    kind: { type: String, enum: ["region", "game", "boosted"], default: "region" },
+    kind: { type: String, enum: ["region", "game", "boosted", "rivals"], default: "region" },
+    preparationId: { type: String, default: "" },
     appId: { type: Number, default: 0 },
     minHours: { type: Number, default: 0 },
     section: { type: mongoose.Schema.Types.Mixed, default: null },
