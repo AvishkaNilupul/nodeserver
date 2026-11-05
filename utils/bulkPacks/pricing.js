@@ -116,18 +116,27 @@ function unitPrice({ anchor, discountPct, market } = {}) {
 //   raw = size * anchor * (1 - d/100)
 //   gameflip        -> roundQuarter(raw)   (Gameflip's $0.25 grid)
 //   eldorado / g2g  -> round2(raw)
+// Rocket League account packs on Eldorado round DOWN to cents instead, so
+// their displayed discount is not reduced by nearest-cent rounding.
 // and never below MARKET_FLOORS[market] — the floor is per LISTING now, so a
 // pack of cheap accounts is lifted as a whole, never account by account. 0 when
 // the anchor is unusable, the size is not a whole number >= 1, or the market is
 // not a bulk-pack market.
-function packPriceFor({ anchor, discountPct, size, market } = {}) {
+function packPriceFor({ anchor, discountPct, size, market, game } = {}) {
   const a = validAnchor(anchor);
   const n = validSize(size);
   if (!a || !n) return 0;
   if (!hasOwn(MARKET_FLOORS, market)) return 0;
   const d = effectiveDiscount(discountPct);
   const raw = n * a * (1 - d / 100);
-  const priced = market === "gameflip" ? roundQuarter(raw) : round2(raw);
+  const rocketLeague =
+    market === "eldorado" &&
+    String(game || "").trim().toLowerCase() === "rocket league";
+  // Reviewed Rocket League pack prices round down so the stated discount
+  // is never reduced by rounding (e.g. $0.74 × 5 × 95% -> $3.51).
+  const priced = rocketLeague
+    ? Math.floor(Number((raw * 100).toPrecision(15))) / 100
+    : market === "gameflip" ? roundQuarter(raw) : round2(raw);
   return Math.max(MARKET_FLOORS[market], priced);
 }
 
@@ -319,14 +328,14 @@ function pickAnchor({ rows, set, market } = {}) {
 // echoed as the EFFECTIVE discount, so a label built from it always matches the
 // price beside it. Entries without a whole minQty >= 1 are skipped rather than
 // quoted.
-function tierQuote({ anchor, market, tiers } = {}) {
+function tierQuote({ anchor, market, tiers, game } = {}) {
   const out = [];
   for (const t of Array.isArray(tiers) ? tiers : []) {
     if (!t || typeof t !== "object") continue;
     const minQty = toNum(t.minQty);
     if (!Number.isInteger(minQty) || minQty < 1) continue;
     const discountPct = effectiveDiscount(t.discountPct);
-    const pack = packPriceFor({ anchor, discountPct, size: minQty, market });
+    const pack = packPriceFor({ anchor, discountPct, size: minQty, market, game });
     out.push({
       minQty,
       discountPct,

@@ -944,11 +944,12 @@ async function priceThePack({
   discountPct,
   market,
   size,
+  game,
 }) {
   if (custom == null) {
     const packPrice =
       Number(
-        await pricing.packPriceFor({ anchor, discountPct, size, market }),
+        await pricing.packPriceFor({ anchor, discountPct, size, market, game }),
       ) || 0;
     const unitPrice =
       Number(await pricing.perAccountPrice({ packPrice, size })) || 0;
@@ -1338,6 +1339,7 @@ async function sendOfferInner(input, actor) {
     discountPct,
     market,
     size: minQty,
+    game: source === "farm" ? "" : game,
   });
   if (!priced.ok) {
     return refuse(priced.status, priced.message, input, actor, priced.extra);

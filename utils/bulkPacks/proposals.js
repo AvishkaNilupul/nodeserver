@@ -187,9 +187,9 @@ function packPricer(pricing) {
 // whole packs the room makes. No price reference = nothing send.js would
 // publish, so an unpriced tier never fits (the button would only come back
 // 409).
-function packTier({ price, anchor, market, minQty, discountPct, room }) {
+function packTier({ price, anchor, market, minQty, discountPct, room, game }) {
   const size = Number.isInteger(minQty) && minQty >= 1 ? minQty : 0;
-  const packPrice = size ? price({ anchor, discountPct, size, market }) : 0;
+  const packPrice = size ? price({ anchor, discountPct, size, market, game }) : 0;
   const priced = packPrice > 0;
   const packsAvailable = packsFor(room, size);
   return {
@@ -596,7 +596,7 @@ async function buildAccountProposals(limit, startedAt) {
         const anchor = num(a.anchor);
         // tierQuote only normalises the tier list here (whole minQty, the
         // EFFECTIVE discount); every price is the pack price below.
-        const quotes = pricing.tierQuote({ anchor, market, tiers });
+        const quotes = pricing.tierQuote({ anchor, market, tiers, game });
         // What a pack must fit into (accounts): the surplus over the singles
         // reserve (dropset, every market), or the share of the no-claim shelf
         // a NEW offer on this market would get.
@@ -626,6 +626,7 @@ async function buildAccountProposals(limit, startedAt) {
                 minQty,
                 discountPct: num(q && q.discountPct),
                 room,
+                game,
               }),
               liveOfferId: liveBySlot.get(slot) || null,
             };
