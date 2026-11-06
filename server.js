@@ -673,6 +673,7 @@ app.get("/discord-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.redirect("/admin/discord-farm");
 });
 
+app.use(require("./routes/tiktokFarmRoutes"));
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================

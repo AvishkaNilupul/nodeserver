@@ -273,6 +273,12 @@
       icon: ICONS.admins,
       items: [
         {
+          href: "/admin/tiktok-farm",
+          label: "TikTok Farm",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
+        {
           href: "/system-health.html",
           label: "System health",
           // A heartbeat, matching the activity log's pulse line beside it —
