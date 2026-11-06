@@ -19,7 +19,7 @@ function parseCredential(input) {
   return { username: username.trim(), password };
 }
 
-function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online }) {
+function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online, discoveryRoom }) {
   let seenAt = null;
   const log = (state, reason) => ({ $each: [{ at: new Date(now()), state, reason }], $slice: -24 });
   const authenticate = (req, res, next) => {
@@ -88,7 +88,7 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
       });
       return res.json({ job: null });
     }
-    res.json({ job: { account: record.account, lease, credential } });
+    res.json({ job: { account: record.account, lease, credential, seedRoom: await discoveryRoom(record.account) } });
   }));
 
   router.post(PREFIX + "/worker/setup/update", authenticate, jsonOnly, wrap(async (req, res) => {

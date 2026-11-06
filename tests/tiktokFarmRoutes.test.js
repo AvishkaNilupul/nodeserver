@@ -173,6 +173,7 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal(offline.online, false);
   const backgroundScans = (await Promise.all([tick(), tick()])).map((result) => result.scan).filter(Boolean);
   assert.equal(backgroundScans.length, 1);
+  assert.equal(backgroundScans[0].room, batch.room);
   const catalogReport = (scan, events) => background("worker/catalog", { account: scheduled, id: scan.id, events });
   assert.equal((await catalogReport(backgroundScans[0], [slower, faster])).status, 200);
   const backgroundJob = (await tick()).job;

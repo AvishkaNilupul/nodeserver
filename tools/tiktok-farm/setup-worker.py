@@ -73,7 +73,7 @@ def setup(control, job, args):
         device.tracing()
         try:
             driver = runpy.run_path(str(HERE / "driver.py"))["Driver"](runpy.run_path(str(TRACE / "happy-watch-control.py")))
-            driver.catalog(device.serial, "7704940109955353374")
+            driver.catalog(device.serial, job.get("seedRoom") or "7704940109955353374")
         except Exception:
             raise login_tools["LoginAttention"]("session-check") from None
         update("registering")

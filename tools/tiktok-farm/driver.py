@@ -111,7 +111,7 @@ class Driver:
             raise FarmError("session-required")
         if not app.pid:
             shell(f"monkey -p {APP} -c android.intent.category.LAUNCHER 1", check=True)
-            time.sleep(12)
+            time.sleep(17)
             update("bootstrap", 0)
             with frida_deadline():
                 app = next(app for app in device.enumerate_applications() if app.identifier == APP)
@@ -229,7 +229,7 @@ class Driver:
                     pass
         print(f"{serial} bootstrap timed out ({observations}, matched {sorted(matched)})",
               file=sys.stderr, flush=True)
-        raise FarmError("session-required")
+        raise FarmError("capture-timeout" if discovery else "session-required")
 
     def mac(self, client, capture, **options):
         host, headers, body = capture

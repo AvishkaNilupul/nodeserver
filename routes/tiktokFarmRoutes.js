@@ -75,7 +75,13 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     { ...(account && { account }), active: true, state: "running", leaseUntil: { $lte: new Date(now()) } },
     { $set: { active: false, state: "review", phase: "lease-expired" } },
   );
-  const setupOnline = mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online });
+  async function discoveryRoom(account) {
+    const recent = await Model.findOne({ account, state: "completed" }).sort({ updatedAt: -1 }).select("room updatedAt").lean();
+    if (recent && now() - recent.updatedAt < 2 * 60 * 60_000 && ID.test(recent.room)) return recent.room;
+    const latest = await Model.findOne({ state: "completed" }).sort({ updatedAt: -1 }).select("room").lean();
+    return latest && ID.test(latest.room) ? latest.room : process.env.TIKTOK_CATALOG_SEED_ROOM || "7704940109955353374";
+  }
+  const setupOnline = mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online, discoveryRoom });
 
   router.get("/admin/tiktok-farm", ...admin, (_req, res) => {
     res.set("Cache-Control", "no-store");
@@ -179,9 +185,8 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
   async function createScan(account, { auto, batch, scheduleToken }) {
     if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
     if (await Model.exists({ account, active: true })) return { account, reason: "Worker busy" };
-    const recent = await Model.findOne({ account, state: "completed" }).sort({ updatedAt: -1 }).select("room").lean();
     // The seed only prompts a fresh authenticated discovery request.
-    const room = recent?.room || process.env.TIKTOK_CATALOG_SEED_ROOM || "7704940109955353374";
+    const room = await discoveryRoom(account);
     if (!ID.test(room)) return { account, reason: "No discovery room available" };
     if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
     scans.set(account, { id: randomUUID(), room, auto, batch, scheduleToken, expiresAt: now() + SCAN_MS });
