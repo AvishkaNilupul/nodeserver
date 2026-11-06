@@ -10,6 +10,7 @@ const { createRouter } = require("../routes/tiktokFarmRoutes");
 test("isolates TikTok runs, encrypted codes, and event discovery across accounts", async (t) => {
   process.env.CRED_SECRET = "test-only credential encryption secret";
   const key = "a distinct test-only machine worker key";
+  const setupKey = "a separate test-only setup worker key";
   let clock = Date.now();
   const mongo = await MongoMemoryServer.create();
   t.after(async () => { await mongoose.disconnect(); await mongo.stop(); });
@@ -22,14 +23,15 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
     if (req.headers["x-test-superadmin"] === "1") req.session = { admin: { role: "superadmin", tfa: true } };
     next();
   });
-  const routerOptions = { workerKey: () => key, now: () => clock };
+  const routerOptions = { workerKey: () => key, setupKey: () => setupKey, now: () => clock };
   app.use("/restarted", createRouter(routerOptions));
   app.use(createRouter(routerOptions));
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = "http://127.0.0.1:" + server.address().port;
-  const auth = { admin: { "x-test-superadmin": "1" }, worker: { authorization: "Bearer " + key } };
+  const auth = { admin: { "x-test-superadmin": "1" }, worker: { authorization: "Bearer " + key },
+    setup: { authorization: "Bearer " + setupKey } };
 
   async function request(route, body, role, instance = "") {
     const response = await fetch(base + instance + "/api/tiktok-farm/" + route, {
@@ -55,6 +57,36 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert(!JSON.stringify(accountState).includes(login.username));
   assert(!JSON.stringify(accountState).includes(login.password));
   assert.deepEqual(await request(loginPath, undefined, "admin"), { status: 200, ...login });
+  const newSlot = "tiktok-05";
+  const setupPath = "accounts/" + newSlot + "/setup";
+  assert.equal((await request("accounts/tiktok-01/setup", { credential: login }, "admin")).status, 400);
+  assert.equal((await request(setupPath, { credential: login }, "admin")).status, 202);
+  assert.equal((await request(setupPath, { credential: login }, "admin")).status, 409);
+  assert.equal((await request("worker/setup/poll", {}, "worker")).status, 401);
+  const localJob = (await request("worker/setup/poll", {}, "setup")).job;
+  assert.equal(localJob.account, newSlot);
+  assert.deepEqual(localJob.credential, login);
+  const progress = (job, state, reason) => request("worker/setup/update", {
+    account: job.account, lease: job.lease, serial: "emulator-5570", state, reason,
+    ...(state === "ready" && { handle: "@fixture.user" }),
+  }, "setup");
+  assert.equal((await progress(localJob, "attention", "verification-required")).status, 200);
+  assert.equal((await progress(localJob, "ready")).status, 409);
+  const setupState = await request("state", undefined, "admin");
+  const onboarding = setupState.accounts.find(({ account }) => account === newSlot).setup;
+  assert.equal(onboarding.state, "attention");
+  assert.deepEqual(onboarding.log.map(({ state }) => state), ["queued", "booting", "attention"]);
+  assert(!JSON.stringify(setupState).includes(localJob.lease));
+  assert(!JSON.stringify(setupState).includes(login.password));
+  assert.equal((await request(setupPath + "/resume", {}, "admin")).status, 202);
+  const resumedSetup = (await request("worker/setup/poll", {}, "setup")).job;
+  assert.notEqual(resumedSetup.lease, localJob.lease);
+  assert.equal((await progress(resumedSetup, "registering")).status, 200);
+  assert.equal((await progress(resumedSetup, "ready")).status, 200);
+  const readyAccount = (await request("state", undefined, "admin")).accounts.find(({ account }) => account === newSlot);
+  assert(readyAccount.automation.enabled);
+  assert.equal(readyAccount.setup.state, "ready");
+  assert.equal(readyAccount.setup.handle, "@fixture.user");
   const batch = { accounts, campaign: "123", room: "456", task: "789" };
   assert.equal((await request("start", batch, "admin")).status, 409);
   const poll = (account) => request("worker/poll", { account }, "worker");

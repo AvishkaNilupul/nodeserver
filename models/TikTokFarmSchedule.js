@@ -10,6 +10,13 @@ const schema = new mongoose.Schema({
   lastApiRoute: String,
   credentials: { type: String, select: false },
   credentialsSavedAt: Date,
+  setupState: String,
+  setupSerial: String,
+  setupHandle: String,
+  setupReason: String,
+  setupLease: { type: String, select: false },
+  setupLeaseUntil: Date,
+  setupLog: [{ _id: false, at: Date, state: String, reason: String }],
 });
 
 module.exports = mongoose.models.TikTokFarmSchedule || mongoose.model("TikTokFarmSchedule", schema);

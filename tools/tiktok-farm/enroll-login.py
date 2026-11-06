@@ -1,0 +1,158 @@
+"""Drive the stock TikTok login UI and pause on account verification."""
+import re
+import shlex
+import subprocess
+import time
+import xml.etree.ElementTree as ET
+
+
+class LoginAttention(Exception):
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def nodes(device):
+    result = device.adb("exec-out", "uiautomator", "dump", "/dev/stdout", timeout=13)
+    output = result.stdout
+    start, end = output.find(b"<?xml"), output.rfind(b"</hierarchy>")
+    if start < 0 or end < start:
+        return []
+    root = ET.fromstring(output[start:end + len(b"</hierarchy>")])
+    return [node.attrib for node in root.iter("node") if node.get("enabled") == "true" and
+            node.get("package") == "com.zhiliaoapp.musically"]
+
+
+def labels(node):
+    return {node.get(key, "").strip().casefold() for key in ("text", "content-desc")}
+
+
+def visible(node):
+    coords = list(map(int, re.findall(r"\d+", node.get("bounds", ""))))
+    return len(coords) == 4 and coords[2] > coords[0] and coords[3] > coords[1]
+
+
+def find(items, names, *, button=False):
+    matches = [node for node in items if visible(node) and labels(node) & names]
+    clickable = next((node for node in matches if node.get("clickable") == "true"), None)
+    return clickable or (matches[0] if matches and not button else None)
+
+
+def tap(device, node):
+    left, top, right, bottom = map(int, re.findall(r"\d+", node["bounds"]))
+    device.adb("shell", "input", "tap", str((left + right) // 2), str((top + bottom) // 2))
+
+
+def type_text(device, node, text):
+    if not text.isascii() or any(ord(ch) < 32 or ord(ch) > 126 for ch in text):
+        raise LoginAttention("unsupported-input")
+    tap(device, node)
+    # ADB's input command interprets %s as a space. Split a literal %s across two inputs.
+    parts = re.split(r"(?<=%)(?=s)", text)
+    commands = ["input text " + shlex.quote(part.replace(" ", "%s")) for part in parts]
+    device.adb("shell", "sh", "-s", input=("\n".join(commands) + "\n").encode())
+
+
+def form_fields(items):
+    fields = [node for node in items if node.get("class", "").endswith(".EditText") and visible(node)]
+    password = next((node for node in fields if node.get("password") == "true"), None)
+    login = next((node for node in fields if node is not password), None)
+    return login, password
+
+
+def challenge(items):
+    text = " ".join(label for node in items for label in labels(node))
+    return any(phrase in text for phrase in (
+        "verify you're human", "verify you are human", "verify to continue", "security verification",
+        "verification code", "enter the code", "check your email", "slide to verify", "captcha",
+        "two-step verification", "confirm it's you", "prove you're human",
+    ))
+
+
+def rejected(items):
+    text = " ".join(label for node in items for label in labels(node))
+    return any(phrase in text for phrase in ("incorrect password", "password is incorrect",
+        "wrong password", "couldn't find this account", "account doesn't exist", "too many attempts"))
+
+
+def sign_in(device, credential, status):
+    username, password = credential["username"], credential["password"]
+    progress = time.monotonic()
+    next_check = progress + 20
+    identity_sent = device.state / "identity-attempted"
+    password_sent = device.state / "password-attempted"
+    entered_username = False
+    entered_password = False
+    selected_email = False
+    opened_profile = False
+    while time.monotonic() - progress < 110:
+        if time.monotonic() >= next_check:
+            status("signing-in")
+            next_check = time.monotonic() + 20
+        try:
+            items = nodes(device)
+        except (subprocess.SubprocessError, ET.ParseError):
+            time.sleep(2)
+            continue
+        if find(items, {"edit profile"}):
+            handles = [node.get("text", "") for node in items
+                       if re.fullmatch(r"@[a-zA-Z0-9_.]{1,32}", node.get("text", ""))]
+            if not handles:
+                raise LoginAttention("no-profile")
+            if re.fullmatch(r"@?[a-zA-Z0-9_.]+", username) and username.lstrip("@").casefold() not in {
+                handle[1:].casefold() for handle in handles
+            }:
+                raise LoginAttention("login-rejected")
+            return handles[0]
+        if rejected(items):
+            raise LoginAttention("login-rejected")
+        login, secret = form_fields(items)
+        if challenge(items) and not secret:
+            raise LoginAttention("verification-required")
+        if secret:
+            if password_sent.exists():
+                time.sleep(3)
+                continue
+            if login and labels(login) & {"email or username", "username", "email"} and not entered_username:
+                type_text(device, login, username)
+                entered_username = True
+                time.sleep(1)
+                continue
+            if not entered_password:
+                type_text(device, secret, password)
+                entered_password = True
+                time.sleep(1)
+                continue
+            submit = find(items, {"log in", "continue", "next"}, button=True)
+            if submit:
+                password_sent.touch(mode=0o600, exist_ok=False)
+                tap(device, submit)
+                time.sleep(5)
+                continue
+        if button := find(items, {"use phone / email / username"}, button=True):
+            tap(device, button)
+        elif (not selected_email and (not login or labels(login) & {"phone number"}) and
+              (button := find(items, {"email / username", "email or username"}, button=True))):
+            tap(device, button)
+            selected_email = True
+        elif button := find(items, {"log in with password", "use password", "enter password"}):
+            tap(device, button)
+        elif login and not secret and not identity_sent.exists():
+            if not entered_username and labels(login) & {"email or username", "email", "username"}:
+                type_text(device, login, username)
+                entered_username = True
+                time.sleep(1)
+                continue
+            if username.casefold() in labels(login) and (submit := find(items, {"continue", "next"}, button=True)):
+                identity_sent.touch(mode=0o600, exist_ok=False)
+                tap(device, submit)
+                time.sleep(4)
+                continue
+        elif not opened_profile and (button := find(items, {"profile"})):
+            tap(device, button)
+            opened_profile = True
+        elif button := find(items, {"log in", "log in to tiktok"}, button=True):
+            if not password_sent.exists() and not identity_sent.exists():
+                tap(device, button)
+        time.sleep(2)
+    raise LoginAttention("verification-required" if password_sent.exists() or identity_sent.exists() else "unexpected-ui")

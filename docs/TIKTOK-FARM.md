@@ -32,6 +32,10 @@ Manual start is still available if you have a campaign and room ID. Leave the ta
 
 The Accounts tab can save an encrypted login against an existing or future worker slot. Only a superadmin with 2FA can save or reveal a login. Sign in to TikTok on the assigned Android worker to activate that slot. The Events tab shows eligible live rewards and dates supplied by TikTok for upcoming events.
 
+For a new slot, select **Create emulator & sign in**. The Mac setup worker boots a clean Android device, installs the verified TikTok APK and attempts the supplied sign-in once. Accounts shows the step log and emulator. Complete any TikTok verification in that window and click **Resume setup**. After checking the signed-in profile and farm access, the setup worker registers the slot and enables auto farm.
+
+The setup worker uses a separate `TIKTOK_SETUP_KEY` stored in a private file on the Mac. Run `setup-worker.py --server https://YOUR-ADMIN-HOST --key-file /private/path/setup-key` in the existing trace environment. A Mac restart restores enrolled devices when the setup worker starts. The setup worker defaults to four running Android instances on this host.
+
 ## SOOP phone API transport
 
 Run `phone-bridge.py` on the phone with Termux Python and curl over a private SSH stream. On the Mac, put a mode-0600 `phone-command.json` beside `mac-worker.py` and `phone-client.py`. It contains the command and arguments for opening that stream. Each worker opens a separate connection for its own catalog or job. The dashboard reports the API route. The Mac Android player still provides playback for scheduled rewards. If the phone connection cannot be opened, the worker starts the operation with its Mac transport. A failed claim is never resent on a different route.

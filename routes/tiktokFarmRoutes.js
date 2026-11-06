@@ -5,6 +5,7 @@ const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
 const { decrypt, encrypt, isEncrypted } = require("../utils/secretBox");
 const Run = require("../models/TikTokFarmRun");
 const Schedule = require("../models/TikTokFarmSchedule");
+const { mountOnboarding, parseCredential } = require("./tiktokFarmOnboarding");
 
 const SLOT = /^[a-z][a-z0-9-]{0,31}$/;
 const ID = /^\d{1,22}$/;
@@ -21,7 +22,8 @@ const PHASES = new Set(["bootstrap", "watching", "claiming"]);
 const FAILURE_PHASES = new Set(["ineligible", "session-required", "room-ended", "worker-error", "claim-uncertain"]);
 const hash = (value) => createHash("sha256").update(value).digest();
 
-function createRouter({ Model = Run, Automation = Schedule, workerKey = () => process.env.TIKTOK_WORKER_KEY, now = Date.now } = {}) {
+function createRouter({ Model = Run, Automation = Schedule, workerKey = () => process.env.TIKTOK_WORKER_KEY,
+  setupKey = () => process.env.TIKTOK_SETUP_KEY, now = Date.now } = {}) {
   const router = express.Router();
   const seen = new Map();
   const capabilities = new Set();
@@ -73,6 +75,7 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     { ...(account && { account }), active: true, state: "running", leaseUntil: { $lte: new Date(now()) } },
     { $set: { active: false, state: "review", phase: "lease-expired" } },
   );
+  const setupOnline = mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online });
 
   router.get("/admin/tiktok-farm", ...admin, (_req, res) => {
     res.set("Cache-Control", "no-store");
@@ -85,7 +88,7 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       Model.find({ state: "completed", code: { $exists: true } })
         .select("account campaign task eventName updatedAt").sort({ updatedAt: -1 }).limit(200).lean(),
       Automation.find({ $or: [{ enabled: true }, { credentialsSavedAt: { $exists: true } }] })
-        .select("account enabled nextScanAt lastScanAt lastResult lastApiRoute credentialsSavedAt -_id").lean(),
+        .select("account enabled nextScanAt lastScanAt lastResult lastApiRoute credentialsSavedAt setupState setupSerial setupHandle setupReason setupLog -_id").lean(),
       Model.countDocuments({ state: "completed", code: { $exists: true } }),
     ]);
     const scheduled = new Map(schedules.map((schedule) => [schedule.account, schedule]));
@@ -94,27 +97,26 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       const scan = scans.get(account);
       const record = scheduled.get(account);
       if (online(account) || scan?.expiresAt > now() || record) {
-        const { credentialsSavedAt, ...schedule } = record || {};
+        const { credentialsSavedAt, setupState, setupSerial, setupHandle, setupReason, setupLog, ...schedule } = record || {};
         const feed = upcomingFeeds.get(account);
         accounts.push({ account, lastSeen: seen.get(account), online: online(account), canScan: capabilities.has(account),
           scanning: Boolean(scan && scan.expiresAt > now()), catalog: fresh(account),
           upcoming: feed && now() - feed.updatedAt < UPCOMING_MS ? feed.events : [],
           apiRoute: apiRoutes.get(account) || schedule.lastApiRoute, credentialsSavedAt,
+          setup: setupState && { state: setupState, serial: setupSerial, handle: setupHandle, reason: setupReason, log: setupLog },
           automation: schedule.enabled ? schedule : undefined });
       }
     }
-    res.json({ accounts, runs, codes, codeCount, autoScanMinutes: AUTO_SCAN_MS / 60_000 });
+    res.json({ accounts, runs, codes, codeCount, setupOnline: setupOnline(), autoScanMinutes: AUTO_SCAN_MS / 60_000 });
   }));
   router.post("/api/tiktok-farm/accounts/:account/credentials", ...admin, wrap(async (req, res) => {
     const { account } = req.params;
-    const { username, password } = req.body?.credential || {};
-    if (!SLOT.test(account) || typeof username !== "string" || !username.trim() || username.length > 254 ||
-        typeof password !== "string" || !password.length || password.length > 512 ||
-        /[\u0000-\u001f\u007f]/.test(username + password)) {
+    const credential = parseCredential(req.body?.credential);
+    if (!SLOT.test(account) || !credential) {
       return res.status(400).json({ error: "Enter a valid account slot, username, and password" });
     }
     await Automation.init();
-    const credentials = encrypt(JSON.stringify({ username: username.trim(), password }));
+    const credentials = encrypt(JSON.stringify(credential));
     await Automation.updateOne({ account }, {
       $set: { credentials, credentialsSavedAt: new Date(now()) },
     }, { upsert: true });

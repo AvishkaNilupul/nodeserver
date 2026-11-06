@@ -19,6 +19,8 @@
   .summary-grid progress { width: 100%; }
   .account-details { display: grid; gap: 4px; }
   .account-details button { justify-self: start; }
+  .setup-log { margin: 6px 0; padding-left: 20px; color: #afb8c8; font-size: 13px; }
+  .setup-log li { margin: 3px 0; }
   .field-help { margin: 8px 0 14px; }
   .callout { padding: 10px 13px; background: #171c26; border-radius: 8px; }
   dialog { max-width: min(90vw, 420px); border: 1px solid #596983; border-radius: 12px; background: #1c222d; color: inherit; }
@@ -111,13 +113,14 @@
     </details>
   </section>
   <section>
-    <h2>Save a login</h2>
-    <p class="field-help">Save credentials for an existing or future slot. The account becomes ready after it signs in on a worker.</p>
+    <div class="section-head"><h2>Add a TikTok account</h2><small id="setupWorkerStatus">Checking Mac setup worker…</small></div>
+    <p class="field-help">Create emulator starts an isolated Android session on the Mac and attempts sign-in. If TikTok asks for verification, finish it in that emulator and click Resume setup.</p>
     <form id="credentialsForm">
       <label>Worker slot<input name="account" placeholder="tiktok-03" required pattern="[a-z][a-z0-9\-]{0,31}" maxlength="32"></label>
       <label>Username or email<input name="username" autocomplete="off" required maxlength="254"></label>
       <label>Password<input name="password" type="password" autocomplete="new-password" required maxlength="512"></label>
-      <button class="primary" type="submit">Save encrypted login</button>
+      <button class="primary" type="submit" value="setup">Create emulator &amp; sign in</button>
+      <button type="submit" value="save">Save login only</button>
     </form>
   </section>
   </div>
@@ -339,6 +342,57 @@ function addText(parent, tag, value) {
   return node;
 }
 
+const setupLabels = {
+  queued: "Setup queued", booting: "Creating or booting emulator", installing: "Installing verified TikTok",
+  "signing-in": "Signing in", verifying: "Verifying account and farm access",
+  registering: "Registering farm worker", ready: "Setup complete", attention: "Action needed", failed: "Setup failed",
+};
+const setupReasons = {
+  "verification-required": "Finish TikTok verification or sign in in the emulator, then resume.",
+  "login-rejected": "TikTok did not accept this login. Check the details and sign in in the emulator.",
+  "unsupported-input": "Enter this login manually in the emulator, then resume.",
+  "trace-permission": "The emulator trace service needs attention.",
+  "capacity": "The Mac has reached its running emulator limit.",
+  "disk-space": "The Mac needs more free disk space.",
+  "sdk-assets": "The Mac is missing a required Android image.",
+  "boot-timeout": "Android did not finish booting.",
+  "no-profile": "Open the signed-in account’s own profile and resume.",
+  "session-check": "The sign-in was seen, but farm access could not be verified. Resume to check it again.",
+  "unexpected-ui": "Open TikTok in the emulator and finish sign-in there, then resume.",
+  "credentials-unavailable": "Save the login again, then resume.",
+  "worker-error": "The Mac setup worker could not finish this step. Resume to retry.",
+};
+
+function showSetup(card, worker) {
+  const setup = worker.setup;
+  if (!setup) return;
+  addText(card, "strong", setupLabels[setup.state] || setup.state);
+  if (setup.serial) addText(card, "small", setup.serial);
+  if (setup.handle) addText(card, "small", setup.handle);
+  if (setup.reason) addText(card, "p", setupReasons[setup.reason] || "Setup requires attention.");
+  if (["attention", "failed"].includes(setup.state)) {
+    const resume = addText(card, "button", "Resume setup");
+    resume.onclick = async () => {
+      resume.disabled = true;
+      try {
+        await api("/accounts/" + worker.account + "/setup/resume", {});
+        report("Setup queued for " + worker.account);
+        await refresh();
+      } catch (error) { report(error.message, true); }
+      finally { resume.disabled = false; }
+    };
+  }
+  const details = document.createElement("details");
+  addText(details, "summary", "Setup activity");
+  const list = document.createElement("ol");
+  list.className = "setup-log";
+  for (const item of setup.log || []) {
+    addText(list, "li", new Date(item.at).toLocaleTimeString() + " · " + (setupLabels[item.state] || item.state));
+  }
+  details.append(list);
+  card.append(details);
+}
+
 const dialog = document.querySelector("#loginDialog");
 dialog.addEventListener("close", () => {
   document.querySelector("#loginUsername").textContent = "";
@@ -350,8 +404,8 @@ function renderWorkerSummary(accounts, runs) {
   const latest = new Map();
   for (const run of runs) if (!latest.has(run.account)) latest.set(run.account, run);
   const rows = [...accounts].sort((a, b) => a.account.localeCompare(b.account));
-  const signature = JSON.stringify(rows.map(({ account, online, apiRoute, automation, scanning, catalog, credentialsSavedAt }) =>
-    [account, online, apiRoute, automation, scanning, catalog?.updatedAt, credentialsSavedAt, active.get(account), latest.get(account)]));
+  const signature = JSON.stringify(rows.map(({ account, online, apiRoute, automation, scanning, catalog, credentialsSavedAt, setup }) =>
+    [account, online, apiRoute, automation, scanning, catalog?.updatedAt, credentialsSavedAt, setup, active.get(account), latest.get(account)]));
   if (signature === summarySignature) return;
   summarySignature = signature;
   const overview = document.querySelector("#workerSummary");
@@ -363,7 +417,8 @@ function renderWorkerSummary(accounts, runs) {
     const run = active.get(worker.account);
     const lastRun = latest.get(worker.account);
     const lastScan = worker.catalog?.updatedAt || worker.automation?.lastScanAt;
-    const state = !worker.online ? "Offline" : worker.scanning ? "Scanning" :
+    const setupPending = worker.setup && worker.setup.state !== "ready";
+    const state = setupPending ? setupLabels[worker.setup.state] : !worker.online ? "Offline" : worker.scanning ? "Scanning" :
       run ? (run.phase === "watching" ? "Watching" : run.phase === "claiming" ? "Claiming" : "Starting") :
       worker.catalog?.error === "session-required" || worker.automation?.lastResult === "Sign-in check needed" ||
         lastRun?.phase === "session-required" && !lastScan ? "Sign-in check needed" :
@@ -393,6 +448,7 @@ function renderWorkerSummary(accounts, runs) {
     accountCard.classList.add("account-details");
     addText(accountCard, "small", lastScan ? "Last event check " + new Date(lastScan).toLocaleString() : "No event check recorded");
     addText(accountCard, "small", worker.credentialsSavedAt ? "Login saved and encrypted" : "No saved login");
+    showSetup(accountCard, worker);
     const button = addText(accountCard, "button", worker.credentialsSavedAt ? "Reveal saved login" : "Add login");
     button.onclick = async () => {
       if (!worker.credentialsSavedAt) {
@@ -442,12 +498,14 @@ document.querySelector("#credentialsForm").addEventListener("submit", async (eve
   event.preventDefault();
   const login = event.currentTarget;
   const { account, username, password } = Object.fromEntries(new FormData(login));
-  const button = login.querySelector("button");
+  const button = event.submitter || login.querySelector("button");
+  const setup = button.value === "setup";
   button.disabled = true;
   try {
-    await api("/accounts/" + encodeURIComponent(account) + "/credentials", { credential: { username, password } });
+    await api("/accounts/" + encodeURIComponent(account) + (setup ? "/setup" : "/credentials"),
+      { credential: { username, password } });
     login.reset();
-    report("Encrypted login saved for " + account);
+    report((setup ? "Emulator setup queued for " : "Encrypted login saved for ") + account);
     await refresh();
   } catch (error) { report(error.message, true); }
   finally { button.disabled = false; }
@@ -550,6 +608,7 @@ async function refresh() {
     renderRuns(data.runs);
     renderCodes(data.codes);
     document.querySelector("#lastRefresh").textContent = "Updated " + new Date().toLocaleTimeString();
+    document.querySelector("#setupWorkerStatus").textContent = data.setupOnline ? "Mac setup worker online" : "Mac setup worker offline";
   } catch (error) { report(error.message, true); }
   finally { refreshing = false; }
 }
