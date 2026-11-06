@@ -9,7 +9,7 @@ import sys
 from threading import Timer
 import time
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import frida
 from curl_cffi import CurlOpt, requests
@@ -48,6 +48,9 @@ class Driver:
     def __init__(self, trace):
         self.trace = trace
         trace["HOSTS"].add(REGIONAL_HOST)
+        trace["mac_request"].__globals__["REWARD"] = re.compile(
+            r"^/webcast/partnership/reward/drops_(detail|poll|list/v2|page_feed)/$"
+        )
 
     def available(self, serial):
         try:
@@ -72,6 +75,7 @@ class Driver:
 
     def capture(self, serial, job, update):
         device = frida.get_device(serial, timeout=5)
+        discovery = job.get("discovery") is True
 
         def shell(command, **options):
             return subprocess.run([ADB, "-s", serial, "shell", command], timeout=12,
@@ -157,6 +161,9 @@ class Driver:
                             route, fields = self.trace["clean_route"](headers)
                             if not self.trace["origin_allowed"](fields.get(":authority")):
                                 continue
+                            if (discovery and fields[":authority"].startswith("webcast") and route.startswith("/webcast/")
+                                    and fields.get(":method") == "GET" and {"cookie", "x-tt-token"} <= fields.keys()):
+                                return (host, headers, b""), None
                             if route in (DETAIL, POLL):
                                 observations["reward_reads"] += 1
                                 ids = self.trace["public_query"](fields)
@@ -179,8 +186,8 @@ class Driver:
                                 entry = (upload[0], upload[1], bytes(upload[2]))
                                 if self.entry_room(entry) == job["room"]:
                                     matched["entry"] = entry
-                    if matched.keys() >= {"read", "entry"}:
-                        return matched["read"], matched["entry"]
+                    if "entry" in matched and (job.get("campaign") is None or "read" in matched):
+                        return matched.get("read"), matched["entry"]
                 except (ValueError, IndexError, HPACKError):
                     failed.add(key)
         finally:
@@ -191,7 +198,11 @@ class Driver:
                     except (subprocess.SubprocessError, OSError):
                         print(f"Temporary {tool} rule cleanup failed on {serial}", file=sys.stderr, flush=True)
             finally:
-                session.detach()
+                try:
+                    with frida_deadline():
+                        session.detach()
+                except (frida.TransportError, frida.InvalidOperationError, frida.OperationCancelledError):
+                    pass
         print(f"{serial} bootstrap timed out ({observations}, matched {sorted(matched)})",
               file=sys.stderr, flush=True)
         raise FarmError("session-required")
@@ -229,7 +240,99 @@ class Driver:
         if (any(not re.fullmatch(r"[0-9]{1,22}", job.get(key, "")) for key in ("campaign", "room"))
                 or not re.fullmatch(r"(?:[0-9]{1,22}|auto)", job.get("task", ""))):
             raise FarmError("worker-error")
-        read, entry = self.capture(serial, job, update)
+        anchor = job.get("anchor")
+        if anchor and re.fullmatch(r"[0-9]{1,22}", anchor):
+            _, entry = self.capture(serial, {"room": job["room"]}, update)
+            read = self.get_from_entry(entry, DETAIL, drops_id=job["campaign"], room_id=job["room"],
+                                       anchor_id=anchor, user_type=0)
+        else:
+            read, entry = self.capture(serial, job, update)
+        self.stop_app(serial)
+        return self.complete(read, entry, job, update, preserve)
+
+    @staticmethod
+    def stop_app(serial):
+        subprocess.run([ADB, "-s", serial, "shell", "am", "force-stop", APP], timeout=12, check=True)
+        pid = subprocess.run([ADB, "-s", serial, "shell", "pidof", APP], timeout=12, capture_output=True)
+        if pid.stdout.strip():
+            raise FarmError("worker-error")
+
+    def catalog(self, serial, room):
+        try:
+            read, entry = self.capture(serial, {"room": room, "discovery": True}, lambda *_: None)
+        finally:
+            self.stop_app(serial)
+        return self.catalog_from_entry(read or entry)
+
+    @staticmethod
+    def get_from_entry(entry, route, **params):
+        host, headers, _ = entry
+        original = urlsplit(dict(headers)[":path"])
+        scope = {"drops_id", "room_id", "anchor_id", "user_type", "is_refresh", "is_subscribing"}
+        query = [p for p in original.query.split("&") if p and p.partition("=")[0] not in scope]
+        if params:
+            query.append(urlencode(params))
+        excluded = {":path", "content-type", "content-length", "x-bd-content-encoding", "x-ss-stub", "response-format"}
+        headers = [(k, "GET" if k == ":method" else v) for k, v in headers
+                   if k not in excluded and not k.startswith("tt-ticket-guard-")]
+        path = urlunsplit(original._replace(path=route, query="&".join(query)))
+        return host, [*headers, (":path", path)], b""
+
+    def catalog_from_entry(self, entry):
+        with requests.Session(trust_env=False, default_headers=False, curl_options={CurlOpt.PATH_AS_IS: 1}) as client:
+            def fetch(route, **params):
+                result = self.mac(client, self.get_from_entry(entry, route, **params),
+                                  include_payload=True, json_format=True)
+                if result.get("business") != 0:
+                    raise FarmError("session-required")
+                return result["_payload"].get("data") or {}
+
+            prefix = "/webcast/partnership/reward/"
+            data = fetch(prefix + "drops_list/v2/")
+            campaigns = {}
+
+            def collect(value):
+                if isinstance(value, dict):
+                    name = value.get("drops_name") or value.get("name") or value.get("title")
+                    cid = str(value.get("drops_id") or value.get("id") or "")
+                    if (isinstance(name, str) and re.fullmatch(r"[0-9]{16,22}", cid)
+                            and any(k in value for k in ("drops_id", "game_name", "tasks", "gifts", "end_time"))):
+                        campaigns[cid] = name[:100]
+                    for item in value.values():
+                        collect(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        collect(item)
+
+            collect(data.get("ongoing_drops_list") or [])
+            collect(data.get("current_drops") or [])
+            events = []
+            for cid, name in list(campaigns.items())[:12]:
+                rooms = fetch(prefix + "drops_page_feed/", drops_id=cid, is_refresh="true").get("room_list") or []
+                for room in rooms[:2]:
+                    rid, aid = str(room.get("room_id", "")), str(room.get("anchor_id", ""))
+                    if not all(re.fullmatch(r"[0-9]{16,22}", value) for value in (rid, aid)):
+                        continue
+                    detail = fetch(DETAIL, drops_id=cid, room_id=rid, anchor_id=aid, user_type=0)
+                    tasks = detail.get("tasks") or (detail.get("detail") or {}).get("tasks") or []
+                    candidates = []
+                    for task in tasks:
+                        tid = str(task.get("id", ""))
+                        duration = task.get("view_duration")
+                        status = task.get("user_status")
+                        if (task.get("type") == 5 and status in (1, 3) and re.fullmatch(r"[0-9]{1,22}", tid)
+                                and isinstance(duration, int) and 1 <= duration <= 1800
+                                and not (task.get("gift") or {}).get("need_auth")):
+                            seconds = task.get("countdown_passed")
+                            seconds = min(duration, max(0, seconds)) if isinstance(seconds, int) else 0
+                            candidates.append({"campaign": cid, "name": name, "room": rid, "anchor": aid, "task": tid,
+                                               "duration": duration, "remaining": 0 if status == 3 else duration - seconds})
+                    if candidates:
+                        events.extend(candidates)
+                        break
+            return sorted(events, key=lambda event: (event["remaining"], event["duration"], event["campaign"]))[:30]
+
+    def complete(self, read, entry, job, update, preserve):
         with requests.Session(trust_env=False, default_headers=False,
                               curl_options={CurlOpt.PATH_AS_IS: 1}) as client:
             task = self.read_task(client, read, job)
@@ -239,10 +342,6 @@ class Driver:
             remaining = task.get("view_duration")
             if not isinstance(remaining, int) or not 1 <= remaining <= 1800:
                 raise FarmError("ineligible")
-            subprocess.run([ADB, "-s", serial, "shell", "am", "force-stop", APP], timeout=12, check=True)
-            pid = subprocess.run([ADB, "-s", serial, "shell", "pidof", APP], timeout=12, capture_output=True)
-            if pid.stdout.strip():
-                raise FarmError("worker-error")
             update("watching", int(task.get("countdown_passed") or 0))
             result = self.mac(client, entry, refresh=False, json_format=True)
             if result.get("business") != 0:

@@ -7,7 +7,25 @@
 <style>
   :root { color-scheme: dark; font: 15px system-ui; background: #12151c; color: #edf0f7; }
   main { max-width: 1100px; margin: 36px auto; padding: 0 20px; }
-  h1 { margin-bottom: 4px; }
+  h1 { margin-bottom: 4px; font-size: clamp(28px, 4vw, 38px); }
+  .eyebrow { font-size: 12px; font-weight: 750; letter-spacing: .1em; color: #9bb5ff; text-transform: uppercase; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 12px; margin: 18px 0; }
+  .metric, .event { background: #171c26; border: 1px solid #364052; border-radius: 10px; padding: 14px; }
+  .metric strong { display: block; font-size: 25px; }
+  .metric small, .event small { display: block; margin-top: 4px; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .events { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 235px), 1fr)); gap: 10px; }
+  .event h3 { margin: 0; font-size: 16px; }
+  .event button { margin-top: 10px; }
+  .account { display: flex; align-items: center; gap: 8px; background: #171c26; padding: 9px 12px; border-radius: 8px; }
+  .account small { white-space: nowrap; }
+  .pill { display: inline-block; padding: 3px 8px; border-radius: 12px; background: #30394b; font-size: 12px; }
+  .pill.completed { color: #abf6c4; background: #214237; }
+  .pill.running { color: #a9ccff; background: #23405b; }
+  .pill.failed, .pill.review { color: #ffc0c2; background: #592e39; }
+  progress { display: block; width: 100px; height: 6px; margin-top: 5px; accent-color: #7298ff; }
+  details { margin-top: 18px; } summary { cursor: pointer; color: #aebff1; } details form { margin-top: 12px; }
+  table { min-width: 560px; }
   h2 { font-size: 18px; }
   p, small { color: #afb8c8; }
   section { background: #1c222d; border: 1px solid #364052; border-radius: 12px; padding: 20px; margin: 18px 0; overflow: auto; }
@@ -29,18 +47,37 @@
 </head>
 <body>
 <main>
+  <div class="eyebrow">Live rewards</div>
   <h1>TikTok Farm</h1>
-  <p>Run a drop on multiple accounts and collect the issued codes.</p>
+  <p>Find eligible live rewards, run selected accounts in parallel, and collect their codes.</p>
   <p id="status" role="status" aria-live="polite"></p>
+  <div class="metrics" aria-label="Farm overview">
+    <div class="metric"><strong id="online">–</strong><small>Workers online</small></div>
+    <div class="metric"><strong id="eventCount">–</strong><small>Eligible rewards</small></div>
+    <div class="metric"><strong id="activeCount">–</strong><small>Active runs</small></div>
+    <div class="metric"><strong id="storedCount">–</strong><small>Codes stored</small></div>
+  </div>
   <section>
-    <h2>Go Farm</h2>
-    <div id="accounts">Checking Mac workers…</div>
-    <form id="start">
-      <label>Campaign ID<input name="campaign" required pattern="[0-9]{1,22}" inputmode="numeric"></label>
-      <label>LIVE room ID<input name="room" required pattern="[0-9]{1,22}" inputmode="numeric"></label>
-      <label>Reward task ID<input name="task" required pattern="[0-9]{1,22}|auto" value="auto" title="Use auto when there is exactly one eligible countdown reward"></label>
-      <button class="primary" disabled>Go Farm</button>
-    </form>
+    <h2>Account workers</h2>
+    <div id="accounts">Checking workers…</div>
+    <div class="toolbar">
+      <button class="primary" id="auto" disabled>Scan &amp; auto farm</button>
+      <button id="scan" disabled>Scan live events</button>
+      <small>Auto farm picks the shortest available countdown for each selected worker.</small>
+    </div>
+    <details>
+      <summary>Manual run by ID</summary>
+      <form id="start">
+        <label>Campaign ID<input name="campaign" required pattern="[0-9]{1,22}" inputmode="numeric"></label>
+        <label>LIVE room ID<input name="room" required pattern="[0-9]{1,22}" inputmode="numeric"></label>
+        <label>Reward task ID<input name="task" required pattern="[0-9]{1,22}|auto" value="auto"></label>
+        <button class="primary" disabled>Queue run</button>
+      </form>
+    </details>
+  </section>
+  <section>
+    <h2>Live events</h2>
+    <div id="events" class="events"><small>Scan selected workers to find eligible rewards.</small></div>
   </section>
   <section>
     <h2>Runs</h2>
@@ -60,6 +97,7 @@ const statusBox = document.querySelector("#status");
 const root = "/api/tiktok-farm";
 const disabled = new Set();
 let accountSignature;
+let eventSignature;
 let runSignature;
 let codeSignature;
 
@@ -90,14 +128,29 @@ function empty(table, columns, text) {
   cell.textContent = text;
 }
 
+const selected = () => [...accountsBox.querySelectorAll("input:checked")].map((input) => input.value);
+
+async function action(button, path, body) {
+  button.disabled = true;
+  try {
+    const { results } = await api(path, body);
+    report(results.map((item) => item.account + (item.queued ? " queued" : item.scanning ? " scanning" : " · " + item.reason)).join(" · "));
+    await refresh();
+  } catch (error) { report(error.message, true); }
+  finally { button.disabled = ["auto", "scan"].includes(button.id) && !scannerAvailable; }
+}
+
+let scannerAvailable = false;
 function renderAccounts(accounts) {
-  const slots = accounts.map(({ account }) => account).sort();
-  const signature = slots.join(",");
+  const ordered = [...accounts].sort((a, b) => a.account.localeCompare(b.account));
+  const signature = JSON.stringify(ordered.map(({ account, online, canScan, scanning, catalog }) =>
+    [account, online, canScan, scanning, catalog?.updatedAt, catalog?.result]));
   if (signature === accountSignature) return;
   accountSignature = signature;
   accountsBox.replaceChildren();
-  for (const slot of slots) {
+  for (const { account: slot, scanning, catalog } of ordered) {
     const label = document.createElement("label");
+    label.className = "account";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.value = slot;
@@ -106,11 +159,62 @@ function renderAccounts(accounts) {
       if (checkbox.checked) disabled.delete(slot);
       else disabled.add(slot);
     });
-    label.append(checkbox, " " + slot);
+    const status = document.createElement("small");
+    status.textContent = scanning ? "Scanning…" : catalog?.error ? "Scan failed" :
+      catalog?.result?.queued ? "Auto queued" : catalog?.result?.reason ||
+      (catalog ? catalog.events.length + " eligible" : "Online");
+    label.append(checkbox, slot, status);
     accountsBox.append(label);
   }
-  if (!slots.length) accountsBox.textContent = "No Mac worker online.";
-  form.querySelector("button").disabled = !slots.length;
+  if (!ordered.length) accountsBox.textContent = "No worker online.";
+  form.querySelector("button").disabled = !ordered.some((account) => account.online);
+  scannerAvailable = ordered.some((account) => account.online && account.canScan && !account.scanning);
+  for (const id of ["auto", "scan"]) document.querySelector("#" + id).disabled = !scannerAvailable;
+}
+
+function renderEvents(accounts) {
+  const grouped = new Map();
+  for (const { account, catalog } of accounts) {
+    for (const event of catalog?.events || []) {
+      const key = event.campaign + ":" + event.task;
+      if (!grouped.has(key)) grouped.set(key, { ...event, accounts: [] });
+      grouped.get(key).accounts.push(account);
+    }
+  }
+  const events = [...grouped.values()].sort((a, b) => a.duration - b.duration || a.name.localeCompare(b.name));
+  document.querySelector("#eventCount").textContent = events.length;
+  const signature = JSON.stringify(events);
+  if (signature === eventSignature) return;
+  eventSignature = signature;
+  const box = document.querySelector("#events");
+  box.replaceChildren();
+  if (!events.length) box.textContent = "No eligible rewards in the current scans.";
+  for (const event of events) {
+    const card = document.createElement("article");
+    card.className = "event";
+    const name = document.createElement("h3");
+    name.textContent = event.name;
+    const info = document.createElement("small");
+    info.textContent = event.duration + "s countdown · " + event.accounts.length + " eligible";
+    const button = document.createElement("button");
+    button.textContent = "Farm event";
+    button.onclick = () => {
+      const accounts = selected().filter((account) => event.accounts.includes(account));
+      if (!accounts.length) return report("Select an eligible account for this event.", true);
+      action(button, "/start", { mode: "event", accounts, campaign: event.campaign, task: event.task });
+    };
+    card.append(name, info, button);
+    box.append(card);
+  }
+}
+
+for (const [id, auto] of [["auto", true], ["scan", false]]) {
+  const button = document.querySelector("#" + id);
+  button.onclick = () => {
+    const accounts = selected();
+    if (!accounts.length) return report("Choose at least one account.", true);
+    action(button, "/scan", { accounts, auto });
+  };
 }
 
 function renderRuns(runs) {
@@ -122,7 +226,18 @@ function renderRuns(runs) {
   if (!runs.length) empty(table, 6, "No runs yet.");
   for (const run of runs) {
     const state = run.stopRequested && run.active ? "Stopping" : run.state + " · " + run.phase;
-    const actions = row(table, [run.account, run.campaign, run.task, state, run.seconds + "s"]);
+    const actions = row(table, [run.account, run.eventName || run.campaign, run.task, "", run.seconds + "s"]);
+    const status = document.createElement("span");
+    status.className = "pill " + run.state;
+    status.textContent = state;
+    actions.parentElement.cells[3].append(status);
+    if (run.duration) {
+      const meter = document.createElement("progress");
+      meter.max = run.duration;
+      meter.value = Math.min(run.duration, run.seconds);
+      meter.setAttribute("aria-label", "Countdown progress");
+      actions.parentElement.cells[4].append(meter);
+    }
     if (!run.active || run.stopRequested || run.phase === "claiming") continue;
     const stop = document.createElement("button");
     stop.textContent = "Stop";
@@ -143,7 +258,7 @@ function renderCodes(codes) {
   table.replaceChildren();
   if (!codes.length) empty(table, 5, "No codes stored yet.");
   for (const code of codes) {
-    const actions = row(table, [code.account, code.campaign, code.task, new Date(code.updatedAt).toLocaleString()]);
+    const actions = row(table, [code.account, code.eventName || code.campaign, code.task, new Date(code.updatedAt).toLocaleString()]);
     const button = document.createElement("button");
     button.textContent = "Reveal";
     button.onclick = async () => {
@@ -166,7 +281,11 @@ async function refresh() {
   refreshing = true;
   try {
     const data = await api("/state");
+    document.querySelector("#online").textContent = data.accounts.filter((account) => account.online).length;
+    document.querySelector("#activeCount").textContent = data.runs.filter((run) => run.active).length;
+    document.querySelector("#storedCount").textContent = data.codes.length;
     renderAccounts(data.accounts);
+    renderEvents(data.accounts);
     renderRuns(data.runs);
     renderCodes(data.codes);
   } catch (error) { report(error.message, true); }

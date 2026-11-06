@@ -130,10 +130,18 @@ def main():
                 if not driver.available(args.device):
                     time.sleep(6)
                     continue
-                reply = control.post("poll", {"account": args.account})
+                reply = control.post("poll", {"account": args.account, "scanCapable": True})
                 job = reply.get("job")
                 if job:
                     process(control, job, driver.run, args.device, pending)
+                elif scan := reply.get("scan"):
+                    result = {"account": args.account, "id": scan["id"], "events": []}
+                    try:
+                        result["events"] = driver.catalog(args.device, scan["room"])
+                    except Exception as error:
+                        result["error"] = "scan-failed"
+                        print(f"Catalog scan failed ({type(error).__name__})", file=sys.stderr, flush=True)
+                    control.post("catalog", result)
             except (OSError, ValueError, LeaseLost) as error:
                 print(f"Control update unavailable ({type(error).__name__})", file=sys.stderr, flush=True)
                 time.sleep(10)

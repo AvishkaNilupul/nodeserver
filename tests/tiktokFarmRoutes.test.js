@@ -6,7 +6,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 const Run = require("../models/TikTokFarmRun");
 const { createRouter } = require("../routes/tiktokFarmRoutes");
 
-test("isolates parallel TikTok runs, stop requests, and encrypted code results", async (t) => {
+test("isolates TikTok runs, encrypted codes, and event discovery across accounts", async (t) => {
   process.env.CRED_SECRET = "test-only credential encryption secret";
   const key = "a distinct test-only machine worker key";
   let clock = Date.now();
@@ -47,6 +47,8 @@ test("isolates parallel TikTok runs, stop requests, and encrypted code results",
   await Promise.all(accounts.map(poll));
   const starts = await Promise.all([request("start", batch, "admin"), request("start", batch, "admin")]);
   assert.equal(starts.flatMap((item) => item.results).filter((item) => item.queued).length, 2);
+  const wrongId = await request("worker/poll", { account: accounts[0], jobId: "1".repeat(24) }, "worker");
+  assert.equal(wrongId.job, null);
   const [first, second] = (await Promise.all(accounts.map(poll))).map(({ job }) => job);
   assert.notEqual(first.id, second.id);
   assert.notEqual(first.lease, second.lease);
@@ -77,4 +79,32 @@ test("isolates parallel TikTok runs, stop requests, and encrypted code results",
   clock += 61_000;
   assert.equal((await request("state", undefined, "admin")).runs.find((r) => r._id === renewed.id).state, "review");
   assert.equal((await update(renewed, { status: "completed", code: "TEST-CODE-456" })).status, 200);
+
+  const scannerPoll = (account) => request("worker/poll", { account, scanCapable: true }, "worker");
+  await Promise.all(accounts.map(scannerPoll));
+  const scan = await request("scan", { accounts, auto: true }, "admin");
+  assert.deepEqual(scan.results.map(({ scanning }) => scanning), [true, true]);
+  const [firstScan, secondScan] = (await Promise.all(accounts.map(scannerPoll))).map((value) => value.scan);
+  assert.notEqual(firstScan.id, secondScan.id);
+  assert.equal(firstScan.room, batch.room);
+  assert.equal((await scannerPoll(accounts[0])).scan, undefined);
+  const event = (campaign, room, task, remaining) => ({ campaign, room, task, remaining,
+    name: "Campaign " + campaign, anchor: "500", duration: 60 });
+  const alreadyStored = event(batch.campaign, batch.room, batch.task, 0);
+  const slower = event("124", "600", "200", 45);
+  const faster = event("125", "700", "300", 20);
+  const secondOnly = event("126", "800", "400", 10);
+  const report = (account, id, events) => request("worker/catalog", { account, id, events }, "worker");
+  assert.equal((await report(accounts[1], firstScan.id, [secondOnly])).status, 409);
+  assert.equal((await report(accounts[0], firstScan.id, [{ ...faster, remaining: 61 }])).status, 400);
+  assert.equal((await report(accounts[0], firstScan.id, [slower, faster, alreadyStored])).status, 200);
+  assert.equal((await report(accounts[1], secondScan.id, [secondOnly, alreadyStored])).status, 200);
+  assert.equal((await report(accounts[0], firstScan.id, [slower])).status, 409);
+  const autoState = await request("state", undefined, "admin");
+  assert.equal(autoState.accounts.find(({ account }) => account === accounts[0]).catalog.result.event, faster.name);
+  const jobs = (await Promise.all(accounts.map(scannerPoll))).map(({ job }) => job);
+  assert.deepEqual(jobs.map(({ campaign, room, anchor }) => ({ campaign, room, anchor })),
+    [faster, secondOnly].map(({ campaign, room, anchor }) => ({ campaign, room, anchor })));
+  const busy = await request("scan", { accounts, auto: true }, "admin");
+  assert.deepEqual(busy.results.map(({ reason }) => reason), ["Worker busy", "Worker busy"]);
 });
