@@ -12,9 +12,11 @@ const ID = /^\d{1,22}$/;
 const OBJECT_ID = /^[a-f0-9]{24}$/;
 const LEASE_MS = 60_000;
 const ONLINE_MS = 45_000;
-const CATALOG_MS = 5 * 60_000;
+const CATALOG_MS = 15 * 60_000;
 const UPCOMING_MS = 30 * 60_000;
-const SCAN_MS = 3 * 60_000;
+const SCAN_MS = 4 * 60_000;
+const CATALOG_LIMIT = 100;
+const MAX_WATCH_SECONDS = 3600;
 const AUTO_SCAN_MS = 10 * 60_000;
 const AUTO_RETRY_MS = 30 * 60_000;
 const MAX_AUTO_ATTEMPTS = 3;
@@ -41,15 +43,22 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
   const validAccounts = (accounts) => Array.isArray(accounts) && accounts.length >= 1 &&
     accounts.length <= 20 && accounts.every((slot) => typeof slot === "string" && SLOT.test(slot)) &&
     new Set(accounts).size === accounts.length;
+  const validDate = (value) => value == null ||
+    (Number.isSafeInteger(value) && value >= 946684800000 && value < 4102444800000);
   const validEvent = (event) => event && [event.campaign, event.room, event.anchor, event.task]
     .every((id) => typeof id === "string" && ID.test(id)) &&
     typeof event.name === "string" && event.name.trim().length > 0 && event.name.length <= 100 &&
-    Number.isInteger(event.duration) && event.duration >= 1 && event.duration <= 1800 &&
-    Number.isInteger(event.remaining) && event.remaining >= 0 && event.remaining <= event.duration;
+    Number.isInteger(event.duration) && event.duration >= 1 && event.duration <= MAX_WATCH_SECONDS &&
+    Number.isInteger(event.remaining) && event.remaining >= 0 && event.remaining <= event.duration && validDate(event.endsAt);
   const validUpcoming = (event) => event && typeof event.campaign === "string" && ID.test(event.campaign) &&
     typeof event.name === "string" && event.name.trim().length > 0 && event.name.length <= 100 &&
-    [event.startsAt, event.endsAt].every((value) => value == null ||
-      (Number.isSafeInteger(value) && value >= 946684800000 && value < 4102444800000));
+    (event.game === undefined || typeof event.game === "string" && event.game.length <= 100) &&
+    [event.startsAt, event.endsAt].every(validDate);
+  const validCampaign = (event) => validUpcoming(event) &&
+    ["eligible", "no-live-room", "no-eligible-task", "incomplete"].includes(event.status) &&
+    typeof event.otherTasks === "boolean" &&
+    (event.watchSeconds === undefined || Array.isArray(event.watchSeconds) && event.watchSeconds.length <= 20 &&
+      event.watchSeconds.every((seconds) => Number.isInteger(seconds) && seconds >= 1 && seconds <= 86400));
   const jsonOnly = (req, res, next) => {
     if (req.method === "POST" && !req.is("application/json")) {
       return res.status(415).json({ error: "JSON required" });
@@ -168,7 +177,12 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
 
   async function pick(account, events, batch, automatic = false) {
     if (await Model.exists({ account, active: true })) return { account, queued: false, reason: "Worker busy" };
-    const candidates = [...events].sort((a, b) => a.remaining - b.remaining || a.duration - b.duration);
+    const time = now();
+    const candidates = events.filter((event) => !automatic || event.endsAt == null ||
+      event.endsAt > time + event.remaining * 1000).sort((a, b) =>
+      Number(a.remaining > 0) - Number(b.remaining > 0) ||
+      (automatic && (a.endsAt ?? Number.MAX_SAFE_INTEGER) - (b.endsAt ?? Number.MAX_SAFE_INTEGER)) ||
+      a.remaining - b.remaining || a.duration - b.duration);
     const previous = candidates.length ? await Model.find({
       account, $or: candidates.map(({ campaign, task }) => ({ campaign, task })),
     }).select("campaign task state updatedAt autoAttempts").lean() : [];
@@ -190,8 +204,12 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     // The seed only prompts a fresh authenticated discovery request.
     const room = await discoveryRoom(account);
     if (!ID.test(room)) return { account, reason: "No discovery room available" };
+    const alternative = await Model.findOne({ state: "completed", room: { $ne: room } })
+      .sort({ updatedAt: -1 }).select("room").lean();
+    const fallbackRoom = alternative?.room || process.env.TIKTOK_CATALOG_SEED_ROOM;
     if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
-    scans.set(account, { id: randomUUID(), room, auto, batch, scheduleToken, expiresAt: now() + SCAN_MS });
+    scans.set(account, { id: randomUUID(), room, fallbackRoom: fallbackRoom !== room && ID.test(fallbackRoom) ? fallbackRoom : undefined,
+      auto, batch, scheduleToken, expiresAt: now() + SCAN_MS });
     return { account, scanning: true };
   }
 
@@ -327,39 +345,43 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       const scan = scans.get(account);
       if (scan?.expiresAt > now() && !scan.sent) {
         scan.sent = true;
-        return res.json({ job: null, scan: { id: scan.id, room: scan.room } });
+        return res.json({ job: null, scan: { id: scan.id, room: scan.room, fallbackRoom: scan.fallbackRoom } });
       }
     }
     res.json({ job: run ? { id: String(run._id), account, campaign: run.campaign, room: run.room, task: run.task,
       anchor: run.anchor, automatic: run.automatic === true, lease } : null });
   }));
   router.post("/api/tiktok-farm/worker/catalog", authenticate, jsonOnly, wrap(async (req, res) => {
-    const { account, id, events, upcoming = [], error, apiRoute } = req.body || {};
+    const { account, id, events, upcoming = [], campaigns = [], partial = false, error, apiRoute } = req.body || {};
     const scan = scans.get(account);
     if (!scan?.sent || scan.id !== id || scan.expiresAt <= now()) {
       return res.status(409).json({ error: "Scan unavailable" });
     }
-    if (!Array.isArray(events) || events.length > 30 || !events.every(validEvent) ||
-        !Array.isArray(upcoming) || upcoming.length > 30 || !upcoming.every(validUpcoming) ||
-        (error !== undefined && (!["scan-failed", "session-required"].includes(error) || events.length || upcoming.length))) {
+    if (!Array.isArray(events) || events.length > CATALOG_LIMIT || !events.every(validEvent) ||
+        !Array.isArray(upcoming) || upcoming.length > CATALOG_LIMIT || !upcoming.every(validUpcoming) ||
+        !Array.isArray(campaigns) || campaigns.length > CATALOG_LIMIT || !campaigns.every(validCampaign) ||
+        typeof partial !== "boolean" ||
+        (error !== undefined && (!["scan-failed", "session-required"].includes(error) || events.length ||
+          upcoming.length || campaigns.length || partial))) {
       return res.status(400).json({ error: "Invalid catalog" });
     }
     scans.delete(account);
     seen.set(account, now());
     if (["phone", "mac"].includes(apiRoute)) apiRoutes.set(account, apiRoute);
-    const candidates = events.map(({ campaign, room, anchor, task, name, duration, remaining }) =>
-      ({ campaign, room, anchor, task, name, duration, remaining }));
-    const catalog = { events: candidates, updatedAt: now(), error };
-    if (!error) {
-      upcomingFeeds.set(account, { updatedAt: now(), events: upcoming.map(({ campaign, name, startsAt, endsAt }) =>
-        ({ campaign, name, startsAt, endsAt })) });
-    }
+    const candidates = events.map(({ campaign, room, anchor, task, name, duration, remaining, endsAt }) =>
+      ({ campaign, room, anchor, task, name, duration, remaining, endsAt }));
+    const campaignInfo = ({ campaign, name, game, startsAt, endsAt }) => ({ campaign, name, game, startsAt, endsAt });
+    const catalog = { events: candidates, campaigns: campaigns.map((event) => ({
+      ...campaignInfo(event), status: event.status, otherTasks: event.otherTasks, watchSeconds: event.watchSeconds,
+    })), partial, updatedAt: now(), error };
+    if (!error) upcomingFeeds.set(account, { updatedAt: now(), events: upcoming.map(campaignInfo) });
     catalogs.set(account, catalog);
     if (scan.scheduleToken) {
       const current = { account, enabled: true, scanToken: scan.scheduleToken };
       if (!error && await Automation.exists(current)) catalog.result = await pick(account, candidates, scan.batch, true);
       const lastResult = error === "session-required" ? "Sign-in check needed" : error ? "Scan failed" :
-        catalog.result?.queued ? "Queued " + catalog.result.event : catalog.result?.reason || "Scan finished";
+        catalog.result?.queued ? "Queued " + catalog.result.event : partial ? "Scan incomplete" :
+          catalog.result?.reason || "Scan finished";
       await Automation.updateOne(current, {
         $set: { lastScanAt: new Date(now()), lastResult,
           ...(!error && ["phone", "mac"].includes(apiRoute) && { lastApiRoute: apiRoute }) },

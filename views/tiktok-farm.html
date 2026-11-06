@@ -153,6 +153,11 @@
     <div id="events" class="events"><small>Scan selected workers to find eligible rewards.</small></div>
   </section>
   <section>
+    <div class="section-head"><h2>Active campaigns</h2><small>From the signed-in TikTok feeds</small></div>
+    <p id="catalogCoverage"></p>
+    <div id="activeCampaigns" class="events"></div>
+  </section>
+  <section>
     <div class="section-head"><h2>Upcoming events</h2><small>Published by TikTok</small></div>
     <div id="upcoming" class="events"></div>
   </section>
@@ -187,6 +192,7 @@ const enabledOffline = new Set();
 let workerRows = [];
 let accountSignature;
 let eventSignature;
+let campaignSignature;
 let runSignature;
 let codeSignature;
 let summarySignature;
@@ -307,7 +313,7 @@ function renderAccounts(accounts) {
     });
     const status = document.createElement("small");
     const activity = scanning ? "Scanning…" : !online ? "Offline" : catalog?.error ? "Scan failed" :
-      catalog?.result?.queued ? "Auto queued" : catalog?.result?.reason ||
+      catalog?.result?.queued ? "Auto queued" : catalog?.partial ? "Scan incomplete" : catalog?.result?.reason ||
       (catalog ? catalog.events.length + " eligible" : automation?.lastResult || "Online");
     status.textContent = automation ? "Auto · " + activity : activity;
     if (automation?.nextScanAt) status.title = "Next scan after " + new Date(automation.nextScanAt).toLocaleString();
@@ -334,7 +340,7 @@ function renderEvents(accounts) {
   eventSignature = signature;
   const box = document.querySelector("#events");
   box.replaceChildren();
-  if (!events.length) box.textContent = "No eligible rewards in the current scans.";
+  if (!events.length) box.textContent = "No verified countdown rewards ready to queue.";
   for (const event of events) {
     const card = document.createElement("article");
     card.className = "event";
@@ -487,6 +493,54 @@ function renderWorkerSummary(accounts, runs) {
   }
 }
 
+function renderCampaigns(accounts) {
+  const states = {
+    eligible: "Eligible countdown",
+    "no-live-room": "Waiting for an eligible LIVE room",
+    "no-eligible-task": "No eligible countdown",
+    incomplete: "Could not finish checking",
+  };
+  const grouped = new Map();
+  const checked = [];
+  const incomplete = [];
+  for (const { account, catalog } of accounts) {
+    if (!catalog || catalog.error || catalog.partial) incomplete.push(account);
+    if (!catalog || catalog.error) continue;
+    checked.push(catalog.updatedAt);
+    for (const campaign of catalog.campaigns || []) {
+      if (!grouped.has(campaign.campaign)) grouped.set(campaign.campaign, { ...campaign, workers: [] });
+      const record = grouped.get(campaign.campaign);
+      record.workers.push({ account, status: campaign.status });
+      record.otherTasks ||= campaign.otherTasks;
+      record.watchSeconds = [...new Set([...(record.watchSeconds || []), ...(campaign.watchSeconds || [])])].sort((a, b) => a - b);
+    }
+  }
+  const rows = [...grouped.values()].sort((a, b) =>
+    (a.endsAt ?? Infinity) - (b.endsAt ?? Infinity) || a.name.localeCompare(b.name));
+  const signature = JSON.stringify([rows, checked, incomplete]);
+  if (signature === campaignSignature) return;
+  campaignSignature = signature;
+  const coverage = document.querySelector("#catalogCoverage");
+  const last = checked.length ? "Latest feed check " + new Date(Math.max(...checked)).toLocaleString() + "." : "Waiting for a successful feed check.";
+  coverage.textContent = last + (incomplete.length ? " Coverage unconfirmed for " + incomplete.join(", ") + "." : "");
+  const box = document.querySelector("#activeCampaigns");
+  box.replaceChildren();
+  if (!rows.length) addText(box, "p", "No active campaigns reported in the latest available feeds.");
+  for (const campaign of rows) {
+    const card = document.createElement("article");
+    card.className = "event";
+    addText(card, "h3", campaign.game && campaign.game !== campaign.name ? campaign.game + " · " + campaign.name : campaign.name);
+    if (campaign.endsAt) addText(card, "small", "Ends " + new Date(campaign.endsAt).toLocaleString());
+    if (campaign.watchSeconds.length) {
+      const times = campaign.watchSeconds.map((seconds) => seconds % 60 ? seconds + "s" : seconds / 60 + " min");
+      addText(card, "small", "Watch tiers · " + times.join(", "));
+    }
+    for (const { account, status } of campaign.workers) addText(card, "small", account + " · " + states[status]);
+    if (campaign.otherTasks) addText(card, "small", "Other reward types listed by TikTok");
+    box.append(card);
+  }
+}
+
 function renderUpcoming(accounts) {
   const grouped = new Map();
   for (const { upcoming } of accounts) {
@@ -506,7 +560,7 @@ function renderUpcoming(accounts) {
   for (const event of items) {
     const card = document.createElement("article");
     card.className = "event";
-    addText(card, "h3", event.name);
+    addText(card, "h3", event.game && event.game !== event.name ? event.game + " · " + event.name : event.name);
     addText(card, "small", event.startsAt ? "Starts " + new Date(event.startsAt).toLocaleString() : "Start time pending");
     if (event.endsAt) addText(card, "small", "Ends " + new Date(event.endsAt).toLocaleString());
     box.append(card);
@@ -638,6 +692,7 @@ async function refresh() {
     document.querySelector("#storedCount").textContent = data.codeCount ?? data.codes.length;
     renderAccounts(data.accounts);
     renderEvents(data.accounts);
+    renderCampaigns(data.accounts);
     renderUpcoming(data.accounts);
     renderWorkerSummary(data.accounts, data.runs);
     renderRuns(data.runs);

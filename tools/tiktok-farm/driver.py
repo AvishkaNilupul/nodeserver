@@ -23,7 +23,45 @@ ENTER = "/webcast/room/enter/"
 CLAIM = "/webcast/partnership/reward/drops_claim/"
 REGIONAL_HOST = "webcast22-normal-c-alisg.tiktokv.com"
 EU_REWARD_HOSTS = ("webcast16-normal-no1a.tiktokv.eu", "webcast19-normal-no1a.tiktokv.eu")
+MAX_WATCH_SECONDS = 3600
+CATALOG_LIMIT = 100
+CATALOG_READ_SECONDS = 65
 ADB = Path.home() / "Library/Android/sdk/platform-tools/adb"
+
+
+def catalog_rows(value):
+    rows = {}
+
+    def collect(item):
+        if isinstance(item, dict):
+            name = item.get("drops_name") or item.get("name") or item.get("title")
+            cid = str(item.get("drops_id") or item.get("id") or "")
+            if (isinstance(name, str) and name.strip() and re.fullmatch(r"[0-9]{1,22}", cid)
+                    and any(key in item for key in ("drops_id", "game_name", "end_time"))):
+                rows[cid] = (name.strip()[:100], item)
+                return
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return rows
+
+
+def catalog_event(campaign, name, row):
+    def timestamp(value):
+        if isinstance(value, str) and value.isdecimal() and len(value) <= 13:
+            value = int(value)
+        if type(value) is not int:
+            return None
+        millis = value * 1000 if value < 10_000_000_000 else value
+        return millis if 946684800000 <= millis < 4102444800000 else None
+
+    game = row.get("game_name")
+    return {"campaign": campaign, "name": name, "game": game.strip()[:100] if isinstance(game, str) else "",
+            "startsAt": timestamp(row.get("start_time")), "endsAt": timestamp(row.get("end_time"))}
 
 
 class FarmError(Exception):
@@ -50,6 +88,7 @@ class Driver:
         self.trace = trace
         self.phone_client = phone_client
         self.api_route = None
+        self.catalog_context = None
         trace["HOSTS"].update((REGIONAL_HOST, *EU_REWARD_HOSTS))
         trace["SOURCE"] = trace["SOURCE"].replace(
             r"tiktokv\.us)$", r"tiktokv\.us|tiktokv\.eu)$",
@@ -160,10 +199,18 @@ class Driver:
                 port = fields[3].rsplit(":", 1)[-1]
                 if port.isdigit():
                     shell(f"/debug_ramdisk/magisk su -c 'ss -Ktn sport = :{port} dport = :443'")
-            shell(f"am start -a android.intent.action.VIEW -d https://www.tiktok.com/share/live/{job['room']} -p {APP}", check=True)
+            def open_room(room):
+                shell(f"am start -a android.intent.action.VIEW -d https://www.tiktok.com/share/live/{room} -p {APP}", check=True)
+
+            open_room(job["room"])
+            fallback_room = job.get("fallbackRoom") if discovery else None
+            switch_at = time.monotonic() + 35
             deadline = time.monotonic() + 75
             renew = time.monotonic() + 15
             while time.monotonic() < deadline:
+                if fallback_room and time.monotonic() >= switch_at:
+                    open_room(fallback_room)
+                    fallback_room = None
                 if time.monotonic() >= renew:
                     update("bootstrap", 0)
                     renew = time.monotonic() + 15
@@ -209,7 +256,8 @@ class Driver:
                             if ended:
                                 uploads.pop(key_stream)
                                 entry = (upload[0], upload[1], bytes(upload[2]))
-                                if self.entry_room(entry) == job["room"]:
+                                room = self.entry_room(entry)
+                                if room and (room == job["room"] or discovery and room == job.get("fallbackRoom")):
                                     matched["entry"] = entry
                     if "entry" in matched and (job.get("campaign") is None or "read" in matched):
                         return matched.get("read"), matched["entry"]
@@ -307,19 +355,32 @@ class Driver:
                 return
         raise FarmError("worker-error")
 
-    def catalog(self, serial, room):
+    def catalog(self, serial, room, fallback_room=None):
+        if self.catalog_context:
+            device, context, captured_at = self.catalog_context
+            if device == serial and time.monotonic() - captured_at < 20 * 60:
+                try:
+                    return self.catalog_with_fallback(context, time.monotonic() + CATALOG_READ_SECONDS)
+                except (OSError, ValueError, FarmError):
+                    self.catalog_context = None
         try:
-            read, entry = self.capture(serial, {"room": room, "discovery": True}, lambda *_: None)
+            fallback = fallback_room if isinstance(fallback_room, str) and re.fullmatch(r"[0-9]{1,22}", fallback_room) else None
+            read, entry = self.capture(serial, {"room": room, "fallbackRoom": fallback, "discovery": True}, lambda *_: None)
         finally:
             self.stop_app(serial)
         context = read or entry
+        result = self.catalog_with_fallback(context, time.monotonic() + CATALOG_READ_SECONDS)
+        self.catalog_context = (serial, context, time.monotonic())
+        return result
+
+    def catalog_with_fallback(self, context, deadline):
         try:
-            return self.catalog_from_entry(context, include_upcoming=True)
+            return self.catalog_from_entry(context, include_upcoming=True, deadline=deadline)
         except (OSError, ValueError, FarmError):
-            if self.api_route != "phone":
+            if self.api_route != "phone" or time.monotonic() >= deadline:
                 raise
         print("Phone catalog read failed; trying the Mac route", file=sys.stderr, flush=True)
-        return self.catalog_from_entry(context, include_upcoming=True, use_phone=False)
+        return self.catalog_from_entry(context, include_upcoming=True, use_phone=False, deadline=deadline)
 
     @staticmethod
     def get_from_entry(entry, route, **params):
@@ -335,9 +396,12 @@ class Driver:
         path = urlunsplit(original._replace(path=route, query="&".join(query)))
         return host, [*headers, (":path", path)], b""
 
-    def catalog_from_entry(self, entry, *, include_upcoming=False, use_phone=True):
+    def catalog_from_entry(self, entry, *, include_upcoming=False, use_phone=True, deadline=None):
+        deadline = deadline or time.monotonic() + CATALOG_READ_SECONDS
         with self.http_session(use_phone=use_phone) as client:
             def fetch(route, **params):
+                if time.monotonic() >= deadline:
+                    raise FarmError("catalog-deadline")
                 result = self.mac(client, self.get_from_entry(entry, route, **params),
                                   include_payload=True, json_format=True)
                 if result.get("business") != 0:
@@ -346,66 +410,90 @@ class Driver:
 
             prefix = "/webcast/partnership/reward/"
             data = fetch(prefix + "drops_list/v2/")
-            campaigns = {}
-
-            def collect(value, target):
-                if isinstance(value, dict):
-                    name = value.get("drops_name") or value.get("name") or value.get("title")
-                    cid = str(value.get("drops_id") or value.get("id") or "")
-                    if (isinstance(name, str) and re.fullmatch(r"[0-9]{16,22}", cid)
-                            and any(k in value for k in ("drops_id", "game_name", "tasks", "gifts", "end_time"))):
-                        target[cid] = (name.strip()[:100], value)
-                    for item in value.values():
-                        collect(item, target)
-                elif isinstance(value, list):
-                    for item in value:
-                        collect(item, target)
-
-            collect(data.get("ongoing_drops_list") or [], campaigns)
-            collect(data.get("current_drops") or [], campaigns)
-            events = []
-            for cid, (name, _) in list(campaigns.items())[:12]:
-                rooms = fetch(prefix + "drops_page_feed/", drops_id=cid, is_refresh="true").get("room_list") or []
-                for room in rooms[:2]:
-                    rid, aid = str(room.get("room_id", "")), str(room.get("anchor_id", ""))
-                    if not all(re.fullmatch(r"[0-9]{16,22}", value) for value in (rid, aid)):
-                        continue
-                    detail = fetch(DETAIL, drops_id=cid, room_id=rid, anchor_id=aid, user_type=0)
-                    tasks = detail.get("tasks") or (detail.get("detail") or {}).get("tasks") or []
-                    candidates = []
-                    for task in tasks:
-                        tid = str(task.get("id", ""))
-                        duration = task.get("view_duration")
-                        status = task.get("user_status")
-                        if (task.get("type") == 5 and status in (1, 3) and re.fullmatch(r"[0-9]{1,22}", tid)
-                                and isinstance(duration, int) and 1 <= duration <= 1800
-                                and not (task.get("gift") or {}).get("need_auth")):
-                            seconds = task.get("countdown_passed")
-                            seconds = min(duration, max(0, seconds)) if isinstance(seconds, int) else 0
-                            candidates.append({"campaign": cid, "name": name, "room": rid, "anchor": aid, "task": tid,
-                                               "duration": duration, "remaining": 0 if status == 3 else duration - seconds})
-                    if candidates:
-                        events.extend(candidates)
-                        break
-            events = sorted(events, key=lambda event: (event["remaining"], event["duration"], event["campaign"]))[:30]
+            if not any(key in data for key in ("ongoing_drops_list", "current_drops", "upcoming_drops_list", "ended_drops_list")):
+                raise FarmError("reward-read-failed")
+            campaigns = catalog_rows([data.get("ongoing_drops_list"), data.get("current_drops")])
+            upcoming = catalog_rows(data.get("upcoming_drops_list"))
+            partial = max(len(campaigns), len(upcoming)) > CATALOG_LIMIT
+            events, active = [], []
+            for cid, (name, row) in list(campaigns.items())[:CATALOG_LIMIT]:
+                advertised = row.get("tasks") or []
+                info = catalog_event(cid, name, row)
+                status, candidates, other_tasks = self.campaign_events(fetch, cid, name, advertised)
+                durations = {task["view_duration"] for task in advertised if task.get("type") in (2, 5)
+                             and type(task.get("view_duration")) is int and 1 <= task["view_duration"] <= 86400}
+                durations.update(event["duration"] for event in candidates)
+                active.append({**info, "status": status, "otherTasks": other_tasks,
+                               "watchSeconds": sorted(durations)[:20]})
+                partial |= status == "incomplete"
+                events.extend({**event, "endsAt": info["endsAt"]} for event in candidates)
+            events.sort(key=lambda event: (event["remaining"], event["duration"], event["campaign"]))
             if not include_upcoming:
-                return events
-            upcoming = {}
-            collect(data.get("upcoming_drops_list") or [], upcoming)
+                return events[:CATALOG_LIMIT]
+            return {"events": events[:CATALOG_LIMIT], "campaigns": active, "partial": partial or len(events) > CATALOG_LIMIT,
+                    "upcoming": [catalog_event(cid, name, row) for cid, (name, row) in list(upcoming.items())[:CATALOG_LIMIT]]}
 
-            def timestamp(value):
-                if isinstance(value, str) and value.isdecimal() and len(value) <= 13:
-                    value = int(value)
-                if not isinstance(value, int):
-                    return None
-                millis = value * 1000 if value < 10_000_000_000 else value
-                return millis if 946684800000 <= millis < 4102444800000 else None
+    @staticmethod
+    def campaign_events(fetch, campaign, name, advertised):
+        def task_id(task):
+            value = str(task.get("id") or task.get("id_str") or "")
+            return value if re.fullmatch(r"[0-9]{1,22}", value) else None
 
-            return {"events": events, "upcoming": [
-                {"campaign": cid, "name": name, "startsAt": timestamp(row.get("start_time")),
-                 "endsAt": timestamp(row.get("end_time"))}
-                for cid, (name, row) in list(upcoming.items())[:30] if name
-            ]}
+        def other_type(task, watch_types):
+            duration = task.get("view_duration")
+            return (task.get("type") not in watch_types or (task.get("gift") or {}).get("need_auth")
+                    or type(duration) is int and not 1 <= duration <= MAX_WATCH_SECONDS)
+
+        # The catalog labels some countdowns as type 2. Room detail uses type 5.
+        expected = {task_id(task) for task in advertised if not other_type(task, (2, 5))} - {None}
+        other_tasks = any(other_type(task, (2, 5)) for task in advertised)
+        candidates, resolved = {}, set()
+        saw_tasks = False
+        try:
+            feed = fetch("/webcast/partnership/reward/drops_page_feed/", drops_id=campaign, is_refresh="true")
+        except (OSError, ValueError, FarmError):
+            return "incomplete", [], other_tasks
+        rooms = feed.get("room_list") or []
+        if not rooms:
+            return ("incomplete" if feed.get("has_more") else "no-live-room"), [], other_tasks
+        seen_rooms = set()
+        for room in rooms:
+            rid, aid = str(room.get("room_id", "")), str(room.get("anchor_id", ""))
+            if rid in seen_rooms or not all(re.fullmatch(r"[0-9]{1,22}", value) for value in (rid, aid)):
+                continue
+            seen_rooms.add(rid)
+            try:
+                detail = fetch(DETAIL, drops_id=campaign, room_id=rid, anchor_id=aid, user_type=0)
+            except FarmError as error:
+                if error.phase in ("catalog-deadline", "session-required"):
+                    break
+                continue
+            except (OSError, ValueError):
+                continue
+            tasks = detail.get("tasks") or (detail.get("detail") or {}).get("tasks") or []
+            saw_tasks |= bool(tasks)
+            other_tasks |= any(other_type(task, (5,)) for task in tasks)
+            for task in tasks:
+                tid, duration, status = task_id(task), task.get("view_duration"), task.get("user_status")
+                if not tid or other_type(task, (5,)) or type(duration) is not int or status not in (0, 1, 2, 3, 4):
+                    continue
+                resolved.add(tid)
+                if status not in (1, 3):
+                    continue
+                seconds = task.get("countdown_passed")
+                seconds = min(duration, max(0, seconds)) if type(seconds) is int else 0
+                remaining = 0 if status == 3 else duration - seconds
+                if tid not in candidates or remaining < candidates[tid]["remaining"]:
+                    candidates[tid] = {"campaign": campaign, "name": name, "room": rid, "anchor": aid,
+                                       "task": tid, "duration": duration, "remaining": remaining}
+            # Detail is campaign-wide once it includes every advertised watch task.
+            if expected and expected <= resolved:
+                break
+        if expected - resolved or not saw_tasks:
+            return "incomplete", list(candidates.values()), other_tasks
+        if not expected and feed.get("has_more"):
+            return "incomplete", list(candidates.values()), other_tasks
+        return ("eligible" if candidates else "no-eligible-task"), list(candidates.values()), other_tasks
 
     @contextmanager
     def reward_session(self, read, job):
@@ -429,7 +517,7 @@ class Driver:
             if task.get("user_status") not in (1, 3):
                 raise FarmError("ineligible")
             remaining = task.get("view_duration")
-            if not isinstance(remaining, int) or not 1 <= remaining <= 1800:
+            if type(remaining) is not int or not 1 <= remaining <= MAX_WATCH_SECONDS:
                 raise FarmError("ineligible")
             update("watching", int(task.get("countdown_passed") or 0))
             if not native_playback:

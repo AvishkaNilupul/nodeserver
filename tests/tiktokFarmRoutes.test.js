@@ -143,9 +143,17 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   const report = (account, id, events, extra) => request("worker/catalog", { account, id, events, ...extra }, "worker");
   assert.equal((await report(accounts[1], firstScan.id, [secondOnly])).status, 409);
   assert.equal((await report(accounts[0], firstScan.id, [{ ...faster, remaining: 61 }])).status, 400);
-  const upcoming = [{ campaign: "130", name: "Upcoming only", startsAt: clock + 600_000 }];
+  const upcoming = [{ campaign: "130", name: "Upcoming only", game: "Rocket League", startsAt: clock + 600_000 }];
+  const campaigns = [{ campaign: "129", name: "Ends soon", game: "Fixture game",
+    endsAt: clock + 3600_000, status: "no-live-room", otherTasks: true, watchSeconds: [3600] }];
+  const longWatch = { ...event("131", "810", "410", 3600), duration: 3600 };
   assert.equal((await report(accounts[0], firstScan.id, [], { upcoming: [{ ...upcoming[0], startsAt: -1 }] })).status, 400);
-  assert.equal((await report(accounts[0], firstScan.id, [slower, faster, alreadyStored], { upcoming, apiRoute: "phone" })).status, 200);
+  assert.equal((await report(accounts[0], firstScan.id, [], {
+    campaigns: [{ ...campaigns[0], status: "unknown" }],
+  })).status, 400);
+  assert.equal((await report(accounts[0], firstScan.id, [slower, faster, alreadyStored, longWatch], {
+    upcoming, campaigns, partial: true, apiRoute: "phone",
+  })).status, 200);
   assert.equal((await report(accounts[1], secondScan.id, [secondOnly, alreadyStored])).status, 200);
   assert.equal((await report(accounts[0], firstScan.id, [slower])).status, 409);
   const autoState = await request("state", undefined, "admin");
@@ -153,6 +161,9 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal(firstState.catalog.result.event, faster.name);
   assert.equal(firstState.apiRoute, "phone");
   assert.deepEqual(firstState.upcoming, upcoming);
+  assert.deepEqual(firstState.catalog.campaigns, campaigns);
+  assert.equal(firstState.catalog.partial, true);
+  assert(firstState.catalog.events.some(({ duration }) => duration === 3600));
   const jobs = (await Promise.all(accounts.map(scannerPoll))).map(({ job }) => job);
   assert.deepEqual(jobs.map(({ campaign, room, anchor }) => ({ campaign, room, anchor })),
     [faster, secondOnly].map(({ campaign, room, anchor }) => ({ campaign, room, anchor })));
@@ -175,7 +186,9 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal(backgroundScans.length, 1);
   assert.equal(backgroundScans[0].room, batch.room);
   const catalogReport = (scan, events) => background("worker/catalog", { account: scheduled, id: scan.id, events });
-  assert.equal((await catalogReport(backgroundScans[0], [slower, faster])).status, 200);
+  const expiresSoon = { ...faster, endsAt: clock + 120_000 };
+  const cannotFinish = { ...secondOnly, endsAt: clock + 5_000 };
+  assert.equal((await catalogReport(backgroundScans[0], [slower, expiresSoon, cannotFinish])).status, 200);
   const backgroundJob = (await tick()).job;
   assert.equal(backgroundJob.task, faster.task);
   assert.equal(backgroundJob.automatic, true);

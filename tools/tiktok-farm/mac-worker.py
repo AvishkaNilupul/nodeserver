@@ -148,7 +148,7 @@ def main():
                 elif scan := reply.get("scan"):
                     result = {"account": args.account, "id": scan["id"], "events": []}
                     try:
-                        result.update(driver.catalog(args.device, scan["room"]))
+                        result.update(driver.catalog(args.device, scan["room"], scan.get("fallbackRoom")))
                     except Exception as error:
                         result["error"] = ("session-required" if getattr(error, "phase", "") == "session-required"
                                            else "scan-failed")
