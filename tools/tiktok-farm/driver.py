@@ -59,8 +59,8 @@ class Driver:
         )
 
     @contextmanager
-    def http_session(self):
-        if self.phone_client:
+    def http_session(self, *, use_phone=True):
+        if use_phone and self.phone_client:
             try:
                 phone = self.phone_client().open()
             except (OSError, ValueError):
@@ -302,7 +302,14 @@ class Driver:
             read, entry = self.capture(serial, {"room": room, "discovery": True}, lambda *_: None)
         finally:
             self.stop_app(serial)
-        return self.catalog_from_entry(read or entry, include_upcoming=True)
+        context = read or entry
+        try:
+            return self.catalog_from_entry(context, include_upcoming=True)
+        except (OSError, ValueError, FarmError):
+            if self.api_route != "phone":
+                raise
+        print("Phone catalog read failed; trying the Mac route", file=sys.stderr, flush=True)
+        return self.catalog_from_entry(context, include_upcoming=True, use_phone=False)
 
     @staticmethod
     def get_from_entry(entry, route, **params):
@@ -318,8 +325,8 @@ class Driver:
         path = urlunsplit(original._replace(path=route, query="&".join(query)))
         return host, [*headers, (":path", path)], b""
 
-    def catalog_from_entry(self, entry, *, include_upcoming=False):
-        with self.http_session() as client:
+    def catalog_from_entry(self, entry, *, include_upcoming=False, use_phone=True):
+        with self.http_session(use_phone=use_phone) as client:
             def fetch(route, **params):
                 result = self.mac(client, self.get_from_entry(entry, route, **params),
                                   include_payload=True, json_format=True)
@@ -390,9 +397,24 @@ class Driver:
                 for cid, (name, row) in list(upcoming.items())[:30] if name
             ]}
 
-    def complete(self, read, entry, job, update, preserve, *, native_playback=False):
+    @contextmanager
+    def reward_session(self, read, job):
         with self.http_session() as client:
+            try:
+                task = self.read_task(client, read, job)
+            except (OSError, ValueError, FarmError):
+                if self.api_route != "phone":
+                    raise
+            else:
+                yield client, task
+                return
+        print("Phone reward read failed; trying the Mac route", file=sys.stderr, flush=True)
+        with self.http_session(use_phone=False) as client:
             task = self.read_task(client, read, job)
+            yield client, task
+
+    def complete(self, read, entry, job, update, preserve, *, native_playback=False):
+        with self.reward_session(read, job) as (client, task):
             job = {**job, "task": str(task["id"])}
             if task.get("user_status") not in (1, 3):
                 raise FarmError("ineligible")
