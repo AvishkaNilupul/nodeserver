@@ -1,4 +1,6 @@
 """Capture a single app session in memory, then complete a supported LIVE reward."""
+import gzip
+import io
 import queue
 import re
 import subprocess
@@ -38,6 +40,19 @@ class Driver:
             return any(app.identifier == APP for app in device.enumerate_applications())
         except (frida.TimedOutError, frida.ServerNotRunningError, frida.TransportError, OSError):
             return False
+
+    def entry_room(self, entry):
+        host, headers, body = entry
+        if body.startswith(b"\x1f\x8b"):
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
+                    clear = stream.read(65_537)
+                if len(clear) > 65_536:
+                    return None
+                return self.trace["android_room"]((host, headers, clear))
+            except (OSError, EOFError):
+                return None
+        return self.trace["android_room"](entry)
 
     def capture(self, serial, job, update):
         device = frida.get_device(serial, timeout=5)
@@ -141,7 +156,7 @@ class Driver:
                             if ended:
                                 uploads.pop(key_stream)
                                 entry = (upload[0], upload[1], bytes(upload[2]))
-                                if self.trace["android_room"](entry) == job["room"]:
+                                if self.entry_room(entry) == job["room"]:
                                     matched["entry"] = entry
                     if matched.keys() >= {"read", "entry"}:
                         return matched["read"], matched["entry"]
