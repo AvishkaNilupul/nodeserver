@@ -209,4 +209,16 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal((await catalogReport(interrupted, [faster, slower])).status, 409);
   clock += 10 * 60_000;
   assert.equal((await tick()).scan, undefined);
+
+  assert.equal((await toggle(true, "/restarted")).results[0].enabled, true);
+  const failScan = (scan) => background("worker/catalog", {
+    account: scheduled, id: scan.id, events: [], error: "scan-failed",
+  });
+  assert.equal((await failScan((await tick()).scan)).status, 200);
+  const retryAt = await Schedule.findOne({ account: scheduled }).select("nextScanAt").lean();
+  assert.equal(+retryAt.nextScanAt, clock + 2 * 60_000);
+  clock += 2 * 60_000;
+  assert.equal((await failScan((await tick()).scan)).status, 200);
+  const backoff = await Schedule.findOne({ account: scheduled }).select("nextScanAt").lean();
+  assert.equal(+backoff.nextScanAt, clock + 10 * 60_000);
 });

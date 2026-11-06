@@ -150,9 +150,9 @@ def main():
                     try:
                         result.update(driver.catalog(args.device, scan["room"], scan.get("fallbackRoom")))
                     except Exception as error:
-                        result["error"] = ("session-required" if getattr(error, "phase", "") == "session-required"
-                                           else "scan-failed")
-                        print(f"Catalog scan failed ({type(error).__name__})", file=sys.stderr, flush=True)
+                        reason = getattr(error, "phase", type(error).__name__)
+                        result["error"] = "session-required" if reason == "session-required" else "scan-failed"
+                        print(f"Catalog scan failed ({reason})", file=sys.stderr, flush=True)
                     result["apiRoute"] = driver.api_route
                     control.post("catalog", result)
             except (OSError, ValueError, LeaseLost) as error:

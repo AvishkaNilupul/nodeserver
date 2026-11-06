@@ -18,6 +18,7 @@ const SCAN_MS = 4 * 60_000;
 const CATALOG_LIMIT = 100;
 const MAX_WATCH_SECONDS = 3600;
 const AUTO_SCAN_MS = 10 * 60_000;
+const SCAN_RETRY_MS = 2 * 60_000;
 const AUTO_RETRY_MS = 30 * 60_000;
 const MAX_AUTO_ATTEMPTS = 3;
 const PHASES = new Set(["bootstrap", "watching", "claiming"]);
@@ -198,7 +199,7 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     return { account, queued: false, reason: "No eligible new countdown reward" };
   }
 
-  async function createScan(account, { auto, batch, scheduleToken }) {
+  async function createScan(account, { auto, batch, scheduleToken, retrySoon }) {
     if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
     if (await Model.exists({ account, active: true })) return { account, reason: "Worker busy" };
     // The seed only prompts a fresh authenticated discovery request.
@@ -209,7 +210,7 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     const fallbackRoom = alternative?.room || process.env.TIKTOK_CATALOG_SEED_ROOM;
     if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
     scans.set(account, { id: randomUUID(), room, fallbackRoom: fallbackRoom !== room && ID.test(fallbackRoom) ? fallbackRoom : undefined,
-      auto, batch, scheduleToken, expiresAt: now() + SCAN_MS });
+      auto, batch, scheduleToken, retrySoon, expiresAt: now() + SCAN_MS });
     return { account, scanning: true };
   }
 
@@ -220,11 +221,12 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     await sweep(account);
     if (await Model.exists({ account, active: true })) return;
     const token = randomUUID();
-    const reserved = await Automation.updateOne(due, {
+    const reserved = await Automation.findOneAndUpdate(due, {
       $set: { nextScanAt: new Date(now() + AUTO_SCAN_MS), scanToken: token, lastResult: "Scan started" },
-    });
-    if (!reserved.modifiedCount) return;
-    const result = await createScan(account, { auto: true, batch: randomUUID(), scheduleToken: token });
+    }, { returnDocument: "before" }).select("lastResult").lean();
+    if (!reserved) return;
+    const retrySoon = !["Scan failed", "Scan incomplete", "Sign-in check needed"].includes(reserved.lastResult);
+    const result = await createScan(account, { auto: true, batch: randomUUID(), scheduleToken: token, retrySoon });
     if (!result.scanning) {
       await Automation.updateOne({ account, scanToken: token }, { $set: { lastResult: result.reason } });
     }
@@ -382,8 +384,10 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       const lastResult = error === "session-required" ? "Sign-in check needed" : error ? "Scan failed" :
         catalog.result?.queued ? "Queued " + catalog.result.event : partial ? "Scan incomplete" :
           catalog.result?.reason || "Scan finished";
+      const checkAgain = scan.retrySoon && !catalog.result?.queued && (error === "scan-failed" || partial);
       await Automation.updateOne(current, {
         $set: { lastScanAt: new Date(now()), lastResult,
+          ...(checkAgain && { nextScanAt: new Date(now() + SCAN_RETRY_MS) }),
           ...(!error && ["phone", "mac"].includes(apiRoute) && { lastApiRoute: apiRoute }) },
         $unset: { scanToken: 1 },
       });
