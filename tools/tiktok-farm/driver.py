@@ -2,6 +2,7 @@
 import queue
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -67,6 +68,7 @@ class Driver:
 
         readers, uploads, matched = {}, {}, {}
         failed = set()
+        observations = {"reward_reads": 0, "room_entries": 0}
         rules = []
         uid_line = shell(f"cmd package list packages -U {APP}", check=True, text=True).stdout
         uid = re.search(r"uid:(\d+)", uid_line)
@@ -85,6 +87,14 @@ class Driver:
             for tool in ("iptables", "ip6tables"):
                 firewall(tool, "-I")
                 rules.append(tool)
+            sockets = shell("/debug_ramdisk/magisk su -c 'ss -tnp'", text=True, check=True).stdout
+            for line in sockets.splitlines():
+                fields = line.split()
+                if len(fields) < 6 or fields[0] != "ESTAB" or f"pid={app.pid}," not in line or not fields[4].endswith(":443"):
+                    continue
+                port = fields[3].rsplit(":", 1)[-1]
+                if port.isdigit():
+                    shell(f"/debug_ramdisk/magisk su -c 'ss -Ktn sport = :{port} dport = :443'")
             shell(f"am start -a android.intent.action.VIEW -d https://www.tiktok.com/share/live/{job['room']} -p {APP}", check=True)
             deadline = time.monotonic() + 75
             renew = time.monotonic() + 15
@@ -112,11 +122,13 @@ class Driver:
                             if not self.trace["origin_allowed"](fields.get(":authority")):
                                 continue
                             if route in (DETAIL, POLL):
+                                observations["reward_reads"] += 1
                                 ids = self.trace["public_query"](fields)
                                 if (ids.get("drops_id") == job["campaign"] and ids.get("room_id") == job["room"]
                                         and "anchor_id" in ids and {"cookie", "x-tt-token"} <= fields.keys()):
                                     matched["read"] = (host, headers, b"")
                             if route == ENTER and not ended:
+                                observations["room_entries"] += 1
                                 needed = {"cookie", "x-tt-token", "tt-ticket-guard-client-data"}
                                 if needed <= fields.keys():
                                     uploads[key_stream] = (host, headers, bytearray())
@@ -138,9 +150,14 @@ class Driver:
         finally:
             try:
                 for tool in reversed(rules):
-                    firewall(tool, "-D")
+                    try:
+                        firewall(tool, "-D")
+                    except (subprocess.SubprocessError, OSError):
+                        print(f"Temporary {tool} rule cleanup failed on {serial}", file=sys.stderr, flush=True)
             finally:
                 session.detach()
+        print(f"{serial} bootstrap timed out ({observations}, matched {sorted(matched)})",
+              file=sys.stderr, flush=True)
         raise FarmError("session-required")
 
     def mac(self, client, capture, **options):
@@ -154,6 +171,8 @@ class Driver:
     def read_task(self, client, read, job):
         result = self.mac(client, read, include_payload=True, json_format=True)
         if result.get("business") != 0:
+            print(f"TikTok reward read HTTP {result.get('http')}, status {result.get('business')}",
+                  file=sys.stderr, flush=True)
             raise FarmError("session-required")
         data = result["_payload"].get("data") or {}
         tasks = data.get("tasks") or (data.get("detail") or {}).get("tasks") or []
