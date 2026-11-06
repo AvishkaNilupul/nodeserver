@@ -35,7 +35,14 @@ def visible(node):
 def find(items, names, *, button=False):
     matches = [node for node in items if visible(node) and labels(node) & names]
     clickable = next((node for node in matches if node.get("clickable") == "true"), None)
-    return clickable or (matches[0] if matches and not button else None)
+    if clickable:
+        return clickable
+    if not button:
+        return matches[0] if matches else None
+    # TikTok exposes some Compose controls through a content description
+    # without a clickable flag. Exclude plain headings with the same text.
+    return next((node for node in matches if node.get("class", "").endswith(".Button") or
+                 node.get("content-desc", "").strip().casefold() in names), None)
 
 
 def tap(device, node):
