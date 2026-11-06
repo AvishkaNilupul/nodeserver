@@ -1,10 +1,12 @@
 """Capture a single app session in memory, then complete a supported LIVE reward."""
+from contextlib import contextmanager
 import gzip
 import io
 import queue
 import re
 import subprocess
 import sys
+from threading import Timer
 import time
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -29,6 +31,19 @@ class FarmError(Exception):
         self.phase = phase
 
 
+@contextmanager
+def frida_deadline(seconds=12):
+    operation = frida.Cancellable()
+    timer = Timer(seconds, operation.cancel)
+    timer.daemon = True
+    timer.start()
+    try:
+        with operation:
+            yield
+    finally:
+        timer.cancel()
+
+
 class Driver:
     def __init__(self, trace):
         self.trace = trace
@@ -37,8 +52,9 @@ class Driver:
     def available(self, serial):
         try:
             device = frida.get_device(serial, timeout=3)
-            return any(app.identifier == APP for app in device.enumerate_applications())
-        except (frida.TimedOutError, frida.ServerNotRunningError, frida.TransportError, OSError):
+            with frida_deadline(5):
+                return any(app.identifier == APP for app in device.enumerate_applications())
+        except (frida.TimedOutError, frida.ServerNotRunningError, frida.TransportError, frida.OperationCancelledError, OSError):
             return False
 
     def entry_room(self, entry):
@@ -61,16 +77,20 @@ class Driver:
             return subprocess.run([ADB, "-s", serial, "shell", command], timeout=12,
                                   capture_output=True, **options)
 
-        app = next((app for app in device.enumerate_applications() if app.identifier == APP), None)
+        with frida_deadline():
+            app = next((app for app in device.enumerate_applications() if app.identifier == APP), None)
         if not app:
             raise FarmError("session-required")
         if not app.pid:
             shell(f"monkey -p {APP} -c android.intent.category.LAUNCHER 1", check=True)
-            time.sleep(6)
-            app = next(app for app in device.enumerate_applications() if app.identifier == APP)
+            time.sleep(12)
+            update("bootstrap", 0)
+            with frida_deadline():
+                app = next(app for app in device.enumerate_applications() if app.identifier == APP)
         if not app.pid:
             raise FarmError("session-required")
-        session = device.attach(app.pid)
+        with frida_deadline():
+            session = device.attach(app.pid)
         events = queue.Queue(maxsize=1024)
 
         def receive(message, data):
@@ -98,7 +118,8 @@ class Driver:
         try:
             script = session.create_script(self.trace["SOURCE"])
             script.on("message", receive)
-            script.load()
+            with frida_deadline():
+                script.load()
             for tool in ("iptables", "ip6tables"):
                 firewall(tool, "-I")
                 rules.append(tool)
