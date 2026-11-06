@@ -21,15 +21,17 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
     if (req.headers["x-test-superadmin"] === "1") req.session = { admin: { role: "superadmin", tfa: true } };
     next();
   });
-  app.use(createRouter({ workerKey: () => key, now: () => clock }));
+  const routerOptions = { workerKey: () => key, now: () => clock };
+  app.use("/restarted", createRouter(routerOptions));
+  app.use(createRouter(routerOptions));
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = "http://127.0.0.1:" + server.address().port;
   const auth = { admin: { "x-test-superadmin": "1" }, worker: { authorization: "Bearer " + key } };
 
-  async function request(route, body, role) {
-    const response = await fetch(base + "/api/tiktok-farm/" + route, {
+  async function request(route, body, role, instance = "") {
+    const response = await fetch(base + instance + "/api/tiktok-farm/" + route, {
       method: body === undefined ? "GET" : "POST",
       headers: { accept: "application/json", "content-type": "application/json", ...auth[role] },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -107,4 +109,38 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
     [faster, secondOnly].map(({ campaign, room, anchor }) => ({ campaign, room, anchor })));
   const busy = await request("scan", { accounts, auto: true }, "admin");
   assert.deepEqual(busy.results.map(({ reason }) => reason), ["Worker busy", "Worker busy"]);
+
+  const scheduled = "tiktok-03";
+  const toggle = (enabled, instance, role = "admin") =>
+    request("automation", { accounts: [scheduled], enabled }, role, instance);
+  const background = (route, body, role = "worker") => request(route, body, role, "/restarted");
+  const tick = () => background("worker/poll", { account: scheduled, scanCapable: true });
+  assert.equal((await toggle(true, "", "worker")).status, 401);
+  assert.equal((await toggle(true, "")).results[0].reason, "Scanner unavailable");
+  await scannerPoll(scheduled);
+  assert.equal((await toggle(true, "")).results[0].enabled, true);
+  const offline = (await background("state", undefined, "admin")).accounts.find(({ account }) => account === scheduled);
+  assert.equal(offline.automation.enabled, true);
+  assert.equal(offline.online, false);
+  const backgroundScans = (await Promise.all([tick(), tick()])).map((result) => result.scan).filter(Boolean);
+  assert.equal(backgroundScans.length, 1);
+  const catalogReport = (scan, events) => background("worker/catalog", { account: scheduled, id: scan.id, events });
+  assert.equal((await catalogReport(backgroundScans[0], [slower, faster])).status, 200);
+  const backgroundJob = (await tick()).job;
+  assert.equal(backgroundJob.task, faster.task);
+  assert.equal(backgroundJob.automatic, true);
+  assert.equal((await update(backgroundJob, { status: "failed", phase: "room-ended" })).status, 200);
+  assert.equal((await tick()).scan, undefined);
+  clock += 10 * 60_000;
+  const nextScan = (await tick()).scan;
+  assert.equal((await catalogReport(nextScan, [faster, slower])).status, 200);
+  const queued = await Run.findOne({ account: scheduled, state: "queued" }).lean();
+  assert.equal(queued.task, slower.task);
+  assert.equal((await background("runs/" + queued._id + "/stop", {}, "admin")).status, 200);
+  clock += 10 * 60_000;
+  const interrupted = (await tick()).scan;
+  assert.equal((await toggle(false, "/restarted")).results[0].enabled, false);
+  assert.equal((await catalogReport(interrupted, [faster, slower])).status, 409);
+  clock += 10 * 60_000;
+  assert.equal((await tick()).scan, undefined);
 });

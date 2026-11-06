@@ -4,6 +4,7 @@ const { createHash, randomUUID, timingSafeEqual } = require("node:crypto");
 const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
 const { decrypt, encrypt, isEncrypted } = require("../utils/secretBox");
 const Run = require("../models/TikTokFarmRun");
+const Schedule = require("../models/TikTokFarmSchedule");
 
 const SLOT = /^[a-z][a-z0-9-]{0,31}$/;
 const ID = /^\d{1,22}$/;
@@ -12,11 +13,14 @@ const LEASE_MS = 60_000;
 const ONLINE_MS = 45_000;
 const CATALOG_MS = 5 * 60_000;
 const SCAN_MS = 3 * 60_000;
+const AUTO_SCAN_MS = 10 * 60_000;
+const AUTO_RETRY_MS = 30 * 60_000;
+const MAX_AUTO_ATTEMPTS = 3;
 const PHASES = new Set(["bootstrap", "watching", "claiming"]);
 const FAILURE_PHASES = new Set(["ineligible", "session-required", "room-ended", "worker-error", "claim-uncertain"]);
 const hash = (value) => createHash("sha256").update(value).digest();
 
-function createRouter({ Model = Run, workerKey = () => process.env.TIKTOK_WORKER_KEY, now = Date.now } = {}) {
+function createRouter({ Model = Run, Automation = Schedule, workerKey = () => process.env.TIKTOK_WORKER_KEY, now = Date.now } = {}) {
   const router = express.Router();
   const seen = new Map();
   const capabilities = new Set();
@@ -58,8 +62,8 @@ function createRouter({ Model = Run, workerKey = () => process.env.TIKTOK_WORKER
     }
     next();
   };
-  const sweep = () => Model.updateMany(
-    { active: true, state: "running", leaseUntil: { $lte: new Date(now()) } },
+  const sweep = (account) => Model.updateMany(
+    { ...(account && { account }), active: true, state: "running", leaseUntil: { $lte: new Date(now()) } },
     { $set: { active: false, state: "review", phase: "lease-expired" } },
   );
 
@@ -69,37 +73,45 @@ function createRouter({ Model = Run, workerKey = () => process.env.TIKTOK_WORKER
   });
   router.get("/api/tiktok-farm/state", ...admin, wrap(async (_req, res) => {
     await sweep();
-    const accounts = [];
-    for (const [account, lastSeen] of seen) {
-      const scan = scans.get(account);
-      if (online(account) || scan?.expiresAt > now()) {
-        const catalog = fresh(account);
-        accounts.push({ account, lastSeen, online: online(account), canScan: capabilities.has(account),
-          scanning: Boolean(scan && scan.expiresAt > now()), catalog });
-      }
-    }
-    const [runs, codes] = await Promise.all([
+    const [runs, codes, schedules] = await Promise.all([
       Model.find({}).sort({ createdAt: -1 }).limit(80).lean(),
       Model.find({ state: "completed", code: { $exists: true } })
         .select("account campaign task eventName updatedAt").sort({ updatedAt: -1 }).limit(200).lean(),
+      Automation.find({ enabled: true }).select("account enabled nextScanAt lastScanAt lastResult -_id").lean(),
     ]);
-    res.json({ accounts, runs, codes });
+    const scheduled = new Map(schedules.map((schedule) => [schedule.account, schedule]));
+    const accounts = [];
+    for (const account of new Set([...seen.keys(), ...scheduled.keys()])) {
+      const scan = scans.get(account);
+      const automation = scheduled.get(account);
+      if (online(account) || scan?.expiresAt > now() || automation) {
+        accounts.push({ account, lastSeen: seen.get(account), online: online(account), canScan: capabilities.has(account),
+          scanning: Boolean(scan && scan.expiresAt > now()), catalog: fresh(account), automation });
+      }
+    }
+    res.json({ accounts, runs, codes, autoScanMinutes: AUTO_SCAN_MS / 60_000 });
   }));
-  async function enqueue(account, event, batch) {
+  async function enqueue(account, event, batch, automatic = false) {
     const { campaign, room, task, name, duration, anchor } = event;
     const target = { account, campaign, task };
     const metadata = name ? { eventName: name, duration, anchor } : {};
+    const retryable = automatic ? {
+      state: "failed", updatedAt: { $lte: new Date(now() - AUTO_RETRY_MS) },
+      $or: [{ autoAttempts: { $lt: MAX_AUTO_ATTEMPTS } }, { autoAttempts: { $exists: false } }],
+    } : { state: { $in: ["failed", "cancelled"] } };
     try {
       const retried = await Model.findOneAndUpdate(
-        { ...target, active: false, state: { $in: ["failed", "cancelled"] } },
+        { ...target, active: false, ...retryable },
         {
-          $set: { room, batch, ...metadata, active: true, state: "queued", phase: "queued", seconds: 0,
+          $set: { room, batch, ...metadata, automatic, active: true, state: "queued", phase: "queued", seconds: 0,
             stopRequested: false, claimAuthorized: false },
+          ...(automatic && { $inc: { autoAttempts: 1 } }),
           $unset: { lease: 1, leaseUntil: 1, ...(!name && { eventName: 1, duration: 1, anchor: 1 }) },
         },
         { returnDocument: "after" },
       );
-      const run = retried || await Model.create({ ...target, room, batch, ...metadata });
+      const run = retried || await Model.create({ ...target, room, batch, ...metadata,
+        automatic, autoAttempts: automatic ? 1 : 0 });
       return { account, queued: true, id: run.id, event: name };
     } catch (error) {
       if (error.code !== 11000) throw error;
@@ -107,15 +119,75 @@ function createRouter({ Model = Run, workerKey = () => process.env.TIKTOK_WORKER
     }
   }
 
-  async function pick(account, events, batch) {
+  async function pick(account, events, batch, automatic = false) {
     if (await Model.exists({ account, active: true })) return { account, queued: false, reason: "Worker busy" };
     const candidates = [...events].sort((a, b) => a.remaining - b.remaining || a.duration - b.duration);
+    const previous = candidates.length ? await Model.find({
+      account, $or: candidates.map(({ campaign, task }) => ({ campaign, task })),
+    }).select("campaign task state updatedAt autoAttempts").lean() : [];
+    const history = new Map(previous.map((run) => [run.campaign + ":" + run.task, run]));
     for (const event of candidates) {
-      const result = await enqueue(account, event, batch);
+      const run = history.get(event.campaign + ":" + event.task);
+      if (run && !["failed", "cancelled"].includes(run.state)) continue;
+      if (automatic && run && (run.state === "cancelled" || (run.autoAttempts || 0) >= MAX_AUTO_ATTEMPTS ||
+          now() - run.updatedAt < AUTO_RETRY_MS)) continue;
+      const result = await enqueue(account, event, batch, automatic);
       if (result.queued) return result;
     }
     return { account, queued: false, reason: "No eligible new countdown reward" };
   }
+
+  async function createScan(account, { auto, batch, scheduleToken }) {
+    if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
+    if (await Model.exists({ account, active: true })) return { account, reason: "Worker busy" };
+    const recent = await Model.findOne({ account, state: "completed" }).sort({ updatedAt: -1 }).select("room").lean();
+    // The seed only prompts a fresh authenticated discovery request.
+    const room = recent?.room || process.env.TIKTOK_CATALOG_SEED_ROOM || "7704940109955353374";
+    if (!ID.test(room)) return { account, reason: "No discovery room available" };
+    if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
+    scans.set(account, { id: randomUUID(), room, auto, batch, scheduleToken, expiresAt: now() + SCAN_MS });
+    return { account, scanning: true };
+  }
+
+  async function scheduleScan(account) {
+    if (scans.get(account)?.expiresAt > now()) return;
+    const due = { account, enabled: true, nextScanAt: { $lte: new Date(now()) } };
+    if (!await Automation.exists(due)) return;
+    await sweep(account);
+    if (await Model.exists({ account, active: true })) return;
+    const token = randomUUID();
+    const reserved = await Automation.updateOne(due, {
+      $set: { nextScanAt: new Date(now() + AUTO_SCAN_MS), scanToken: token, lastResult: "Scan started" },
+    });
+    if (!reserved.modifiedCount) return;
+    const result = await createScan(account, { auto: true, batch: randomUUID(), scheduleToken: token });
+    if (!result.scanning) {
+      await Automation.updateOne({ account, scanToken: token }, { $set: { lastResult: result.reason } });
+    }
+  }
+
+  router.post("/api/tiktok-farm/automation", ...admin, wrap(async (req, res) => {
+    const { accounts, enabled } = req.body || {};
+    if (!validAccounts(accounts) || typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "Choose account workers and an automation setting" });
+    }
+    await Automation.init();
+    const results = await Promise.all(accounts.map(async (account) => {
+      if (enabled && (!online(account) || !capabilities.has(account))) {
+        return { account, reason: "Scanner unavailable" };
+      }
+      if (enabled) {
+        await Automation.updateOne({ account }, [{
+          $set: { enabled: true, nextScanAt: { $cond: ["$enabled", "$nextScanAt", new Date(now())] } },
+        }], { upsert: true, updatePipeline: true });
+      } else {
+        await Automation.updateOne({ account }, { $set: { enabled: false }, $unset: { scanToken: 1 } });
+        if (scans.get(account)?.scheduleToken) scans.delete(account);
+      }
+      return { account, enabled };
+    }));
+    res.json({ results });
+  }));
 
   router.post("/api/tiktok-farm/start", ...admin, wrap(async (req, res) => {
     const { accounts, campaign, room, task, mode } = req.body || {};
@@ -153,17 +225,7 @@ function createRouter({ Model = Run, workerKey = () => process.env.TIKTOK_WORKER
     const batch = randomUUID();
     const results = await Promise.all(accounts.map(async (account) => {
       if (!online(account) || !capabilities.has(account)) return { account, reason: "Scanner unavailable" };
-      if (await Model.exists({ account, active: true })) return { account, reason: "Worker busy" };
-      const pending = scans.get(account);
-      if (pending && pending.expiresAt > now()) return { account, reason: "Scan already running" };
-      const recent = await Model.findOne({ account, state: "completed" }).sort({ updatedAt: -1 }).select("room").lean();
-      // This known room is only a discovery seed for slots with no previous run.
-      const room = recent?.room || process.env.TIKTOK_CATALOG_SEED_ROOM || "7704940109955353374";
-      if (!ID.test(room)) return { account, reason: "No discovery room available" };
-      // Recheck after DB awaits so concurrent clicks do not replace an active scan.
-      if (scans.get(account)?.expiresAt > now()) return { account, reason: "Scan already running" };
-      scans.set(account, { id: randomUUID(), room, auto, batch, expiresAt: now() + SCAN_MS });
-      return { account, scanning: true };
+      return createScan(account, { auto, batch });
     }));
     res.status(202).json({ results });
   }));
@@ -211,12 +273,16 @@ function createRouter({ Model = Run, workerKey = () => process.env.TIKTOK_WORKER
       { $set: { lease, leaseUntil: new Date(now() + LEASE_MS), state: "running", phase: "bootstrap" } },
       { returnDocument: "after" },
     ).lean();
-    const scan = scans.get(account);
-    if (!run && !jobId && scanCapable === true && scan?.expiresAt > now() && !scan.sent) {
-      scan.sent = true;
-      return res.json({ job: null, scan: { id: scan.id, room: scan.room } });
+    if (!run && !jobId && scanCapable === true) {
+      await scheduleScan(account);
+      const scan = scans.get(account);
+      if (scan?.expiresAt > now() && !scan.sent) {
+        scan.sent = true;
+        return res.json({ job: null, scan: { id: scan.id, room: scan.room } });
+      }
     }
-    res.json({ job: run ? { id: String(run._id), account, campaign: run.campaign, room: run.room, task: run.task, anchor: run.anchor, lease } : null });
+    res.json({ job: run ? { id: String(run._id), account, campaign: run.campaign, room: run.room, task: run.task,
+      anchor: run.anchor, automatic: run.automatic === true, lease } : null });
   }));
   router.post("/api/tiktok-farm/worker/catalog", authenticate, jsonOnly, wrap(async (req, res) => {
     const { account, id, events, error } = req.body || {};
@@ -234,7 +300,15 @@ function createRouter({ Model = Run, workerKey = () => process.env.TIKTOK_WORKER
       ({ campaign, room, anchor, task, name, duration, remaining }));
     const catalog = { events: candidates, updatedAt: now(), error };
     catalogs.set(account, catalog);
-    if (scan.auto && !error) catalog.result = await pick(account, candidates, scan.batch);
+    if (scan.scheduleToken) {
+      const current = { account, enabled: true, scanToken: scan.scheduleToken };
+      if (!error && await Automation.exists(current)) catalog.result = await pick(account, candidates, scan.batch, true);
+      const lastResult = error ? "Scan failed" :
+        catalog.result?.queued ? "Queued " + catalog.result.event : catalog.result?.reason || "Scan finished";
+      await Automation.updateOne(current, { $set: { lastScanAt: new Date(now()), lastResult }, $unset: { scanToken: 1 } });
+    } else if (scan.auto && !error) {
+      catalog.result = await pick(account, candidates, scan.batch);
+    }
     res.json({ ok: true });
   }));
   router.post("/api/tiktok-farm/worker/update", authenticate, jsonOnly, wrap(async (req, res) => {

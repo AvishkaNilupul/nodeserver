@@ -53,6 +53,7 @@
   <p id="status" role="status" aria-live="polite"></p>
   <div class="metrics" aria-label="Farm overview">
     <div class="metric"><strong id="online">–</strong><small>Workers online</small></div>
+    <div class="metric"><strong id="automationCount">–</strong><small>Auto farm enabled</small></div>
     <div class="metric"><strong id="eventCount">–</strong><small>Eligible rewards</small></div>
     <div class="metric"><strong id="activeCount">–</strong><small>Active runs</small></div>
     <div class="metric"><strong id="storedCount">–</strong><small>Codes stored</small></div>
@@ -61,9 +62,13 @@
     <h2>Account workers</h2>
     <div id="accounts">Checking workers…</div>
     <div class="toolbar">
-      <button class="primary" id="auto" disabled>Scan &amp; auto farm</button>
+      <button class="primary" id="enableAutomation" disabled>Enable auto farm</button>
+      <button id="pauseAutomation" disabled>Pause auto farm</button>
+      <small id="automationHelp">Auto farm scans enabled workers even when this page is closed.</small>
+    </div>
+    <div class="toolbar">
+      <button id="auto" disabled>Scan &amp; farm once</button>
       <button id="scan" disabled>Scan live events</button>
-      <small>Auto farm picks the shortest available countdown for each selected worker.</small>
     </div>
     <details>
       <summary>Manual run by ID</summary>
@@ -96,6 +101,8 @@ const accountsBox = document.querySelector("#accounts");
 const statusBox = document.querySelector("#status");
 const root = "/api/tiktok-farm";
 const disabled = new Set();
+const enabledOffline = new Set();
+let workerRows = [];
 let accountSignature;
 let eventSignature;
 let runSignature;
@@ -128,48 +135,78 @@ function empty(table, columns, text) {
   cell.textContent = text;
 }
 
-const selected = () => [...accountsBox.querySelectorAll("input:checked")].map((input) => input.value);
+const selected = () => workerRows.filter(({ account, online }) =>
+  online ? !disabled.has(account) : enabledOffline.has(account));
+const selectedOnline = () => selected().filter(({ online }) => online).map(({ account }) => account);
+const pendingActions = new Set();
+
+function updateControls() {
+  const workers = selected();
+  const canScan = workers.some((worker) => worker.online && worker.canScan && !worker.scanning);
+  const available = {
+    auto: canScan,
+    scan: canScan,
+    enableAutomation: workers.some((worker) => worker.online && worker.canScan && !worker.automation),
+    pauseAutomation: workers.some((worker) => worker.automation),
+  };
+  for (const [id, active] of Object.entries(available)) {
+    const button = document.getElementById(id);
+    button.disabled = !active || pendingActions.has(button);
+  }
+  const manual = form.querySelector("button");
+  manual.disabled = !workers.some((worker) => worker.online) || pendingActions.has(manual);
+}
 
 async function action(button, path, body) {
+  pendingActions.add(button);
   button.disabled = true;
   try {
     const { results } = await api(path, body);
-    report(results.map((item) => item.account + (item.queued ? " queued" : item.scanning ? " scanning" : " · " + item.reason)).join(" · "));
+    report(results.map((item) => item.account + " · " + (item.reason ||
+      (item.queued ? "Queued" : item.scanning ? "Scanning" : item.enabled ? "Auto farm enabled" : "Auto farm paused"))).join(" · "));
     await refresh();
   } catch (error) { report(error.message, true); }
-  finally { button.disabled = ["auto", "scan"].includes(button.id) && !scannerAvailable; }
+  finally {
+    pendingActions.delete(button);
+    button.disabled = false;
+    updateControls();
+  }
 }
 
-let scannerAvailable = false;
 function renderAccounts(accounts) {
   const ordered = [...accounts].sort((a, b) => a.account.localeCompare(b.account));
-  const signature = JSON.stringify(ordered.map(({ account, online, canScan, scanning, catalog }) =>
-    [account, online, canScan, scanning, catalog?.updatedAt, catalog?.result]));
+  workerRows = ordered;
+  const signature = JSON.stringify(ordered.map(({ account, online, canScan, scanning, catalog, automation }) =>
+    [account, online, canScan, scanning, catalog?.updatedAt, catalog?.result, automation]));
   if (signature === accountSignature) return;
   accountSignature = signature;
   accountsBox.replaceChildren();
-  for (const { account: slot, scanning, catalog } of ordered) {
+  for (const { account: slot, online, scanning, catalog, automation } of ordered) {
     const label = document.createElement("label");
     label.className = "account";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.value = slot;
-    checkbox.checked = !disabled.has(slot);
+    checkbox.checked = online ? !disabled.has(slot) : enabledOffline.has(slot);
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) disabled.delete(slot);
-      else disabled.add(slot);
+      if (online) {
+        if (checkbox.checked) disabled.delete(slot);
+        else disabled.add(slot);
+      } else if (checkbox.checked) enabledOffline.add(slot);
+      else enabledOffline.delete(slot);
+      updateControls();
     });
     const status = document.createElement("small");
-    status.textContent = scanning ? "Scanning…" : catalog?.error ? "Scan failed" :
+    const activity = scanning ? "Scanning…" : !online ? "Offline" : catalog?.error ? "Scan failed" :
       catalog?.result?.queued ? "Auto queued" : catalog?.result?.reason ||
-      (catalog ? catalog.events.length + " eligible" : "Online");
+      (catalog ? catalog.events.length + " eligible" : automation?.lastResult || "Online");
+    status.textContent = automation ? "Auto · " + activity : activity;
+    if (automation?.nextScanAt) status.title = "Next scan after " + new Date(automation.nextScanAt).toLocaleString();
     label.append(checkbox, slot, status);
     accountsBox.append(label);
   }
   if (!ordered.length) accountsBox.textContent = "No worker online.";
-  form.querySelector("button").disabled = !ordered.some((account) => account.online);
-  scannerAvailable = ordered.some((account) => account.online && account.canScan && !account.scanning);
-  for (const id of ["auto", "scan"]) document.querySelector("#" + id).disabled = !scannerAvailable;
+  updateControls();
 }
 
 function renderEvents(accounts) {
@@ -199,7 +236,7 @@ function renderEvents(accounts) {
     const button = document.createElement("button");
     button.textContent = "Farm event";
     button.onclick = () => {
-      const accounts = selected().filter((account) => event.accounts.includes(account));
+      const accounts = selectedOnline().filter((account) => event.accounts.includes(account));
       if (!accounts.length) return report("Select an eligible account for this event.", true);
       action(button, "/start", { mode: "event", accounts, campaign: event.campaign, task: event.task });
     };
@@ -211,9 +248,19 @@ function renderEvents(accounts) {
 for (const [id, auto] of [["auto", true], ["scan", false]]) {
   const button = document.querySelector("#" + id);
   button.onclick = () => {
-    const accounts = selected();
+    const accounts = selectedOnline();
     if (!accounts.length) return report("Choose at least one account.", true);
     action(button, "/scan", { accounts, auto });
+  };
+}
+
+for (const [id, enabled] of [["enableAutomation", true], ["pauseAutomation", false]]) {
+  const button = document.getElementById(id);
+  button.onclick = () => {
+    const accounts = selected()
+      .filter((worker) => enabled ? worker.online && worker.canScan && !worker.automation : worker.automation)
+      .map((worker) => worker.account);
+    if (accounts.length) action(button, "/automation", { accounts, enabled });
   };
 }
 
@@ -226,7 +273,8 @@ function renderRuns(runs) {
   if (!runs.length) empty(table, 6, "No runs yet.");
   for (const run of runs) {
     const state = run.stopRequested && run.active ? "Stopping" : run.state + " · " + run.phase;
-    const actions = row(table, [run.account, run.eventName || run.campaign, run.task, "", run.seconds + "s"]);
+    const actions = row(table, [run.account + (run.automatic ? " · Auto" : ""), run.eventName || run.campaign,
+      run.task, "", run.seconds + "s"]);
     const status = document.createElement("span");
     status.className = "pill " + run.state;
     status.textContent = state;
@@ -282,6 +330,9 @@ async function refresh() {
   try {
     const data = await api("/state");
     document.querySelector("#online").textContent = data.accounts.filter((account) => account.online).length;
+    document.querySelector("#automationCount").textContent = data.accounts.filter((account) => account.automation).length;
+    document.querySelector("#automationHelp").textContent = "Scans enabled workers every " + data.autoScanMinutes +
+      " minutes while idle, even when this page is closed. Pause stops future scans.";
     document.querySelector("#activeCount").textContent = data.runs.filter((run) => run.active).length;
     document.querySelector("#storedCount").textContent = data.codes.length;
     renderAccounts(data.accounts);
@@ -292,19 +343,12 @@ async function refresh() {
   finally { refreshing = false; }
 }
 
-form.addEventListener("submit", async (event) => {
+form.addEventListener("submit", (event) => {
   event.preventDefault();
   const button = form.querySelector("button");
-  const accounts = [...accountsBox.querySelectorAll("input:checked")].map((input) => input.value);
+  const accounts = selectedOnline();
   if (!accounts.length) return report("Choose at least one account.", true);
-  button.disabled = true;
-  try {
-    const { results } = await api("/start", { ...Object.fromEntries(new FormData(form)), accounts });
-    const message = results.map((item) => item.account + (item.queued ? " queued" : " · " + item.reason));
-    report(message.join(" · "));
-    await refresh();
-  } catch (error) { report(error.message, true); }
-  finally { button.disabled = !accountsBox.querySelector("input"); }
+  action(button, "/start", { ...Object.fromEntries(new FormData(form)), accounts });
 });
 
 refresh();

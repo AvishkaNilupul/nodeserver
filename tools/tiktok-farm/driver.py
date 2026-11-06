@@ -241,6 +241,19 @@ class Driver:
                 or not re.fullmatch(r"(?:[0-9]{1,22}|auto)", job.get("task", ""))):
             raise FarmError("worker-error")
         anchor = job.get("anchor")
+        if job.get("automatic") is True and anchor and re.fullmatch(r"[0-9]{1,22}", anchor):
+            # The captured entry is emitted by the real player. Keep it open
+            # for watch credit and let the API read progress and claim.
+            try:
+                _, entry = self.capture(serial, {"room": job["room"]}, update)
+                read = self.get_from_entry(entry, DETAIL, drops_id=job["campaign"], room_id=job["room"],
+                                           anchor_id=anchor, user_type=0)
+                return self.complete(read, entry, job, update, preserve, native_playback=True)
+            finally:
+                try:
+                    self.stop_app(serial)
+                except (FarmError, subprocess.SubprocessError, OSError):
+                    print(f"Could not stop Android playback on {serial}", file=sys.stderr, flush=True)
         if anchor and re.fullmatch(r"[0-9]{1,22}", anchor):
             _, entry = self.capture(serial, {"room": job["room"]}, update)
             read = self.get_from_entry(entry, DETAIL, drops_id=job["campaign"], room_id=job["room"],
@@ -332,7 +345,7 @@ class Driver:
                         break
             return sorted(events, key=lambda event: (event["remaining"], event["duration"], event["campaign"]))[:30]
 
-    def complete(self, read, entry, job, update, preserve):
+    def complete(self, read, entry, job, update, preserve, *, native_playback=False):
         with requests.Session(trust_env=False, default_headers=False,
                               curl_options={CurlOpt.PATH_AS_IS: 1}) as client:
             task = self.read_task(client, read, job)
@@ -343,9 +356,10 @@ class Driver:
             if not isinstance(remaining, int) or not 1 <= remaining <= 1800:
                 raise FarmError("ineligible")
             update("watching", int(task.get("countdown_passed") or 0))
-            result = self.mac(client, entry, refresh=False, json_format=True)
-            if result.get("business") != 0:
-                raise FarmError("room-ended")
+            if not native_playback:
+                result = self.mac(client, entry, refresh=False, json_format=True)
+                if result.get("business") != 0:
+                    raise FarmError("room-ended")
             deadline = time.monotonic() + remaining + 45
             while task.get("user_status") == 1 and time.monotonic() < deadline:
                 time.sleep(12)

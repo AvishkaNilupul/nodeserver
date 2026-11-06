@@ -20,6 +20,8 @@ const schema = new mongoose.Schema({
   anchor: String,
   eventName: String,
   duration: Number,
+  automatic: { type: Boolean, default: false },
+  autoAttempts: { type: Number, default: 0 },
   seconds: { type: Number, default: 0 },
   code: { type: String, select: false },
   codeHash: { type: String, select: false },
