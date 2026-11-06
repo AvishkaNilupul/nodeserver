@@ -28,9 +28,13 @@ configuration. `/pair` retains the original add-on pairing page.
 The production worker URL points to its loopback phone forward. Install
 `epic-phone-tunnel.service` on production for automatic SSH reconnects. It
 uses the existing phone management tunnel, which originates on the phone.
-Install executable `20-epic-claim.sh` in the phone's `~/.termux/boot/` folder;
-a reboot still requires the owner's initial PIN unlock before Termux can run.
-The residential proxy is started/stopped with the bridge (see `PROXY.md`).
+Install executable `watch-workers.sh` alongside the bridge and
+`20-epic-claim.sh` in the phone's `~/.termux/boot/` folder. Run the boot
+script once to register the watchdog as a Termux task. It checks every 30
+seconds and uses the existing launcher to restart missing workers. A reboot
+still requires the owner's initial PIN unlock before Termux can run.
+To stop the bridge and proxy for maintenance, stop the watchdog task first
+(see `PROXY.md` for proxy controls).
 
 Disable both Mac Epic LaunchAgents with `launchctl disable`, then boot them
 out. Leave the Mac's unrelated SOOP and mail services alone. Neither Mac Epic
