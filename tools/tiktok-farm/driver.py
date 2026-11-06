@@ -81,7 +81,8 @@ class Driver:
             device = frida.get_device(serial, timeout=3)
             with frida_deadline(5):
                 return any(app.identifier == APP for app in device.enumerate_applications())
-        except (frida.TimedOutError, frida.ServerNotRunningError, frida.TransportError, frida.OperationCancelledError, OSError):
+        except (frida.TimedOutError, frida.ServerNotRunningError, frida.TransportError,
+                frida.OperationCancelledError, frida.NotSupportedError, OSError):
             return False
 
     def entry_room(self, entry):
@@ -108,7 +109,7 @@ class Driver:
         with frida_deadline():
             app = next((app for app in device.enumerate_applications() if app.identifier == APP), None)
         if not app:
-            raise FarmError("session-required")
+            raise FarmError("worker-error")
         if not app.pid:
             shell(f"monkey -p {APP} -c android.intent.category.LAUNCHER 1", check=True)
             time.sleep(17)
@@ -116,7 +117,7 @@ class Driver:
             with frida_deadline():
                 app = next(app for app in device.enumerate_applications() if app.identifier == APP)
         if not app.pid:
-            raise FarmError("session-required")
+            raise FarmError("worker-error")
         with frida_deadline():
             session = device.attach(app.pid)
         events = queue.Queue(maxsize=1024)
@@ -137,7 +138,7 @@ class Driver:
         uid = re.search(r"uid:(\d+)", uid_line)
         if not uid:
             session.detach()
-            raise FarmError("session-required")
+            raise FarmError("worker-error")
         rule = f"OUTPUT -m owner --uid-owner {uid[1]} -p udp --dport 443 -j REJECT"
 
         def firewall(tool, action):
@@ -229,7 +230,7 @@ class Driver:
                     pass
         print(f"{serial} bootstrap timed out ({observations}, matched {sorted(matched)})",
               file=sys.stderr, flush=True)
-        raise FarmError("capture-timeout" if discovery else "session-required")
+        raise FarmError("capture-timeout")
 
     def mac(self, client, capture, **options):
         host, headers, body = capture
@@ -244,7 +245,7 @@ class Driver:
         if result.get("business") != 0:
             print(f"TikTok reward read HTTP {result.get('http')}, status {result.get('business')}",
                   file=sys.stderr, flush=True)
-            raise FarmError("session-required")
+            raise FarmError("session-required" if result.get("http") == 401 else "reward-read-failed")
         data = result["_payload"].get("data") or {}
         tasks = data.get("tasks") or (data.get("detail") or {}).get("tasks") or []
         if job["task"] == "auto":
@@ -269,7 +270,16 @@ class Driver:
             # The captured entry is emitted by the real player. Keep it open
             # for watch credit and let the API read progress and claim.
             try:
-                _, entry = self.capture(serial, {"room": job["room"]}, update)
+                room = {"room": job["room"]}
+                try:
+                    _, entry = self.capture(serial, room, update)
+                except FarmError as error:
+                    if error.phase != "capture-timeout":
+                        raise
+                    update("bootstrap", 0)
+                    self.stop_app(serial)
+                    update("bootstrap", 0)
+                    _, entry = self.capture(serial, room, update)
                 read = self.get_from_entry(entry, DETAIL, drops_id=job["campaign"], room_id=job["room"],
                                            anchor_id=anchor, user_type=0)
                 return self.complete(read, entry, job, update, preserve, native_playback=True)
@@ -331,7 +341,7 @@ class Driver:
                 result = self.mac(client, self.get_from_entry(entry, route, **params),
                                   include_payload=True, json_format=True)
                 if result.get("business") != 0:
-                    raise FarmError("session-required")
+                    raise FarmError("session-required" if result.get("http") == 401 else "reward-read-failed")
                 return result["_payload"].get("data") or {}
 
             prefix = "/webcast/partnership/reward/"

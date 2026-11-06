@@ -60,7 +60,21 @@
   td, th { padding: 9px; border-bottom: 1px solid #364052; white-space: nowrap; }
   #status { min-height: 1.4em; }
   .error { color: #ffc0c2; }
-  @media (max-width: 600px) { main { margin-top: 12px; } section { padding: 12px; } }
+  @media (max-width: 720px) {
+    #runsPanel table, #runs { display: block; min-width: 0; }
+    #runsPanel thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    #runs tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 12px; padding: 12px 0; border-top: 1px solid #364052; }
+    #runs td { min-width: 0; padding: 0; border: 0; white-space: normal; overflow-wrap: anywhere; }
+    #runs td[data-wide] { grid-column: 1 / -1; }
+    #runs td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 2px; color: #afb8c8; font-size: 12px; }
+    #runs td:empty { display: none; }
+    #runs progress { width: 100%; }
+  }
+  @media (max-width: 600px) {
+    main { margin-top: 12px; }
+    section { padding: 12px; }
+    .tabs button { flex: 1 1 auto; padding-inline: clamp(3px, 1.3vw, 10px); font-size: 13px; }
+  }
 </style>
 <script defer src="/admin-nav.js"></script>
 </head>
@@ -141,8 +155,8 @@
   <div id="runsPanel" role="tabpanel" aria-labelledby="tab-runs" hidden>
   <section>
     <div class="section-head"><h2>Runs and progress</h2><small>Latest 80 runs</small></div>
-    <table><thead><tr><th>Account</th><th>Campaign</th><th>Task</th><th>State</th><th>Progress</th><th></th></tr></thead>
-    <tbody id="runs"></tbody></table>
+    <table role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader">Account</th><th role="columnheader">Campaign</th><th role="columnheader">Task</th><th role="columnheader">State</th><th role="columnheader">Progress</th><th role="columnheader">Actions</th></tr></thead>
+    <tbody id="runs" role="rowgroup"></tbody></table>
   </section>
   </div>
   <div id="codesPanel" role="tabpanel" aria-labelledby="tab-codes" hidden>
@@ -536,21 +550,37 @@ function renderRuns(runs) {
   runSignature = signature;
   const table = document.querySelector("#runs");
   table.replaceChildren();
-  if (!runs.length) empty(table, 6, "No runs yet.");
+  if (!runs.length) {
+    empty(table, 6, "No runs yet.");
+    table.rows[0].cells[0].setAttribute("data-wide", "");
+  }
   for (const run of runs) {
-    const state = run.stopRequested && run.active ? "Stopping" : run.state + " · " + run.phase;
+    const phase = {
+      "capture-timeout": "LIVE connection timed out",
+      "reward-read-failed": "Couldn’t read reward",
+      "session-required": "Session check failed",
+    }[run.phase] || run.phase;
+    const state = run.stopRequested && run.active ? "Stopping" : run.state + " · " + phase;
     const actions = row(table, [run.account + (run.automatic ? " · Auto" : ""), run.eventName || run.campaign,
       run.task, "", run.seconds + "s"]);
+    const record = actions.parentElement;
+    record.setAttribute("role", "row");
+    ["Account", "Campaign", "Task", "State", "Progress", ""].forEach((label, index) => {
+      const cell = record.cells[index];
+      cell.setAttribute("role", "cell");
+      if (label) cell.dataset.label = label;
+      if (index < 3 || index === 5) cell.setAttribute("data-wide", "");
+    });
     const status = document.createElement("span");
     status.className = "pill " + run.state;
     status.textContent = state;
-    actions.parentElement.cells[3].append(status);
+    record.cells[3].append(status);
     if (run.duration) {
       const meter = document.createElement("progress");
       meter.max = run.duration;
       meter.value = Math.min(run.duration, run.seconds);
       meter.setAttribute("aria-label", "Countdown progress");
-      actions.parentElement.cells[4].append(meter);
+      record.cells[4].append(meter);
     }
     if (!run.active || run.stopRequested || run.phase === "claiming") continue;
     const stop = document.createElement("button");

@@ -19,7 +19,9 @@ const AUTO_SCAN_MS = 10 * 60_000;
 const AUTO_RETRY_MS = 30 * 60_000;
 const MAX_AUTO_ATTEMPTS = 3;
 const PHASES = new Set(["bootstrap", "watching", "claiming"]);
-const FAILURE_PHASES = new Set(["ineligible", "session-required", "room-ended", "worker-error", "claim-uncertain"]);
+const FAILURE_PHASES = new Set([
+  "ineligible", "session-required", "room-ended", "worker-error", "claim-uncertain", "capture-timeout", "reward-read-failed",
+]);
 const hash = (value) => createHash("sha256").update(value).digest();
 
 function createRouter({ Model = Run, Automation = Schedule, workerKey = () => process.env.TIKTOK_WORKER_KEY,

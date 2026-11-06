@@ -179,7 +179,10 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   const backgroundJob = (await tick()).job;
   assert.equal(backgroundJob.task, faster.task);
   assert.equal(backgroundJob.automatic, true);
-  assert.equal((await update(backgroundJob, { status: "failed", phase: "room-ended" })).status, 200);
+  assert.equal((await update(backgroundJob, { status: "failed", phase: "capture-timeout", seconds: 0 })).status, 200);
+  const timedOut = await Run.findById(backgroundJob.id).lean();
+  assert.equal(timedOut.phase, "capture-timeout");
+  assert.equal(timedOut.active, false);
   assert.equal((await tick()).scan, undefined);
   clock += 10 * 60_000;
   const nextScan = (await tick()).scan;
