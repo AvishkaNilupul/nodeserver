@@ -68,9 +68,10 @@ def form_fields(items):
 
 
 def challenge(items):
-    text = " ".join(label for node in items for label in labels(node))
+    text = " ".join(label for node in items for label in labels(node)).replace("’", "'")
     return any(phrase in text for phrase in (
         "verify you're human", "verify you are human", "verify to continue", "security verification",
+        "verify it's really you", "verify identity",
         "verification code", "enter the code", "check your email", "slide to verify", "captcha",
         "two-step verification", "confirm it's you", "prove you're human",
     ))
@@ -80,6 +81,29 @@ def rejected(items):
     text = " ".join(label for node in items for label in labels(node))
     return any(phrase in text for phrase in ("incorrect password", "password is incorrect",
         "wrong password", "couldn't find this account", "account doesn't exist", "too many attempts"))
+
+
+def verified_profile(items, username):
+    # The newer own-profile screen has a pencil without an Edit Profile label.
+    own_profile = find(items, {"edit profile"}) or (
+        find(items, {"profile menu"}, button=True) and
+        find(items, {"profile views", "profile photo"}, button=True)
+    )
+    if not own_profile:
+        return None
+    handles = [node.get("text", "") for node in items if visible(node) and
+               re.fullmatch(r"@[a-zA-Z0-9_.]{1,32}", node.get("text", ""))]
+    if not handles:
+        raise LoginAttention("no-profile")
+    if re.fullmatch(r"@?[a-zA-Z0-9_.]+", username):
+        expected = username.lstrip("@").casefold()
+        matched = next((handle for handle in handles if handle[1:].casefold() == expected), None)
+        if not matched:
+            raise LoginAttention("login-rejected")
+        return matched
+    if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", username):
+        return handles[0]
+    raise LoginAttention("login-rejected")
 
 
 def sign_in(device, credential, status):
@@ -101,16 +125,8 @@ def sign_in(device, credential, status):
         except (subprocess.SubprocessError, ET.ParseError):
             time.sleep(2)
             continue
-        if find(items, {"edit profile"}):
-            handles = [node.get("text", "") for node in items
-                       if re.fullmatch(r"@[a-zA-Z0-9_.]{1,32}", node.get("text", ""))]
-            if not handles:
-                raise LoginAttention("no-profile")
-            if re.fullmatch(r"@?[a-zA-Z0-9_.]+", username) and username.lstrip("@").casefold() not in {
-                handle[1:].casefold() for handle in handles
-            }:
-                raise LoginAttention("login-rejected")
-            return handles[0]
+        if handle := verified_profile(items, username):
+            return handle
         if rejected(items):
             raise LoginAttention("login-rejected")
         login, secret = form_fields(items)
