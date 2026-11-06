@@ -8,9 +8,12 @@ import os
 import re
 from pathlib import Path
 import runpy
+import ssl
 import sys
 import time
 from urllib.parse import urlsplit
+
+import certifi
 
 
 class LeaseLost(Exception):
@@ -31,10 +34,14 @@ class Control:
         local_http = self.url.scheme == "http" and self.url.hostname in {"127.0.0.1", "localhost"}
         if self.url.scheme != "https" and not local_http:
             raise ValueError("HTTPS is required outside loopback")
+        self.tls = ssl.create_default_context(cafile=certifi.where())
 
     def post(self, route, data):
-        transport = http.client.HTTPSConnection if self.url.scheme == "https" else http.client.HTTPConnection
-        connection = transport(self.url.hostname, self.url.port, timeout=12)
+        if self.url.scheme == "https":
+            connection = http.client.HTTPSConnection(
+                self.url.hostname, self.url.port, timeout=12, context=self.tls)
+        else:
+            connection = http.client.HTTPConnection(self.url.hostname, self.url.port, timeout=12)
         try:
             connection.request("POST", "/api/tiktok-farm/worker/" + route, json.dumps(data), {
                 "Authorization": "Bearer " + self.token, "Content-Type": "application/json",
