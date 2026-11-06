@@ -6,7 +6,24 @@
 <title>TikTok Farm</title>
 <style>
   :root { color-scheme: dark; font: 15px system-ui; background: #12151c; color: #edf0f7; }
-  main { max-width: 1100px; margin: 36px auto; padding: 0 20px; }
+  main { max-width: 1160px; margin: 32px auto; padding: 0 20px 32px; }
+  .hero { padding: 24px; border: 1px solid #364052; border-radius: 16px; background: linear-gradient(112deg, #202c49, #171c26 64%); }
+  .hero p { margin-bottom: 0; }
+  .tabs { display: flex; gap: 5px; overflow-x: auto; border-bottom: 1px solid #364052; margin-top: 18px; }
+  .tabs button { background: transparent; border-color: transparent; border-radius: 8px 8px 0 0; white-space: nowrap; padding: 10px 16px; }
+  .tabs button[aria-selected="true"] { background: #202c49; border-color: #364052; color: #c4d4ff; }
+  .section-head { display: flex; gap: 10px; flex-wrap: wrap; justify-content: space-between; align-items: center; }
+  .section-head h2, .event h3 { margin-top: 0; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 255px), 1fr)); gap: 10px; }
+  .summary-grid p { margin: 5px 0; }
+  .summary-grid progress { width: 100%; }
+  .account-details { display: grid; gap: 4px; }
+  .account-details button { justify-self: start; }
+  .field-help { margin: 8px 0 14px; }
+  .callout { padding: 10px 13px; background: #171c26; border-radius: 8px; }
+  dialog { max-width: min(90vw, 420px); border: 1px solid #596983; border-radius: 12px; background: #1c222d; color: inherit; }
+  dialog::backdrop { background: #090b11b8; }
+  dialog dd { margin: 5px 0 15px; overflow-wrap: anywhere; }
   h1 { margin-bottom: 4px; font-size: clamp(28px, 4vw, 38px); }
   .eyebrow { font-size: 12px; font-weight: 750; letter-spacing: .1em; color: #9bb5ff; text-transform: uppercase; }
   .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 12px; margin: 18px 0; }
@@ -47,10 +64,20 @@
 </head>
 <body>
 <main>
-  <div class="eyebrow">Live rewards</div>
-  <h1>TikTok Farm</h1>
-  <p>Find eligible live rewards, run selected accounts in parallel, and collect their codes.</p>
+  <header class="hero">
+    <div class="eyebrow">Live rewards</div>
+    <h1>TikTok Farm</h1>
+    <p>Watch progress, manage account workers, and collect reward codes.</p>
+  </header>
+  <nav class="tabs" aria-label="TikTok Farm sections" role="tablist">
+    <button type="button" role="tab" id="tab-overview" aria-controls="overview" aria-selected="true">Overview</button>
+    <button type="button" role="tab" id="tab-events" aria-controls="eventsPanel" aria-selected="false">Events</button>
+    <button type="button" role="tab" id="tab-accounts" aria-controls="accountsPanel" aria-selected="false">Accounts</button>
+    <button type="button" role="tab" id="tab-runs" aria-controls="runsPanel" aria-selected="false">Runs</button>
+    <button type="button" role="tab" id="tab-codes" aria-controls="codesPanel" aria-selected="false">Codes</button>
+  </nav>
   <p id="status" role="status" aria-live="polite"></p>
+  <div id="overview" role="tabpanel" aria-labelledby="tab-overview">
   <div class="metrics" aria-label="Farm overview">
     <div class="metric"><strong id="online">–</strong><small>Workers online</small></div>
     <div class="metric"><strong id="automationCount">–</strong><small>Auto farm enabled</small></div>
@@ -59,6 +86,12 @@
     <div class="metric"><strong id="storedCount">–</strong><small>Codes stored</small></div>
   </div>
   <section>
+    <div class="section-head"><h2>Worker status</h2><small id="lastRefresh">Connecting…</small></div>
+    <div id="workerSummary" class="summary-grid"></div>
+  </section>
+  </div>
+  <div id="accountsPanel" role="tabpanel" aria-labelledby="tab-accounts" hidden>
+  <section>
     <h2>Account workers</h2>
     <div id="accounts">Checking workers…</div>
     <div class="toolbar">
@@ -66,10 +99,7 @@
       <button id="pauseAutomation" disabled>Pause auto farm</button>
       <small id="automationHelp">Auto farm scans enabled workers even when this page is closed.</small>
     </div>
-    <div class="toolbar">
-      <button id="auto" disabled>Scan &amp; farm once</button>
-      <button id="scan" disabled>Scan live events</button>
-    </div>
+    <div id="accountDetails" class="summary-grid"></div>
     <details>
       <summary>Manual run by ID</summary>
       <form id="start">
@@ -81,19 +111,49 @@
     </details>
   </section>
   <section>
-    <h2>Live events</h2>
+    <h2>Save a login</h2>
+    <p class="field-help">Save credentials for an existing or future slot. The account becomes ready after it signs in on a worker.</p>
+    <form id="credentialsForm">
+      <label>Worker slot<input name="account" placeholder="tiktok-03" required pattern="[a-z][a-z0-9\-]{0,31}" maxlength="32"></label>
+      <label>Username or email<input name="username" autocomplete="off" required maxlength="254"></label>
+      <label>Password<input name="password" type="password" autocomplete="new-password" required maxlength="512"></label>
+      <button class="primary" type="submit">Save encrypted login</button>
+    </form>
+  </section>
+  </div>
+  <div id="eventsPanel" role="tabpanel" aria-labelledby="tab-events" hidden>
+  <section>
+    <div class="section-head"><h2>Live rewards</h2><small id="scanScope"></small></div>
+    <div class="toolbar">
+      <button id="auto" disabled>Scan &amp; farm once</button>
+      <button id="scan" disabled>Scan live events</button>
+    </div>
     <div id="events" class="events"><small>Scan selected workers to find eligible rewards.</small></div>
   </section>
   <section>
-    <h2>Runs</h2>
+    <div class="section-head"><h2>Upcoming events</h2><small>Published by TikTok</small></div>
+    <div id="upcoming" class="events"></div>
+  </section>
+  </div>
+  <div id="runsPanel" role="tabpanel" aria-labelledby="tab-runs" hidden>
+  <section>
+    <div class="section-head"><h2>Runs and progress</h2><small>Latest 80 runs</small></div>
     <table><thead><tr><th>Account</th><th>Campaign</th><th>Task</th><th>State</th><th>Progress</th><th></th></tr></thead>
     <tbody id="runs"></tbody></table>
   </section>
+  </div>
+  <div id="codesPanel" role="tabpanel" aria-labelledby="tab-codes" hidden>
   <section>
-    <h2>Code inventory</h2>
+    <div class="section-head"><h2>Code inventory</h2><small>Latest 200 stored codes</small></div>
     <table><thead><tr><th>Account</th><th>Campaign</th><th>Task</th><th>Stored</th><th>Code</th></tr></thead>
     <tbody id="codes"></tbody></table>
   </section>
+  </div>
+  <dialog id="loginDialog">
+    <h2>Saved login</h2>
+    <dl><dt>Username</dt><dd id="loginUsername"></dd><dt>Password</dt><dd id="loginPassword"></dd></dl>
+    <form method="dialog"><button>Close</button></form>
+  </dialog>
 </main>
 <script>
 const form = document.querySelector("#start");
@@ -107,6 +167,32 @@ let accountSignature;
 let eventSignature;
 let runSignature;
 let codeSignature;
+let summarySignature;
+let upcomingSignature;
+
+const tabs = [...document.querySelectorAll('[role="tab"]')];
+function openTab(id) {
+  const active = tabs.find((tab) => tab.id === "tab-" + id) || tabs[0];
+  for (const tab of tabs) {
+    const selectedTab = tab === active;
+    tab.setAttribute("aria-selected", String(selectedTab));
+    tab.tabIndex = selectedTab ? 0 : -1;
+    document.getElementById(tab.getAttribute("aria-controls")).hidden = !selectedTab;
+  }
+}
+for (const [index, tab] of tabs.entries()) {
+  tab.onclick = () => { location.hash = tab.id.slice(4); };
+  tab.onkeydown = (event) => {
+    const next = { ArrowLeft: index - 1, ArrowRight: index + 1, Home: 0, End: tabs.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    const target = tabs[(next + tabs.length) % tabs.length];
+    target.click();
+    target.focus();
+  };
+}
+window.addEventListener("hashchange", () => openTab(location.hash.slice(1)));
+openTab(location.hash.slice(1));
 
 async function api(path, body) {
   const result = await fetch(root + path, body === undefined ? { headers: { Accept: "application/json" } } : {
@@ -142,6 +228,7 @@ const pendingActions = new Set();
 
 function updateControls() {
   const workers = selected();
+  document.querySelector("#scanScope").textContent = selectedOnline().length + " workers selected in Accounts";
   const canScan = workers.some((worker) => worker.online && worker.canScan && !worker.scanning);
   const available = {
     auto: canScan,
@@ -245,6 +332,127 @@ function renderEvents(accounts) {
   }
 }
 
+function addText(parent, tag, value) {
+  const node = document.createElement(tag);
+  node.textContent = value;
+  parent.append(node);
+  return node;
+}
+
+const dialog = document.querySelector("#loginDialog");
+dialog.addEventListener("close", () => {
+  document.querySelector("#loginUsername").textContent = "";
+  document.querySelector("#loginPassword").textContent = "";
+});
+
+function renderWorkerSummary(accounts, runs) {
+  const active = new Map(runs.filter((run) => run.active).map((run) => [run.account, run]));
+  const latest = new Map();
+  for (const run of runs) if (!latest.has(run.account)) latest.set(run.account, run);
+  const rows = [...accounts].sort((a, b) => a.account.localeCompare(b.account));
+  const signature = JSON.stringify(rows.map(({ account, online, apiRoute, automation, scanning, catalog, credentialsSavedAt }) =>
+    [account, online, apiRoute, automation, scanning, catalog?.updatedAt, credentialsSavedAt, active.get(account), latest.get(account)]));
+  if (signature === summarySignature) return;
+  summarySignature = signature;
+  const overview = document.querySelector("#workerSummary");
+  const details = document.querySelector("#accountDetails");
+  overview.replaceChildren();
+  details.replaceChildren();
+  if (!rows.length) addText(overview, "p", "No worker has checked in yet.");
+  for (const worker of rows) {
+    const run = active.get(worker.account);
+    const lastRun = latest.get(worker.account);
+    const lastScan = worker.catalog?.updatedAt || worker.automation?.lastScanAt;
+    const state = !worker.online ? "Offline" : worker.scanning ? "Scanning" :
+      run ? (run.phase === "watching" ? "Watching" : run.phase === "claiming" ? "Claiming" : "Starting") :
+      worker.catalog?.error === "session-required" || worker.automation?.lastResult === "Sign-in check needed" ||
+        lastRun?.phase === "session-required" && !lastScan ? "Sign-in check needed" :
+      worker.catalog?.error || worker.automation?.lastResult === "Scan failed" ? "Scan failed" :
+          lastScan ? "Ready" : "Online · waiting for check";
+    const card = document.createElement("article");
+    card.className = "event";
+    addText(card, "h3", worker.account + " · " + state);
+    if (run) {
+      addText(card, "p", run.eventName || run.campaign);
+      if (run.duration) {
+        const progress = document.createElement("progress");
+        progress.max = run.duration;
+        progress.value = Math.min(run.duration, run.seconds);
+        progress.setAttribute("aria-label", "Watch progress");
+        card.append(progress);
+        addText(card, "small", progress.value + " / " + run.duration + " seconds");
+      }
+    } else {
+      addText(card, "p", worker.automation?.lastResult || (worker.automation ? "Auto farm enabled" : "Auto farm paused"));
+    }
+    addText(card, "small", worker.apiRoute === "phone" ? "API route · SOOP phone" :
+      worker.apiRoute === "mac" ? "API route · Mac" : "API route · waiting for check");
+    if (worker.automation?.nextScanAt) addText(card, "small", "Next scan after " + new Date(worker.automation.nextScanAt).toLocaleString());
+    overview.append(card);
+    const accountCard = card.cloneNode(true);
+    accountCard.classList.add("account-details");
+    addText(accountCard, "small", lastScan ? "Last event check " + new Date(lastScan).toLocaleString() : "No event check recorded");
+    addText(accountCard, "small", worker.credentialsSavedAt ? "Login saved and encrypted" : "No saved login");
+    const button = addText(accountCard, "button", worker.credentialsSavedAt ? "Reveal saved login" : "Add login");
+    button.onclick = async () => {
+      if (!worker.credentialsSavedAt) {
+        const form = document.querySelector("#credentialsForm");
+        form.elements.account.value = worker.account;
+        form.elements.username.focus();
+        return;
+      }
+      try {
+        const login = await api("/accounts/" + worker.account + "/credentials");
+        document.querySelector("#loginUsername").textContent = login.username;
+        document.querySelector("#loginPassword").textContent = login.password;
+        if (!dialog.open) dialog.showModal();
+      } catch (error) { report(error.message, true); }
+    };
+    details.append(accountCard);
+  }
+}
+
+function renderUpcoming(accounts) {
+  const grouped = new Map();
+  for (const { upcoming } of accounts) {
+    for (const event of upcoming || []) {
+      const previous = grouped.get(event.campaign);
+      if (!previous || !previous.startsAt && event.startsAt) grouped.set(event.campaign, event);
+    }
+  }
+  const items = [...grouped.values()].sort((a, b) =>
+    (a.startsAt ?? Infinity) - (b.startsAt ?? Infinity) || a.name.localeCompare(b.name));
+  const signature = JSON.stringify(items);
+  if (signature === upcomingSignature) return;
+  upcomingSignature = signature;
+  const box = document.querySelector("#upcoming");
+  box.replaceChildren();
+  if (!items.length) addText(box, "p", "No upcoming events in the latest scans.");
+  for (const event of items) {
+    const card = document.createElement("article");
+    card.className = "event";
+    addText(card, "h3", event.name);
+    addText(card, "small", event.startsAt ? "Starts " + new Date(event.startsAt).toLocaleString() : "Start time pending");
+    if (event.endsAt) addText(card, "small", "Ends " + new Date(event.endsAt).toLocaleString());
+    box.append(card);
+  }
+}
+
+document.querySelector("#credentialsForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const login = event.currentTarget;
+  const { account, username, password } = Object.fromEntries(new FormData(login));
+  const button = login.querySelector("button");
+  button.disabled = true;
+  try {
+    await api("/accounts/" + encodeURIComponent(account) + "/credentials", { credential: { username, password } });
+    login.reset();
+    report("Encrypted login saved for " + account);
+    await refresh();
+  } catch (error) { report(error.message, true); }
+  finally { button.disabled = false; }
+});
+
 for (const [id, auto] of [["auto", true], ["scan", false]]) {
   const button = document.querySelector("#" + id);
   button.onclick = () => {
@@ -334,11 +542,14 @@ async function refresh() {
     document.querySelector("#automationHelp").textContent = "Scans enabled workers every " + data.autoScanMinutes +
       " minutes while idle, even when this page is closed. Pause stops future scans.";
     document.querySelector("#activeCount").textContent = data.runs.filter((run) => run.active).length;
-    document.querySelector("#storedCount").textContent = data.codes.length;
+    document.querySelector("#storedCount").textContent = data.codeCount ?? data.codes.length;
     renderAccounts(data.accounts);
     renderEvents(data.accounts);
+    renderUpcoming(data.accounts);
+    renderWorkerSummary(data.accounts, data.runs);
     renderRuns(data.runs);
     renderCodes(data.codes);
+    document.querySelector("#lastRefresh").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (error) { report(error.message, true); }
   finally { refreshing = false; }
 }

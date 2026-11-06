@@ -117,7 +117,18 @@ def main():
         parser.error("Worker state directory must be private")
     control = Control(args.server, token)
     private_trace = runpy.run_path(str(args.trace))
-    driver = runpy.run_path(str(Path(__file__).with_name("driver.py")))["Driver"](private_trace)
+    phone_factory = None
+    phone_config = Path(__file__).with_name("phone-command.json")
+    if phone_config.is_file() and not phone_config.stat().st_mode & 0o077:
+        try:
+            command = json.loads(phone_config.read_text())
+            if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
+                raise ValueError("Invalid phone command")
+            phone_client = runpy.run_path(str(Path(__file__).with_name("phone-client.py")))["PhoneClient"]
+            phone_factory = lambda: phone_client(command)
+        except (OSError, ValueError):
+            print("Phone transport unavailable at startup", file=sys.stderr, flush=True)
+    driver = runpy.run_path(str(Path(__file__).with_name("driver.py")))["Driver"](private_trace, phone_factory)
     lock = args.state / "worker.lock"
     pending = args.state / "pending-result.json"
     with lock.open("a") as held:
@@ -130,17 +141,19 @@ def main():
                 if not driver.available(args.device):
                     time.sleep(6)
                     continue
-                reply = control.post("poll", {"account": args.account, "scanCapable": True})
+                reply = control.post("poll", {"account": args.account, "scanCapable": True, "apiRoute": driver.api_route})
                 job = reply.get("job")
                 if job:
                     process(control, job, driver.run, args.device, pending)
                 elif scan := reply.get("scan"):
                     result = {"account": args.account, "id": scan["id"], "events": []}
                     try:
-                        result["events"] = driver.catalog(args.device, scan["room"])
+                        result.update(driver.catalog(args.device, scan["room"]))
                     except Exception as error:
-                        result["error"] = "scan-failed"
+                        result["error"] = ("session-required" if getattr(error, "phase", "") == "session-required"
+                                           else "scan-failed")
                         print(f"Catalog scan failed ({type(error).__name__})", file=sys.stderr, flush=True)
+                    result["apiRoute"] = driver.api_route
                     control.post("catalog", result)
             except (OSError, ValueError, LeaseLost) as error:
                 print(f"Control update unavailable ({type(error).__name__})", file=sys.stderr, flush=True)

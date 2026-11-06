@@ -45,12 +45,32 @@ def frida_deadline(seconds=12):
 
 
 class Driver:
-    def __init__(self, trace):
+    def __init__(self, trace, phone_client=None):
         self.trace = trace
+        self.phone_client = phone_client
+        self.api_route = None
         trace["HOSTS"].add(REGIONAL_HOST)
         trace["mac_request"].__globals__["REWARD"] = re.compile(
             r"^/webcast/partnership/reward/drops_(detail|poll|list/v2|page_feed)/$"
         )
+
+    @contextmanager
+    def http_session(self):
+        if self.phone_client:
+            try:
+                phone = self.phone_client().open()
+            except (OSError, ValueError):
+                phone = None
+            if phone:
+                self.api_route = "phone"
+                try:
+                    yield phone
+                finally:
+                    phone.close()
+                return
+        self.api_route = "mac"
+        with requests.Session(trust_env=False, default_headers=False, curl_options={CurlOpt.PATH_AS_IS: 1}) as client:
+            yield client
 
     def available(self, serial):
         try:
@@ -275,7 +295,7 @@ class Driver:
             read, entry = self.capture(serial, {"room": room, "discovery": True}, lambda *_: None)
         finally:
             self.stop_app(serial)
-        return self.catalog_from_entry(read or entry)
+        return self.catalog_from_entry(read or entry, include_upcoming=True)
 
     @staticmethod
     def get_from_entry(entry, route, **params):
@@ -291,8 +311,8 @@ class Driver:
         path = urlunsplit(original._replace(path=route, query="&".join(query)))
         return host, [*headers, (":path", path)], b""
 
-    def catalog_from_entry(self, entry):
-        with requests.Session(trust_env=False, default_headers=False, curl_options={CurlOpt.PATH_AS_IS: 1}) as client:
+    def catalog_from_entry(self, entry, *, include_upcoming=False):
+        with self.http_session() as client:
             def fetch(route, **params):
                 result = self.mac(client, self.get_from_entry(entry, route, **params),
                                   include_payload=True, json_format=True)
@@ -304,23 +324,23 @@ class Driver:
             data = fetch(prefix + "drops_list/v2/")
             campaigns = {}
 
-            def collect(value):
+            def collect(value, target):
                 if isinstance(value, dict):
                     name = value.get("drops_name") or value.get("name") or value.get("title")
                     cid = str(value.get("drops_id") or value.get("id") or "")
                     if (isinstance(name, str) and re.fullmatch(r"[0-9]{16,22}", cid)
                             and any(k in value for k in ("drops_id", "game_name", "tasks", "gifts", "end_time"))):
-                        campaigns[cid] = name[:100]
+                        target[cid] = (name.strip()[:100], value)
                     for item in value.values():
-                        collect(item)
+                        collect(item, target)
                 elif isinstance(value, list):
                     for item in value:
-                        collect(item)
+                        collect(item, target)
 
-            collect(data.get("ongoing_drops_list") or [])
-            collect(data.get("current_drops") or [])
+            collect(data.get("ongoing_drops_list") or [], campaigns)
+            collect(data.get("current_drops") or [], campaigns)
             events = []
-            for cid, name in list(campaigns.items())[:12]:
+            for cid, (name, _) in list(campaigns.items())[:12]:
                 rooms = fetch(prefix + "drops_page_feed/", drops_id=cid, is_refresh="true").get("room_list") or []
                 for room in rooms[:2]:
                     rid, aid = str(room.get("room_id", "")), str(room.get("anchor_id", ""))
@@ -343,11 +363,28 @@ class Driver:
                     if candidates:
                         events.extend(candidates)
                         break
-            return sorted(events, key=lambda event: (event["remaining"], event["duration"], event["campaign"]))[:30]
+            events = sorted(events, key=lambda event: (event["remaining"], event["duration"], event["campaign"]))[:30]
+            if not include_upcoming:
+                return events
+            upcoming = {}
+            collect(data.get("upcoming_drops_list") or [], upcoming)
+
+            def timestamp(value):
+                if isinstance(value, str) and value.isdecimal() and len(value) <= 13:
+                    value = int(value)
+                if not isinstance(value, int):
+                    return None
+                millis = value * 1000 if value < 10_000_000_000 else value
+                return millis if 946684800000 <= millis < 4102444800000 else None
+
+            return {"events": events, "upcoming": [
+                {"campaign": cid, "name": name, "startsAt": timestamp(row.get("start_time")),
+                 "endsAt": timestamp(row.get("end_time"))}
+                for cid, (name, row) in list(upcoming.items())[:30] if name
+            ]}
 
     def complete(self, read, entry, job, update, preserve, *, native_playback=False):
-        with requests.Session(trust_env=False, default_headers=False,
-                              curl_options={CurlOpt.PATH_AS_IS: 1}) as client:
+        with self.http_session() as client:
             task = self.read_task(client, read, job)
             job = {**job, "task": str(task["id"])}
             if task.get("user_status") not in (1, 3):

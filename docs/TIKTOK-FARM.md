@@ -30,6 +30,12 @@ Open `/admin/tiktok-farm`, select the account workers, and click **Enable auto f
 
 Manual start is still available if you have a campaign and room ID. Leave the task at `auto` if exactly one eligible countdown is available, or specify its task ID. Both paths select countdown rewards that require no game account link. A live session challenge may require operator action in Android. The pending result file in the private state directory is kept until the server acknowledges the code. The dashboard shows a job in review if its worker disappears during the run. Check TikTok's reward history before manually resolving it.
 
+The Accounts tab can save an encrypted login against an existing or future worker slot. Only a superadmin with 2FA can save or reveal a login. Sign in to TikTok on the assigned Android worker to activate that slot. The Events tab shows eligible live rewards and dates supplied by TikTok for upcoming events.
+
+## SOOP phone API transport
+
+Run `phone-bridge.py` on the phone with Termux Python and curl over a private SSH stream. On the Mac, put a mode-0600 `phone-command.json` beside `mac-worker.py` and `phone-client.py`. It contains the command and arguments for opening that stream. Each worker opens a separate connection for its own catalog or job. The dashboard reports the API route. The Mac Android player still provides playback for scheduled rewards. If the phone connection cannot be opened, the worker starts the operation with its Mac transport. A failed claim is never resent on a different route.
+
 ## Linux canary
 
 `cloud-worker.py` tests one prequeued job from a private Linux checkout with the trace module staged as `trace.py` and the worker's Python dependencies installed. Pause the Mac poller for that account first. Capture a fresh Android room entry, then stop the app. Send the leased job's target identifiers, worker key, and captures to Linux over SSH stdin. The worker reads eligibility, acquires the queued job, and uses the same lease and encrypted inventory as the Mac workers. The handoff stays in memory. The only file the canary may write is a private pending code result; preserve it if the control server has not acknowledged it. This tests the Linux request path after Android bootstrap; it is not a cloud login or a permanent service.

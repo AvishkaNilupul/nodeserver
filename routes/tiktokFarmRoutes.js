@@ -12,6 +12,7 @@ const OBJECT_ID = /^[a-f0-9]{24}$/;
 const LEASE_MS = 60_000;
 const ONLINE_MS = 45_000;
 const CATALOG_MS = 5 * 60_000;
+const UPCOMING_MS = 30 * 60_000;
 const SCAN_MS = 3 * 60_000;
 const AUTO_SCAN_MS = 10 * 60_000;
 const AUTO_RETRY_MS = 30 * 60_000;
@@ -24,7 +25,9 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
   const router = express.Router();
   const seen = new Map();
   const capabilities = new Set();
+  const apiRoutes = new Map();
   const catalogs = new Map();
+  const upcomingFeeds = new Map();
   const scans = new Map();
   const online = (account) => seen.has(account) && now() - seen.get(account) < ONLINE_MS;
   const fresh = (account) => {
@@ -39,6 +42,10 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     typeof event.name === "string" && event.name.trim().length > 0 && event.name.length <= 100 &&
     Number.isInteger(event.duration) && event.duration >= 1 && event.duration <= 1800 &&
     Number.isInteger(event.remaining) && event.remaining >= 0 && event.remaining <= event.duration;
+  const validUpcoming = (event) => event && typeof event.campaign === "string" && ID.test(event.campaign) &&
+    typeof event.name === "string" && event.name.trim().length > 0 && event.name.length <= 100 &&
+    [event.startsAt, event.endsAt].every((value) => value == null ||
+      (Number.isSafeInteger(value) && value >= 946684800000 && value < 4102444800000));
   const jsonOnly = (req, res, next) => {
     if (req.method === "POST" && !req.is("application/json")) {
       return res.status(415).json({ error: "JSON required" });
@@ -73,23 +80,53 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
   });
   router.get("/api/tiktok-farm/state", ...admin, wrap(async (_req, res) => {
     await sweep();
-    const [runs, codes, schedules] = await Promise.all([
+    const [runs, codes, schedules, codeCount] = await Promise.all([
       Model.find({}).sort({ createdAt: -1 }).limit(80).lean(),
       Model.find({ state: "completed", code: { $exists: true } })
         .select("account campaign task eventName updatedAt").sort({ updatedAt: -1 }).limit(200).lean(),
-      Automation.find({ enabled: true }).select("account enabled nextScanAt lastScanAt lastResult -_id").lean(),
+      Automation.find({ $or: [{ enabled: true }, { credentialsSavedAt: { $exists: true } }] })
+        .select("account enabled nextScanAt lastScanAt lastResult lastApiRoute credentialsSavedAt -_id").lean(),
+      Model.countDocuments({ state: "completed", code: { $exists: true } }),
     ]);
     const scheduled = new Map(schedules.map((schedule) => [schedule.account, schedule]));
     const accounts = [];
     for (const account of new Set([...seen.keys(), ...scheduled.keys()])) {
       const scan = scans.get(account);
-      const automation = scheduled.get(account);
-      if (online(account) || scan?.expiresAt > now() || automation) {
+      const record = scheduled.get(account);
+      if (online(account) || scan?.expiresAt > now() || record) {
+        const { credentialsSavedAt, ...schedule } = record || {};
+        const feed = upcomingFeeds.get(account);
         accounts.push({ account, lastSeen: seen.get(account), online: online(account), canScan: capabilities.has(account),
-          scanning: Boolean(scan && scan.expiresAt > now()), catalog: fresh(account), automation });
+          scanning: Boolean(scan && scan.expiresAt > now()), catalog: fresh(account),
+          upcoming: feed && now() - feed.updatedAt < UPCOMING_MS ? feed.events : [],
+          apiRoute: apiRoutes.get(account) || schedule.lastApiRoute, credentialsSavedAt,
+          automation: schedule.enabled ? schedule : undefined });
       }
     }
-    res.json({ accounts, runs, codes, autoScanMinutes: AUTO_SCAN_MS / 60_000 });
+    res.json({ accounts, runs, codes, codeCount, autoScanMinutes: AUTO_SCAN_MS / 60_000 });
+  }));
+  router.post("/api/tiktok-farm/accounts/:account/credentials", ...admin, wrap(async (req, res) => {
+    const { account } = req.params;
+    const { username, password } = req.body?.credential || {};
+    if (!SLOT.test(account) || typeof username !== "string" || !username.trim() || username.length > 254 ||
+        typeof password !== "string" || !password.length || password.length > 512 ||
+        /[\u0000-\u001f\u007f]/.test(username + password)) {
+      return res.status(400).json({ error: "Enter a valid account slot, username, and password" });
+    }
+    await Automation.init();
+    const credentials = encrypt(JSON.stringify({ username: username.trim(), password }));
+    await Automation.updateOne({ account }, {
+      $set: { credentials, credentialsSavedAt: new Date(now()) },
+    }, { upsert: true });
+    res.json({ ok: true });
+  }));
+  router.get("/api/tiktok-farm/accounts/:account/credentials", ...admin, wrap(async (req, res) => {
+    if (!SLOT.test(req.params.account)) return res.status(400).json({ error: "Invalid account slot" });
+    const record = await Automation.findOne({ account: req.params.account }).select("+credentials").lean();
+    if (!record?.credentials) return res.status(404).json({ error: "No saved login for this slot" });
+    const credential = decrypt(record.credentials);
+    if (!credential) return res.status(503).json({ error: "Saved login could not be opened" });
+    res.json(JSON.parse(credential));
   }));
   async function enqueue(account, event, batch, automatic = false) {
     const { campaign, room, task, name, duration, anchor } = event;
@@ -250,7 +287,7 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     res.json({ code: decrypt(row.code) });
   }));
   router.post("/api/tiktok-farm/worker/poll", authenticate, jsonOnly, wrap(async (req, res) => {
-    const { account, scanCapable, jobId } = req.body || {};
+    const { account, scanCapable, jobId, apiRoute } = req.body || {};
     if (typeof account !== "string" || !SLOT.test(account) ||
         (jobId !== undefined && (typeof jobId !== "string" || !OBJECT_ID.test(jobId)))) {
       return res.status(400).json({ error: "Invalid account slot or run ID" });
@@ -259,12 +296,15 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       if (now() - lastSeen >= ONLINE_MS && !(scans.get(slot)?.expiresAt > now())) {
         seen.delete(slot);
         capabilities.delete(slot);
+        apiRoutes.delete(slot);
         catalogs.delete(slot);
+        upcomingFeeds.delete(slot);
         scans.delete(slot);
       }
     }
     if (seen.size >= 50 && !seen.has(account)) return res.status(429).json({ error: "Worker slot limit reached" });
     seen.set(account, now());
+    if (["phone", "mac"].includes(apiRoute)) apiRoutes.set(account, apiRoute);
     if (scanCapable === true) capabilities.add(account);
     else capabilities.delete(account);
     const lease = randomUUID();
@@ -285,27 +325,37 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       anchor: run.anchor, automatic: run.automatic === true, lease } : null });
   }));
   router.post("/api/tiktok-farm/worker/catalog", authenticate, jsonOnly, wrap(async (req, res) => {
-    const { account, id, events, error } = req.body || {};
+    const { account, id, events, upcoming = [], error, apiRoute } = req.body || {};
     const scan = scans.get(account);
     if (!scan?.sent || scan.id !== id || scan.expiresAt <= now()) {
       return res.status(409).json({ error: "Scan unavailable" });
     }
     if (!Array.isArray(events) || events.length > 30 || !events.every(validEvent) ||
-        (error !== undefined && (error !== "scan-failed" || events.length))) {
+        !Array.isArray(upcoming) || upcoming.length > 30 || !upcoming.every(validUpcoming) ||
+        (error !== undefined && (!["scan-failed", "session-required"].includes(error) || events.length || upcoming.length))) {
       return res.status(400).json({ error: "Invalid catalog" });
     }
     scans.delete(account);
     seen.set(account, now());
+    if (["phone", "mac"].includes(apiRoute)) apiRoutes.set(account, apiRoute);
     const candidates = events.map(({ campaign, room, anchor, task, name, duration, remaining }) =>
       ({ campaign, room, anchor, task, name, duration, remaining }));
     const catalog = { events: candidates, updatedAt: now(), error };
+    if (!error) {
+      upcomingFeeds.set(account, { updatedAt: now(), events: upcoming.map(({ campaign, name, startsAt, endsAt }) =>
+        ({ campaign, name, startsAt, endsAt })) });
+    }
     catalogs.set(account, catalog);
     if (scan.scheduleToken) {
       const current = { account, enabled: true, scanToken: scan.scheduleToken };
       if (!error && await Automation.exists(current)) catalog.result = await pick(account, candidates, scan.batch, true);
-      const lastResult = error ? "Scan failed" :
+      const lastResult = error === "session-required" ? "Sign-in check needed" : error ? "Scan failed" :
         catalog.result?.queued ? "Queued " + catalog.result.event : catalog.result?.reason || "Scan finished";
-      await Automation.updateOne(current, { $set: { lastScanAt: new Date(now()), lastResult }, $unset: { scanToken: 1 } });
+      await Automation.updateOne(current, {
+        $set: { lastScanAt: new Date(now()), lastResult,
+          ...(!error && ["phone", "mac"].includes(apiRoute) && { lastApiRoute: apiRoute }) },
+        $unset: { scanToken: 1 },
+      });
     } else if (scan.auto && !error) {
       catalog.result = await pick(account, candidates, scan.batch);
     }

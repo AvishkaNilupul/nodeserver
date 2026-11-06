@@ -7,6 +7,9 @@ const schema = new mongoose.Schema({
   scanToken: String,
   lastScanAt: Date,
   lastResult: String,
+  lastApiRoute: String,
+  credentials: { type: String, select: false },
+  credentialsSavedAt: Date,
 });
 
 module.exports = mongoose.models.TikTokFarmSchedule || mongoose.model("TikTokFarmSchedule", schema);
