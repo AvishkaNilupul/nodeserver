@@ -22,6 +22,7 @@ POLL = "/webcast/partnership/reward/drops_poll/"
 ENTER = "/webcast/room/enter/"
 CLAIM = "/webcast/partnership/reward/drops_claim/"
 REGIONAL_HOST = "webcast22-normal-c-alisg.tiktokv.com"
+EU_REWARD_HOSTS = ("webcast16-normal-no1a.tiktokv.eu", "webcast19-normal-no1a.tiktokv.eu")
 ADB = Path.home() / "Library/Android/sdk/platform-tools/adb"
 
 
@@ -49,7 +50,10 @@ class Driver:
         self.trace = trace
         self.phone_client = phone_client
         self.api_route = None
-        trace["HOSTS"].add(REGIONAL_HOST)
+        trace["HOSTS"].update((REGIONAL_HOST, *EU_REWARD_HOSTS))
+        trace["SOURCE"] = trace["SOURCE"].replace(
+            r"tiktokv\.us)$", r"tiktokv\.us|tiktokv\.eu)$",
+        )
         trace["mac_request"].__globals__["REWARD"] = re.compile(
             r"^/webcast/partnership/reward/drops_(detail|poll|list/v2|page_feed)/$"
         )
@@ -285,10 +289,13 @@ class Driver:
 
     @staticmethod
     def stop_app(serial):
-        subprocess.run([ADB, "-s", serial, "shell", "am", "force-stop", APP], timeout=12, check=True)
-        pid = subprocess.run([ADB, "-s", serial, "shell", "pidof", APP], timeout=12, capture_output=True)
-        if pid.stdout.strip():
-            raise FarmError("worker-error")
+        for _ in range(3):
+            subprocess.run([ADB, "-s", serial, "shell", "am", "force-stop", APP], timeout=12, check=True)
+            time.sleep(0.3)
+            pid = subprocess.run([ADB, "-s", serial, "shell", "pidof", APP], timeout=12, capture_output=True)
+            if not pid.stdout.strip():
+                return
+        raise FarmError("worker-error")
 
     def catalog(self, serial, room):
         try:

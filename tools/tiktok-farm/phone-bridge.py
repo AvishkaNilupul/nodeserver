@@ -16,6 +16,7 @@ ROUTES = {
     "/webcast/partnership/reward/drops_claim/": "POST",
     "/webcast/room/enter/": "POST",
 }
+EU_REWARD_HOSTS = {"webcast16-normal-no1a.tiktokv.eu", "webcast19-normal-no1a.tiktokv.eu"}
 
 
 def quote(value):
@@ -26,7 +27,9 @@ def quote(value):
 
 def request(req):
     parts = urlsplit(req["url"])
-    if (parts.scheme != "https" or not (parts.hostname or "").endswith((".tiktokv.com", ".tiktokv.us", ".tiktok.com"))
+    host = parts.hostname or ""
+    trusted = host.endswith((".tiktokv.com", ".tiktokv.us", ".tiktok.com")) or host in EU_REWARD_HOSTS
+    if (parts.scheme != "https" or not trusted
             or parts.username or parts.password or parts.port not in (None, 443)
             or ROUTES.get(parts.path) != req["method"]):
         raise ValueError("Unsupported target")
