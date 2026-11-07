@@ -88,6 +88,7 @@ class Driver:
         self.trace = trace
         self.phone_client = phone_client
         self.api_route = None
+        self.api_origins = {}
         self.catalog_context = None
         trace["HOSTS"].update((REGIONAL_HOST, *EU_REWARD_HOSTS))
         trace["SOURCE"] = trace["SOURCE"].replace(
@@ -282,11 +283,24 @@ class Driver:
 
     def mac(self, client, capture, **options):
         host, headers, body = capture
-        if host in {"aggr16-normal.tiktokv.us", "aggr19-normal.tiktokv.us"}:
-            host = "tnc16-normal-useast8.tiktokv.us"
+        fields = dict(headers)
+        coalesced = host in {"aggr16-normal.tiktokv.us", "aggr19-normal.tiktokv.us"}
+        regional = "tnc16-normal-useast8.tiktokv.us" if coalesced else host
+        origin_key = (self.api_route, host, fields.get(":authority"))
+        selected = self.api_origins.get(origin_key, regional)
         if options.get("json_format") and not any(key == "response-format" for key, _ in headers):
             headers = [*headers, ("response-format", "json")]
-        return self.trace["mac_request"](client, (host, headers, body), **options)
+        result = self.trace["mac_request"](client, (selected, headers, body), **options)
+        if coalesced and fields.get(":method") == "GET":
+            if result.get("business") != 0:
+                alternate = host if selected == regional else regional
+                retry = self.trace["mac_request"](client, (alternate, headers, body), **options)
+                if retry.get("business") == 0:
+                    self.api_origins[origin_key] = alternate
+                    return retry
+            else:
+                self.api_origins[origin_key] = selected
+        return result
 
     def read_task(self, client, read, job):
         result = self.mac(client, read, include_payload=True, json_format=True)

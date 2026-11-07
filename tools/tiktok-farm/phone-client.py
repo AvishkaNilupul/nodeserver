@@ -35,14 +35,22 @@ class PhoneClient:
         return self
 
     def close(self):
-        if self.process:
-            self.process.stdin.close()
+        process, self.process = self.process, None
+        if process is None:
+            return
+        try:
             try:
-                self.process.wait(timeout=2)
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+            try:
+                process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=3)
-            self.process.stdout.close()
+                process.kill()
+                process.wait(timeout=3)
+        finally:
+            process.stdout.close()
+            self.buffer.clear()
 
     def read(self, timeout):
         deadline = time.monotonic() + timeout
