@@ -19,8 +19,12 @@ const {
 // Distinct from the Gameflip tag so a Shop buyer, a Gameflip listing and a
 // GGSel listing can never be handed the same account's drops for one game.
 const GG_CLAIM_TAG = "ggsel";
+const { CLAIMED_CODE_STEPS, UNCLAIMED_CODE_STEPS } = require("./farmHandover");
 
-function ggselDeliveryCode(login, password) {
+// `opts.unclaimed`: the account's drops are finished but NOT claimed (an
+// auto-farm account sold for its unclaimed stock) — the buyer connects first,
+// then claims. Without it the text is, byte for byte, what it always was.
+function ggselDeliveryCode(login, password, opts = {}) {
   return (
     "TWITCH DROP ACCOUNT\n\n" +
     "Login: " +
@@ -28,13 +32,7 @@ function ggselDeliveryCode(login, password) {
     "\nPassword: " +
     password +
     "\n\n" +
-    "1. Log in to the received Twitch account, then go to " +
-    "https://www.twitch.tv/drops/inventory and scroll to the bottom of the " +
-    'page, to the "Received" section.\n\n' +
-    '2. Click on the purple "Connect" button, which is located below the ' +
-    "item you want to add to your account.\n\n" +
-    "3. Connect the account by following the instructions shown on the site " +
-    "where the connection is made.\n\n" +
+    (opts && opts.unclaimed ? UNCLAIMED_CODE_STEPS : CLAIMED_CODE_STEPS) +
     "If you have any issue please contact the seller."
   );
 }

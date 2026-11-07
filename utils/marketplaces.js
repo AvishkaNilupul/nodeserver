@@ -4814,7 +4814,8 @@ const ELD_GAME_ID = "235";
 const ELD_CATEGORY = "CustomItem";
 // Eldorado's TalkJS application. Stable; only used to address the chat API.
 const ELD_TALKJS_APP = "49mLECOW";
-// Eldorado rejects anything under $0.50 (appConstants.offerConstants).
+// Legacy default. Rocket League prices down to $0.23 have been verified;
+// eldPrice applies that scoped floor while other games keep this default.
 const ELD_MIN_PRICE = 0.5;
 
 function eldCookieJar(str) {
@@ -5085,10 +5086,17 @@ async function eldoradoUploadImage(imagePath) {
 }
 
 // --- Listing ------------------------------------------------------------
-function eldPrice(usd) {
+function eldPrice(usd, game) {
   const n = Number(usd);
   if (!isFinite(n) || n <= 0) throw new Error("Eldorado: invalid price");
-  return Math.max(ELD_MIN_PRICE, Math.round(n * 100) / 100);
+  // Rocket League creates and price updates were verified at $0.23–$0.49.
+  // Keep the existing floor for every other game; $0.23 is the lowest amount
+  // verified for our Rocket League offers, not a claimed platform-wide floor.
+  const floor =
+    String(game || "").trim().toLowerCase() === "rocket league"
+      ? 0.23
+      : ELD_MIN_PRICE;
+  return Math.max(floor, Math.round(n * 100) / 100);
 }
 
 // Create one Twitch Drops offer. `quantity` is the stock (one unit = one
@@ -5129,7 +5137,7 @@ async function eldoradoPublish({
     attributes: [],
     guaranteedDeliveryTime: deliveryTime,
     pricing: {
-      pricePerUnit: { amount: eldPrice(priceUsd), currency: "USD" },
+      pricePerUnit: { amount: eldPrice(priceUsd, env.value), currency: "USD" },
       quantity: Math.max(1, parseInt(quantity, 10) || 1),
       minQuantity: Math.max(1, parseInt(minQuantity, 10) || 1),
       volumeDiscounts: volumeDiscounts || [],
@@ -5208,7 +5216,7 @@ async function eldoradoUpdateOffer(offerId, patch = {}) {
       pricePerUnit: {
         amount:
           patch.priceUsd != null
-            ? eldPrice(patch.priceUsd)
+            ? eldPrice(patch.priceUsd, env.value)
             : (cur.pricePerUnit && cur.pricePerUnit.amount) || ELD_MIN_PRICE,
         currency: "USD",
       },
@@ -5322,7 +5330,14 @@ async function eldoradoSetQuantity(offerId, quantity) {
 }
 
 async function eldoradoReprice(offerId, priceUsd) {
-  const amount = eldPrice(priceUsd);
+  // Resolve the offer's own category value before accepting a sub-$0.50
+  // update. Titles and caller-supplied game names are not proof of its game.
+  const cur =
+    Number(priceUsd) > 0 && Number(priceUsd) < ELD_MIN_PRICE
+      ? await eldoradoOffer(offerId)
+      : null;
+  const game = ((cur && cur.tradeEnvironmentValues) || [])[0]?.value;
+  const amount = eldPrice(priceUsd, game);
   try {
     await eldRequest(
       "PUT",

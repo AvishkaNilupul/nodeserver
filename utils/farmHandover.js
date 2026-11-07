@@ -37,6 +37,58 @@ function dayText(date) {
   return new Date(date).toISOString().slice(0, 10);
 }
 
+// The step every rent-farm buyer must take before anything can be claimed for
+// them. Since 2026-10-05 Twitch refuses a drop claim from an account that is
+// not linked to the game (twitchdev/issues #1216): the bot still watches, the
+// drops reach 100% and then wait — 7 days after the event ends they are gone.
+// One wording for every market, so the offer text and the hand-over agree.
+//   connectFirstText  — the full paragraph (Eldorado, G2G, Gameflip)
+//   connectFirstShort — one sentence, for PlayerAuctions' 300/500-character caps
+const DROPS_CAMPAIGNS_URL = "https://www.twitch.tv/drops/campaigns";
+
+function connectFirstText(game) {
+  const g = String(game || "").trim() || "your game";
+  return (
+    "STEP 1 — CONNECT YOUR GAME ACCOUNT FIRST (required). Log in to Twitch with " +
+    "the login above, open " + DROPS_CAMPAIGNS_URL + ", find " + g +
+    " and press Connect, then sign in with YOUR OWN game account. (No " + g +
+    " campaign listed right now? Link this Twitch account from the " +
+    "connections page of your game account instead.) Twitch only releases a " +
+    "drop to an account that is connected to the game, so nothing can be " +
+    "claimed for you until this is done. Drops earned before you connect are " +
+    "claimed as soon as you do — Twitch keeps them for 7 days after an event " +
+    "ends."
+  );
+}
+
+// The same step as an OFFER sees it, before the purchase. No link at all, not
+// even "twitch.tv/…": an off-site link is the kind of thing a marketplace's
+// listing review strips, refuses or flags, and no Eldorado or G2G offer of
+// ours carries one. The menu path says the same thing.
+function connectFirstOffer(game, { each = false } = {}) {
+  const g = String(game || "").trim() || "your game";
+  return (
+    "After purchasing, CONNECT " + (each ? "each received Twitch account" : "the received Twitch account") +
+    " to your own game account FIRST — this is required: Twitch only releases " +
+    "a drop to an account that is connected to the game, so nothing can be " +
+    "claimed until you do (on Twitch, open Drops & Rewards > All Campaigns, " +
+    "find " + g + " and press Connect)."
+  );
+}
+
+// The offer's guarantee, with the condition Twitch now imposes on it: the bot
+// can only collect for an account the buyer has connected. It is the sentence
+// a dispute quotes, so it must not promise more than that.
+const GUARANTEE_ONCE_CONNECTED = "once you have connected your game account";
+
+function connectFirstShort(game) {
+  const g = String(game || "").trim();
+  return (
+    "FIRST connect your own game account" + (g ? " (" + g + ")" : "") +
+    " at twitch.tv/drops/campaigns - Twitch claims nothing until it is linked."
+  );
+}
+
 function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -146,4 +198,30 @@ function loginsOf(row) {
   return ((row && row.accounts) || []).map((a) => String((a && a.login) || "")).filter(Boolean);
 }
 
-module.exports = { termWords, untilFrom, dayText, pinUntil, handoverStamp, stampFromHandover, sentButUnconfirmed, loginsOf };
+// The three steps a buyer of an UNCLAIMED bundle follows, for the markets that
+// hand the login over inside a delivery code (GGSel, Gameflip). The claimed
+// steps those codes have always carried send the buyer to the "Received"
+// section, where an unclaimed drop is not: it sits at the top, finished, and
+// Twitch releases it only after the buyer has connected a game account.
+//
+// Deliberately NO LONGER than the claimed steps (tests/vaultCodeText.test.js):
+// Gameflip's limit on a code is undocumented and that text is the longest it
+// is known to accept.
+const CLAIMED_CODE_STEPS =
+  "1. Log in to the received Twitch account, then go to " +
+  "https://www.twitch.tv/drops/inventory and scroll to the bottom of the " +
+  'page, to the "Received" section.\n\n' +
+  '2. Click on the purple "Connect" button, which is located below the ' +
+  "item you want to add to your account.\n\n" +
+  "3. Connect the account by following the instructions shown on the site " +
+  "where the connection is made.\n\n";
+const UNCLAIMED_CODE_STEPS =
+  "1. Log in to the received Twitch account and open " +
+  "https://www.twitch.tv/drops/inventory - your drops are at the top, " +
+  "finished.\n\n" +
+  '2. FIRST press "Connect" on the campaign and sign in with YOUR OWN game ' +
+  "account. Twitch only releases a drop to a connected account.\n\n" +
+  '3. Then press "Claim Now" on each drop. Do it today: unclaimed drops ' +
+  "vanish a week after the event.\n\n";
+
+module.exports = { termWords, untilFrom, dayText, connectFirstText, connectFirstOffer, connectFirstShort, DROPS_CAMPAIGNS_URL, GUARANTEE_ONCE_CONNECTED, pinUntil, handoverStamp, stampFromHandover, sentButUnconfirmed, loginsOf, CLAIMED_CODE_STEPS, UNCLAIMED_CODE_STEPS };
