@@ -21,6 +21,7 @@ const LIMIT = 300;
 const { termWords, dayText, connectFirstShort } = require("./farmHandover");
 // The "click Remind me later" line (utils/twitchLoginTip.js), short form.
 const { TWITCH_CODE_TIP_SHORT: CODE_TIP } = require("./twitchLoginTip");
+const { TWITCH_LINK_TIP } = require("./twitchLinkTip");
 
 // Assemble `head` (never dropped) plus as many `tail` sentences as fit.
 // Returns the longest result within `limit`.
@@ -198,6 +199,15 @@ function farmInstruction(days, game) {
 // resends the same credentials instead of claiming fresh ones.
 // kind: "bundle" (claimed drops), "unclaimed" (drops still to be claimed — a
 // no-claim offer) or "farm" (rent-farm).
+// Send the fallback first in its own short message, keeping existing bodies
+// intact and within the 300-character cap. If this new message fails, no
+// credential has been sent yet; it adds no post-credential partial-send window.
+// Farm hand-overs retain their existing wording.
+function withLinkTip(messages, kind) {
+  if (kind !== "farm") messages.unshift(TWITCH_LINK_TIP);
+  return messages;
+}
+
 function deliveryMessages(accounts, { kind = "bundle", days, game, until = null } = {}) {
   const list = Array.isArray(accounts) ? accounts : [accounts];
   const single =
@@ -206,7 +216,7 @@ function deliveryMessages(accounts, { kind = "bundle", days, game, until = null 
       : kind === "unclaimed"
         ? unclaimedDeliveryMessage(list)
         : bundleDeliveryMessage(list);
-  if (single.length <= LIMIT) return [single];
+  if (single.length <= LIMIT) return withLinkTip([single], kind);
 
   // Pack greedily: a header naming the range, then as many credentials as fit.
   const out = [];
@@ -254,7 +264,7 @@ function deliveryMessages(accounts, { kind = "bundle", days, game, until = null 
           "under each item to link it to your own game account. " + CODE_TIP +
           " Full steps are in this offer's delivery instructions.";
   out.push(note.slice(0, LIMIT));
-  return out;
+  return withLinkTip(out, kind);
 }
 
 module.exports = {

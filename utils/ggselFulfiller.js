@@ -23,7 +23,8 @@ const { CLAIMED_CODE_STEPS, UNCLAIMED_CODE_STEPS } = require("./farmHandover");
 
 // `opts.unclaimed`: the account's drops are finished but NOT claimed (an
 // auto-farm account sold for its unclaimed stock) — the buyer connects first,
-// then claims. Without it the text is, byte for byte, what it always was.
+// then claims. This guide is stored when new stock is uploaded; existing
+// marketplace-held products retain the text they were uploaded with.
 function ggselDeliveryCode(login, password, opts = {}) {
   return (
     "TWITCH DROP ACCOUNT\n\n" +
@@ -33,6 +34,7 @@ function ggselDeliveryCode(login, password, opts = {}) {
     password +
     "\n\n" +
     (opts && opts.unclaimed ? UNCLAIMED_CODE_STEPS : CLAIMED_CODE_STEPS) +
+    require("./twitchLinkTip").TWITCH_LINK_TIP + "\n\n" +
     "If you have any issue please contact the seller."
   );
 }

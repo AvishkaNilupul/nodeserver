@@ -4521,6 +4521,7 @@ function zxConnectGuide() {
     'scroll to the "Received" section at the bottom.\n' +
     '2. Click the purple "Connect" button under the item you want to add.\n' +
     "3. Follow the instructions on the site where the connection is made.\n\n" +
+    require("./twitchLinkTip").TWITCH_LINK_TIP + "\n\n" +
     "Any issue — message the seller here on ZeusX."
   );
 }

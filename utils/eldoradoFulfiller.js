@@ -62,7 +62,8 @@ function eldoradoClaimGuide() {
     "2. Open https://www.twitch.tv/drops/inventory\n" +
     '3. Scroll to the "Received" section at the bottom of the page.\n' +
     '4. Click the purple "Connect" button under each item and follow the steps ' +
-    "to link it to YOUR OWN game account.\n\n" +
+    "to link it to YOUR OWN game account.\n" +
+    require("./twitchLinkTip").TWITCH_LINK_TIP + "\n\n" +
     "KEEP IT LINKED\n" +
     "If this event is still running, more items can still land on this " +
     "account — our farm keeps collecting them automatically. Just leave it " +
@@ -71,9 +72,8 @@ function eldoradoClaimGuide() {
     "Please do not change the account's password or email, and claim your " +
     "items reasonably soon — drops stay claimable only for a limited time " +
     "after an event ends.\n\n" +
-    "Any problem at all, message me here first and I will make it right. And " +
-    "if you are happy with the order, leaving a feedback would genuinely mean " +
-    "a lot — it helps a small seller more than you would think. Thank you!"
+    "Any problem, message me here first. Your feedback " +
+    "helps our small shop. Thank you!"
   );
 }
 
@@ -93,15 +93,15 @@ function eldoradoUnclaimedGuide() {
     "3. Your drops are waiting at the top of the page, all at 100%. First " +
     'press "Connect" there and sign in with YOUR OWN game account — Twitch ' +
     "only lets a connected account claim.\n" +
+    require("./twitchLinkTip").TWITCH_LINK_TIP + "\n" +
     '4. Then press "Claim Now" on each drop.\n\n' +
     "CLAIM TODAY\n" +
     "Twitch removes unclaimed drops about 7 days after their event ends, and " +
     "that clock is already running — so please connect and claim them as soon " +
     "as you receive the account.\n\n" +
     "Please do not change the account's password or email.\n\n" +
-    "Any problem at all, message me here first and I will make it right. And " +
-    "if you are happy with the order, leaving a feedback would genuinely mean " +
-    "a lot — it helps a small seller more than you would think. Thank you!"
+    "Any problem, message me here first. Your feedback " +
+    "helps our small shop. Thank you!"
   );
 }
 

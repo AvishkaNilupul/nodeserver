@@ -48,13 +48,14 @@ test("every hand-over message fits PlayerAuctions' 300-character cap", () => {
   }
 });
 
-test("a single-account hand-over is one message carrying the credential", () => {
+test("a single-account hand-over keeps its credential message and adds the linking tip", () => {
   const msgs = copy.deliveryMessages([{ login: "someLogin", password: "somePass" }], {
     kind: "bundle",
   });
-  assert.strictEqual(msgs.length, 1);
-  assert.match(msgs[0], /someLogin/);
-  assert.match(msgs[0], /somePass/);
+  assert.strictEqual(msgs.length, 2);
+  assert.match(msgs[1], /someLogin/);
+  assert.match(msgs[1], /somePass/);
+  assert.strictEqual(msgs[0], require("../utils/twitchLinkTip").TWITCH_LINK_TIP);
 });
 
 test("an order too large for one message keeps every credential exactly once", () => {
@@ -80,7 +81,7 @@ test("the long claim guide lives in the instruction, not the message", () => {
   // message only points at it. If this inverts, the message stops fitting.
   assert.ok(copy.bundleInstruction().length > copy.LIMIT);
   assert.match(copy.bundleInstruction(), /twitch\.tv\/drops\/inventory/);
-  const msg = copy.deliveryMessages([{ login: "l", password: "p" }], { kind: "bundle" })[0];
+  const msg = copy.deliveryMessages([{ login: "l", password: "p" }], { kind: "bundle" })[1];
   assert.doesNotMatch(msg, /https?:\/\//);
 });
 
@@ -219,14 +220,95 @@ test("a failed confirm-delivery does not re-send the buyer their credentials", a
   try {
     const accounts = [{ login: "l", password: "p" }];
     await fulfiller.handOver({ orderId: "1", accounts, kind: "bundle", offerTitle: "T" });
-    assert.strictEqual(sent.length, 1, "first attempt should send");
+    assert.strictEqual(sent.length, 2, "first attempt sends credentials and linking tip");
     await fulfiller.handOver({
       orderId: "1", accounts, kind: "bundle", offerTitle: "T", alreadyMessaged: true,
     });
-    assert.strictEqual(sent.length, 1, "retry must not send a second time");
+    assert.strictEqual(sent.length, 2, "retry must not send a second time");
   } finally {
     saved.playerauctionsSendOrderMessage = realSend;
     saved.playerauctionsMarkDelivered = realMark;
+  }
+});
+
+test("a failed linking-tip send stops before credentials, delivery stamp or confirmation", async () => {
+  const { TWITCH_LINK_TIP } = require("../utils/twitchLinkTip");
+  const deliveryProof = require("../utils/playerauctionsProof");
+  const original = {
+    send: mp.playerauctionsSendOrderMessage,
+    mark: mp.playerauctionsMarkDelivered,
+    proof: deliveryProof.buildDeliveryProof,
+  };
+  const events = [];
+  mp.playerauctionsSendOrderMessage = async (_id, text) => {
+    events.push(text);
+    throw new Error("linking tip rejected");
+  };
+  mp.playerauctionsMarkDelivered = async () => events.push("confirm");
+  deliveryProof.buildDeliveryProof = async () => events.push("proof");
+  try {
+    for (const kind of ["bundle", "unclaimed"]) {
+      events.length = 0;
+      await assert.rejects(
+        () => fulfiller.handOver({
+          orderId: "tip-failure",
+          accounts: [{ login: "privateLogin", password: "privatePassword" }],
+          kind,
+          offerTitle: "T",
+          onMessaged: async () => events.push("stamp"),
+        }),
+        /linking tip rejected/,
+      );
+      assert.deepStrictEqual(events, [TWITCH_LINK_TIP]);
+    }
+  } finally {
+    mp.playerauctionsSendOrderMessage = original.send;
+    mp.playerauctionsMarkDelivered = original.mark;
+    deliveryProof.buildDeliveryProof = original.proof;
+  }
+});
+
+test("a successful hand-over sends linking tip then credentials before stamping and confirming", async () => {
+  const { TWITCH_LINK_TIP } = require("../utils/twitchLinkTip");
+  const deliveryProof = require("../utils/playerauctionsProof");
+  const original = {
+    send: mp.playerauctionsSendOrderMessage,
+    mark: mp.playerauctionsMarkDelivered,
+    proof: deliveryProof.buildDeliveryProof,
+    cleanup: deliveryProof.cleanupProof,
+  };
+  const events = [];
+  mp.playerauctionsSendOrderMessage = async (_id, text) => events.push(text);
+  mp.playerauctionsMarkDelivered = async (_id, images) => {
+    assert.deepStrictEqual(images, ["test-proof"]);
+    events.push("confirm");
+  };
+  deliveryProof.buildDeliveryProof = async () => {
+    events.push("proof");
+    return "test-proof";
+  };
+  deliveryProof.cleanupProof = async () => events.push("cleanup");
+  try {
+    const accounts = [{ login: "privateLogin", password: "privatePassword" }];
+    for (const kind of ["bundle", "unclaimed"]) {
+      events.length = 0;
+      const count = await fulfiller.handOver({
+        orderId: "tip-success", accounts, kind, offerTitle: "T",
+        onMessaged: async () => events.push("stamp"),
+      });
+      const credentialMessage = kind === "unclaimed"
+        ? copy.unclaimedDeliveryMessage(accounts)
+        : copy.bundleDeliveryMessage(accounts);
+      assert.deepStrictEqual(events, [
+        TWITCH_LINK_TIP, credentialMessage, "stamp", "proof", "confirm", "cleanup",
+      ]);
+      assert.strictEqual(count, 2);
+    }
+  } finally {
+    mp.playerauctionsSendOrderMessage = original.send;
+    mp.playerauctionsMarkDelivered = original.mark;
+    deliveryProof.buildDeliveryProof = original.proof;
+    deliveryProof.cleanupProof = original.cleanup;
   }
 });
 
