@@ -10,6 +10,8 @@
   const choices = new Map(), pending = new Set();
   const now = () => Date.now() + skew;
   const date = (value) => value ? new Date(value).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Not recorded';
+  const expiryDate = (value) => value ? new Date(value).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Unverified';
+  const reviewReason = (message) => /^label \d+ is empty$/.test(message) ? 'Reward name needs review before listing.' : message;
   const relative = (value) => { if (!value) return 'Not yet'; const seconds = Math.max(0, (now() - new Date(value).getTime()) / 1000); return seconds < 60 ? 'Just now' : seconds < 3600 ? Math.floor(seconds / 60) + 'm ago' : seconds < 86400 ? Math.floor(seconds / 3600) + 'h ago' : Math.floor(seconds / 86400) + 'd ago'; };
   const duration = (seconds) => seconds % 60 ? seconds + 's' : seconds / 60 + ' min';
   const badge = (label, tone = 'neutral') => make('span', 'badge ' + tone, label);
@@ -232,7 +234,7 @@
       const ids = make('details'); ids.append(make('summary', '', 'Campaign / task IDs'), make('code', '', code.campaign + ' / ' + code.task)); cells[0].append(ids);
       cells[1].textContent = code.duration ? duration(code.duration) : 'Watch reward'; cells[2].textContent = date(code.updatedAt);
       if (code.rewardLabel) cells[0].append(make('small', '', code.rewardLabel));
-      cells[2].append(make('small', '', code.useBy ? 'Redeem by ' + date(code.useBy) : 'Redemption deadline unverified'));
+      cells[2].append(make('small', '', code.useBy ? 'Code expires ' + expiryDate(code.useBy) : 'Redemption deadline unverified'));
       if (code.shop) cells[0].append(badge(code.shop.state.replaceAll('_', ' '), code.shop.state === 'review' ? 'warning' : 'neutral'));
       const buttons = make('div', 'actions'), reveal = make('button', '', 'Reveal'), copy = make('button', '', 'Copy'); copy.hidden = true; let clear = null, secret;
       reveal.onclick = async () => {
@@ -261,19 +263,21 @@
       if (!sales.products.length) empty(products, 'No products yet', 'Verified stock is grouped by reward and event. Ready bundles appear here automatically.');
       for (const product of sales.products) {
         const card = make('article', 'account-card'); card.append(make('h3', '', product.texts?.title || product.name), badge(product.status));
-        card.append(make('p', '', 'Redeem by ' + date(product.useBy)));
+        card.append(make('p', '', 'Code expires ' + expiryDate(product.useBy)));
         for (const listing of product.listings || []) {
           const row = make('p', '', listing.marketplace + ' · ' + listing.status + (listing.price != null ? ' · $' + listing.price : ''));
           if (typeof listing.url === 'string' && /^https:\/\//.test(listing.url)) { const link = make('a', '', 'View listing'); link.href = listing.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; row.append(' · ', link); }
           card.append(row);
         }
         if (product.publish?.lastError) card.append(make('p', 'footnote', product.publish.lastError));
-        for (const problem of product.problems || []) card.append(make('p', 'footnote', 'Needs review: ' + problem));
+        for (const problem of product.problems || []) card.append(make('p', 'footnote', reviewReason(problem)));
         products.append(card);
       }
       const review = $('#salesReview'); review.replaceChildren();
       const held = sales.inventory.filter((r) => ['review', 'held'].includes(r.shop?.state));
-      if (!held.length) empty(review, 'No review holds', 'Verified, unused codes can enter the automatic listing flow.');
+      const blocked = sales.products.filter((p) => p.problems?.length);
+      if (!held.length && !blocked.length) empty(review, 'No review holds', 'Verified, unused codes can enter the automatic listing flow.');
+      for (const product of blocked) { const item = make('article', 'sales-review-item'); item.append(make('strong', '', product.texts?.title || product.name), make('small', '', product.problems.map(reviewReason).join(' '))); review.append(item); }
       for (const row of held) { const item = make('article', 'sales-review-item'); item.append(make('strong', '', row.account + ' · ' + (row.rewardLabel || row.eventName || row.campaign)), make('small', '', row.shop.reason)); review.append(item); }
     } catch (failure) { error(failure.message); }
     finally { salesLoading = false; }
