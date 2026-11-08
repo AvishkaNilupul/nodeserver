@@ -6,6 +6,7 @@
 // problem. Pure: no database, no network, no logging.
 
 const { NON_ASCII_RE } = require("./slots");
+const { findVoucher } = require("./vouchers");
 
 // Same list as utils/codeShop/config.js DEFAULTS.sourceWords; used when the
 // caller passes no list at all. Keep the two in step.
@@ -107,6 +108,11 @@ function checkBuyerText(texts = {}, { sourceWords } = {}) {
     else if (l.includes("=")) problems.push(`label ${i + 1} has an "=" (it would break the delivered code lines)`);
     else if (l.length > LIMITS.label) problems.push(`label ${i + 1} is ${l.length} characters (max ${LIMITS.label})`);
   });
+  // Store credit is never sold as a game's code (vouchers.js).
+  for (const [name, value] of [["title", title], ...labels.map((l, i) => [`label ${i + 1}`, l])]) {
+    const voucher = findVoucher(value);
+    if (voucher) problems.push(`${name} is store credit, not a game reward: "${voucher}"`);
+  }
   if (bullets.length > LIMITS.coverBullets) {
     problems.push(`cover has ${bullets.length} bullets (max ${LIMITS.coverBullets})`);
   }

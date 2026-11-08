@@ -69,6 +69,11 @@
     epicAccounts:
       '<rect x="2" y="4" width="20" height="16" ' +
       'rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path>',
+    steamAccounts:
+      '<circle cx="12" cy="12" r="10"></circle>' +
+      '<circle cx="15.5" cy="9.5" r="2.5"></circle>' +
+      '<circle cx="8.5" cy="15" r="1.8"></circle>' +
+      '<path d="M10.1 14.1l3.4-2.9"></path>',
     soop:
       '<circle cx="12" cy="12" r="10"></circle>' +
       '<polygon points="10 8 16 12 10 16 10 8"></polygon>',
@@ -226,6 +231,12 @@
           superOnly: true,
         },
         {
+          href: "/funpay-resale.html",
+          label: "FunPay Resale",
+          icon: ICONS.listings,
+          superOnly: true,
+        },
+        {
           href: "/bulk-orders.html",
           label: "Bulk orders",
           icon: ICONS.bulkOrders,
@@ -274,13 +285,49 @@
           icon: ICONS.epicAccounts,
           superOnly: true,
         },
+        {
+          href: "/steam-accounts.html",
+          label: "Steam accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/valorant-accounts.html",
+          label: "Valorant accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/rivals-accounts.html",
+          label: "Rivals accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/outlook/",
+          label: "Outlook inboxes",
+          icon: ICONS.epicAccounts,
+          superOnly: true,
+        },
       ],
     },
     {
       key: "soop",
-      label: "SOOP",
+      label: "Reward farms",
       icon: ICONS.soop,
       items: [
+        {
+          href: "/admin/discord-farm",
+          label: "Discord Farm",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
+        {
+          href: "/admin/tiktok-farm",
+          label: "TikTok Farm",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
         {
           href: "/soop.html",
           label: "SOOP farm",
@@ -384,6 +431,16 @@
       label: "Coworker proposals",
       icon: ICONS.proposals,
       superOnly: true,
+    },
+    {
+      // Personal kanji study page (public/kanji/): its own phone-first app,
+      // no server routes, works offline.
+      href: "/kanji/",
+      label: "Kanji practice",
+      icon:
+        '<path d="M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2z"></path>' +
+        '<path d="M22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8z"></path>',
+      superOnly: false,
     },
     {
       href: "/settings.html",
@@ -549,10 +606,15 @@
       ".mobile-topbar .hamburger{width:40px;height:40px;border-radius:10px;" +
       "border:1px solid var(--line);background:var(--surface);color:var(--ink);" +
       "display:grid;place-items:center;cursor:pointer;flex-shrink:0;}" +
+      // admin-nav.css (linked in each page's <head>) carries a copy of the
+      // closed drawer below, so phones never see the sidebar flash on load.
       ".nav{position:fixed;top:0;left:0;bottom:0;z-index:200;width:264px;" +
-      "transform:translateX(-100%);transition:transform .25s ease;" +
+      "height:auto;min-height:0;" +
+      "transform:translateX(-100%);transition:transform .25s ease;}" +
+      // Shadow only while open: on the closed drawer it bled back over the
+      // page's left edge as a grey strip.
+      ".nav.open{transform:translateX(0);" +
       "box-shadow:0 0 50px rgba(15,23,42,.3);}" +
-      ".nav.open{transform:translateX(0);}" +
       ".nav-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.45);" +
       "z-index:180;}" +
       ".nav-backdrop.show{display:block;}" +
@@ -693,14 +755,33 @@
   // normal flow. Read the position before any of our own CSS is injected:
   // the mobile drawer rules below make every .nav position:fixed, which would
   // otherwise hide whether the page itself wanted a flow-positioned sidebar.
+  //
+  // On a phone admin-nav.css has already set those drawer rules from <head>.
+  // The pin only matters on wide screens (its rules sit in a min-width:769px
+  // block), so a phone reads the position later, once the screen is wide (a
+  // rotated tablet, a widened window). Never switch the drawer rules off to
+  // peek: that gives the closed drawer a starting point, and it slides shut on
+  // every page load.
   function markNavScroll() {
     var nav = document.querySelector(".nav");
     if (!nav) return;
-    var pos = window.getComputedStyle(nav).position;
     nav.classList.add("nav-scroll");
-    if (pos === "static" || pos === "relative") {
-      nav.classList.add("nav-pin");
+    function pinIfInFlow() {
+      var pos = window.getComputedStyle(nav).position;
+      if (pos === "static" || pos === "relative") {
+        nav.classList.add("nav-pin");
+      }
     }
+    var phone = window.matchMedia("(max-width:768px)");
+    if (!phone.matches) return pinIfInFlow();
+    function onChange() {
+      if (phone.matches) return;
+      if (phone.removeEventListener) phone.removeEventListener("change", onChange);
+      else phone.removeListener(onChange);
+      pinIfInFlow();
+    }
+    if (phone.addEventListener) phone.addEventListener("change", onChange);
+    else phone.addListener(onChange);
   }
 
   // Bring the current page's link into view when it sits below the fold of a

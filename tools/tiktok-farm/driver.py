@@ -1,0 +1,563 @@
+"""Capture a single app session in memory, then complete a supported LIVE reward."""
+from contextlib import contextmanager
+import gzip
+import io
+import queue
+import re
+import subprocess
+import sys
+from threading import Timer
+import time
+from pathlib import Path
+from urllib.parse import urlencode, urlsplit, urlunsplit
+
+import frida
+from curl_cffi import CurlOpt, requests
+from hpack import HPACKError
+
+
+APP = "com.zhiliaoapp.musically"
+DETAIL = "/webcast/partnership/reward/drops_detail/"
+POLL = "/webcast/partnership/reward/drops_poll/"
+ENTER = "/webcast/room/enter/"
+CLAIM = "/webcast/partnership/reward/drops_claim/"
+REGIONAL_HOST = "webcast22-normal-c-alisg.tiktokv.com"
+EU_REWARD_HOSTS = ("webcast16-normal-no1a.tiktokv.eu", "webcast19-normal-no1a.tiktokv.eu")
+MAX_WATCH_SECONDS = 3600
+CATALOG_LIMIT = 100
+CATALOG_READ_SECONDS = 65
+ADB = Path.home() / "Library/Android/sdk/platform-tools/adb"
+
+
+def catalog_rows(value):
+    rows = {}
+
+    def collect(item):
+        if isinstance(item, dict):
+            name = item.get("drops_name") or item.get("name") or item.get("title")
+            cid = str(item.get("drops_id") or item.get("id") or "")
+            if (isinstance(name, str) and name.strip() and re.fullmatch(r"[0-9]{1,22}", cid)
+                    and any(key in item for key in ("drops_id", "game_name", "end_time"))):
+                rows[cid] = (name.strip()[:100], item)
+                return
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return rows
+
+
+def catalog_event(campaign, name, row):
+    def timestamp(value):
+        if isinstance(value, str) and value.isdecimal() and len(value) <= 13:
+            value = int(value)
+        if type(value) is not int:
+            return None
+        millis = value * 1000 if value < 10_000_000_000 else value
+        return millis if 946684800000 <= millis < 4102444800000 else None
+
+    game = row.get("game_name")
+    return {"campaign": campaign, "name": name, "game": game.strip()[:100] if isinstance(game, str) else "",
+            "startsAt": timestamp(row.get("start_time")), "endsAt": timestamp(row.get("end_time"))}
+
+
+class FarmError(Exception):
+    def __init__(self, phase):
+        super().__init__(phase)
+        self.phase = phase
+
+
+@contextmanager
+def frida_deadline(seconds=12):
+    operation = frida.Cancellable()
+    timer = Timer(seconds, operation.cancel)
+    timer.daemon = True
+    timer.start()
+    try:
+        with operation:
+            yield
+    finally:
+        timer.cancel()
+
+
+class Driver:
+    def __init__(self, trace, phone_client=None):
+        self.trace = trace
+        self.phone_client = phone_client
+        self.api_route = None
+        self.api_origins = {}
+        self.catalog_context = None
+        trace["HOSTS"].update((REGIONAL_HOST, *EU_REWARD_HOSTS))
+        trace["SOURCE"] = trace["SOURCE"].replace(
+            r"tiktokv\.us)$", r"tiktokv\.us|tiktokv\.eu)$",
+        )
+        trace["mac_request"].__globals__["REWARD"] = re.compile(
+            r"^/webcast/partnership/reward/drops_(detail|poll|list/v2|page_feed)/$"
+        )
+
+    @contextmanager
+    def http_session(self, *, use_phone=True):
+        if use_phone and self.phone_client:
+            try:
+                phone = self.phone_client().open()
+            except (OSError, ValueError):
+                phone = None
+            if phone:
+                self.api_route = "phone"
+                try:
+                    yield phone
+                finally:
+                    phone.close()
+                return
+        self.api_route = "mac"
+        with requests.Session(trust_env=False, default_headers=False, curl_options={CurlOpt.PATH_AS_IS: 1}) as client:
+            yield client
+
+    def available(self, serial):
+        try:
+            device = frida.get_device(serial, timeout=3)
+            with frida_deadline(5):
+                return any(app.identifier == APP for app in device.enumerate_applications())
+        except (frida.TimedOutError, frida.ServerNotRunningError, frida.TransportError,
+                frida.OperationCancelledError, frida.NotSupportedError, OSError):
+            return False
+
+    def entry_room(self, entry):
+        host, headers, body = entry
+        if body.startswith(b"\x1f\x8b"):
+            try:
+                with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
+                    clear = stream.read(65_537)
+                if len(clear) > 65_536:
+                    return None
+                return self.trace["android_room"]((host, headers, clear))
+            except (OSError, EOFError):
+                return None
+        return self.trace["android_room"](entry)
+
+    def capture(self, serial, job, update):
+        device = frida.get_device(serial, timeout=5)
+        discovery = job.get("discovery") is True
+
+        def shell(command, **options):
+            return subprocess.run([ADB, "-s", serial, "shell", command], timeout=12,
+                                  capture_output=True, **options)
+
+        with frida_deadline():
+            app = next((app for app in device.enumerate_applications() if app.identifier == APP), None)
+        if not app:
+            raise FarmError("worker-error")
+        if not app.pid:
+            shell(f"monkey -p {APP} -c android.intent.category.LAUNCHER 1", check=True)
+            time.sleep(17)
+            update("bootstrap", 0)
+            with frida_deadline():
+                app = next(app for app in device.enumerate_applications() if app.identifier == APP)
+        if not app.pid:
+            raise FarmError("worker-error")
+        with frida_deadline():
+            session = device.attach(app.pid)
+        events = queue.Queue(maxsize=1024)
+
+        def receive(message, data):
+            if not data:
+                return
+            try:
+                events.put_nowait((message["payload"], data))
+            except queue.Full:
+                pass
+
+        readers, uploads, matched = {}, {}, {}
+        failed = set()
+        observations = {"reward_reads": 0, "room_entries": 0}
+        rules = []
+        uid_line = shell(f"cmd package list packages -U {APP}", check=True, text=True).stdout
+        uid = re.search(r"uid:(\d+)", uid_line)
+        if not uid:
+            session.detach()
+            raise FarmError("worker-error")
+        rule = f"OUTPUT -m owner --uid-owner {uid[1]} -p udp --dport 443 -j REJECT"
+
+        def firewall(tool, action):
+            shell(f"/debug_ramdisk/magisk su -c '{tool} -w 4 {action} {rule}'", check=True)
+
+        try:
+            script = session.create_script(self.trace["SOURCE"])
+            script.on("message", receive)
+            with frida_deadline():
+                script.load()
+            for tool in ("iptables", "ip6tables"):
+                firewall(tool, "-I")
+                rules.append(tool)
+            sockets = shell("/debug_ramdisk/magisk su -c 'ss -tnp'", text=True, check=True).stdout
+            for line in sockets.splitlines():
+                fields = line.split()
+                if len(fields) < 6 or fields[0] != "ESTAB" or f"pid={app.pid}," not in line or not fields[4].endswith(":443"):
+                    continue
+                port = fields[3].rsplit(":", 1)[-1]
+                if port.isdigit():
+                    shell(f"/debug_ramdisk/magisk su -c 'ss -Ktn sport = :{port} dport = :443'")
+            def open_room(room):
+                shell(f"am start -a android.intent.action.VIEW -d https://www.tiktok.com/share/live/{room} -p {APP}", check=True)
+
+            open_room(job["room"])
+            fallback_room = job.get("fallbackRoom") if discovery else None
+            switch_at = time.monotonic() + 35
+            deadline = time.monotonic() + 75
+            renew = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if fallback_room and time.monotonic() >= switch_at:
+                    open_room(fallback_room)
+                    fallback_room = None
+                if time.monotonic() >= renew:
+                    update("bootstrap", 0)
+                    renew = time.monotonic() + 15
+                try:
+                    event, data = events.get(timeout=1)
+                except queue.Empty:
+                    continue
+                host = event["host"]
+                if event["direction"] != "out" or not self.trace["origin_allowed"](host):
+                    continue
+                key = event["connection"]
+                if key in failed:
+                    continue
+                reader = readers.setdefault(key, self.trace["FrameStream"](True))
+                try:
+                    for stream, kind, payload, ended in reader.append(data):
+                        key_stream = (key, stream)
+                        if kind == "headers":
+                            headers = [(name, value) for name, value in payload if not name.startswith("x-unknown-index-")]
+                            route, fields = self.trace["clean_route"](headers)
+                            if not self.trace["origin_allowed"](fields.get(":authority")):
+                                continue
+                            if (discovery and fields[":authority"].startswith("webcast") and route.startswith("/webcast/")
+                                    and fields.get(":method") == "GET" and {"cookie", "x-tt-token"} <= fields.keys()):
+                                return (host, headers, b""), None
+                            if route in (DETAIL, POLL):
+                                observations["reward_reads"] += 1
+                                ids = self.trace["public_query"](fields)
+                                if (ids.get("drops_id") == job["campaign"] and ids.get("room_id") == job["room"]
+                                        and "anchor_id" in ids and {"cookie", "x-tt-token"} <= fields.keys()):
+                                    matched["read"] = (host, headers, b"")
+                            if route == ENTER and not ended:
+                                observations["room_entries"] += 1
+                                needed = {"cookie", "x-tt-token", "tt-ticket-guard-client-data"}
+                                if needed <= fields.keys():
+                                    uploads[key_stream] = (host, headers, bytearray())
+                        elif key_stream in uploads:
+                            upload = uploads[key_stream]
+                            if len(upload[2]) + len(payload) > 65_536:
+                                uploads.pop(key_stream)
+                                continue
+                            upload[2].extend(payload)
+                            if ended:
+                                uploads.pop(key_stream)
+                                entry = (upload[0], upload[1], bytes(upload[2]))
+                                room = self.entry_room(entry)
+                                if room and (room == job["room"] or discovery and room == job.get("fallbackRoom")):
+                                    matched["entry"] = entry
+                    if "entry" in matched and (job.get("campaign") is None or "read" in matched):
+                        return matched.get("read"), matched["entry"]
+                except (ValueError, IndexError, HPACKError):
+                    failed.add(key)
+        finally:
+            try:
+                for tool in reversed(rules):
+                    try:
+                        firewall(tool, "-D")
+                    except (subprocess.SubprocessError, OSError):
+                        print(f"Temporary {tool} rule cleanup failed on {serial}", file=sys.stderr, flush=True)
+            finally:
+                try:
+                    with frida_deadline():
+                        session.detach()
+                except (frida.TransportError, frida.InvalidOperationError, frida.OperationCancelledError):
+                    pass
+        print(f"{serial} bootstrap timed out ({observations}, matched {sorted(matched)})",
+              file=sys.stderr, flush=True)
+        raise FarmError("capture-timeout")
+
+    def mac(self, client, capture, **options):
+        host, headers, body = capture
+        fields = dict(headers)
+        coalesced = host in {"aggr16-normal.tiktokv.us", "aggr19-normal.tiktokv.us"}
+        regional = "tnc16-normal-useast8.tiktokv.us" if coalesced else host
+        origin_key = (self.api_route, host, fields.get(":authority"))
+        selected = self.api_origins.get(origin_key, regional)
+        if options.get("json_format") and not any(key == "response-format" for key, _ in headers):
+            headers = [*headers, ("response-format", "json")]
+        result = self.trace["mac_request"](client, (selected, headers, body), **options)
+        if coalesced and fields.get(":method") == "GET":
+            if result.get("business") != 0:
+                alternate = host if selected == regional else regional
+                retry = self.trace["mac_request"](client, (alternate, headers, body), **options)
+                if retry.get("business") == 0:
+                    self.api_origins[origin_key] = alternate
+                    return retry
+            else:
+                self.api_origins[origin_key] = selected
+        return result
+
+    def read_task(self, client, read, job):
+        result = self.mac(client, read, include_payload=True, json_format=True)
+        if result.get("business") != 0:
+            print(f"TikTok reward read HTTP {result.get('http')}, status {result.get('business')}",
+                  file=sys.stderr, flush=True)
+            raise FarmError("session-required" if result.get("http") == 401 else "reward-read-failed")
+        data = result["_payload"].get("data") or {}
+        tasks = data.get("tasks") or (data.get("detail") or {}).get("tasks") or []
+        if job["task"] == "auto":
+            eligible = [task for task in tasks if task.get("type") == 5
+                        and task.get("user_status") in (1, 3) and task.get("id")
+                        and not (task.get("gift") or {}).get("need_auth")]
+            if len(eligible) != 1:
+                raise FarmError("ineligible")
+            task = eligible[0]
+        else:
+            task = next((task for task in tasks if str(task.get("id")) == job["task"]), None)
+        if not task or task.get("type") != 5 or (task.get("gift") or {}).get("need_auth"):
+            raise FarmError("ineligible")
+        return task
+
+    def run(self, serial, job, update, preserve):
+        if (any(not re.fullmatch(r"[0-9]{1,22}", job.get(key, "")) for key in ("campaign", "room"))
+                or not re.fullmatch(r"(?:[0-9]{1,22}|auto)", job.get("task", ""))):
+            raise FarmError("worker-error")
+        anchor = job.get("anchor")
+        if job.get("automatic") is True and anchor and re.fullmatch(r"[0-9]{1,22}", anchor):
+            # The captured entry is emitted by the real player. Keep it open
+            # for watch credit and let the API read progress and claim.
+            try:
+                room = {"room": job["room"]}
+                try:
+                    _, entry = self.capture(serial, room, update)
+                except FarmError as error:
+                    if error.phase != "capture-timeout":
+                        raise
+                    update("bootstrap", 0)
+                    self.stop_app(serial)
+                    update("bootstrap", 0)
+                    _, entry = self.capture(serial, room, update)
+                read = self.get_from_entry(entry, DETAIL, drops_id=job["campaign"], room_id=job["room"],
+                                           anchor_id=anchor, user_type=0)
+                return self.complete(read, entry, job, update, preserve, native_playback=True)
+            finally:
+                try:
+                    self.stop_app(serial)
+                except (FarmError, subprocess.SubprocessError, OSError):
+                    print(f"Could not stop Android playback on {serial}", file=sys.stderr, flush=True)
+        if anchor and re.fullmatch(r"[0-9]{1,22}", anchor):
+            _, entry = self.capture(serial, {"room": job["room"]}, update)
+            read = self.get_from_entry(entry, DETAIL, drops_id=job["campaign"], room_id=job["room"],
+                                       anchor_id=anchor, user_type=0)
+        else:
+            read, entry = self.capture(serial, job, update)
+        self.stop_app(serial)
+        return self.complete(read, entry, job, update, preserve)
+
+    @staticmethod
+    def stop_app(serial):
+        for _ in range(3):
+            subprocess.run([ADB, "-s", serial, "shell", "am", "force-stop", APP], timeout=12, check=True)
+            time.sleep(0.3)
+            pid = subprocess.run([ADB, "-s", serial, "shell", "pidof", APP], timeout=12, capture_output=True)
+            if not pid.stdout.strip():
+                return
+        raise FarmError("worker-error")
+
+    def catalog(self, serial, room, fallback_room=None):
+        if self.catalog_context:
+            device, context, captured_at = self.catalog_context
+            if device == serial and time.monotonic() - captured_at < 20 * 60:
+                try:
+                    return self.catalog_with_fallback(context, time.monotonic() + CATALOG_READ_SECONDS)
+                except (OSError, ValueError, FarmError):
+                    self.catalog_context = None
+        try:
+            fallback = fallback_room if isinstance(fallback_room, str) and re.fullmatch(r"[0-9]{1,22}", fallback_room) else None
+            read, entry = self.capture(serial, {"room": room, "fallbackRoom": fallback, "discovery": True}, lambda *_: None)
+        finally:
+            self.stop_app(serial)
+        context = read or entry
+        result = self.catalog_with_fallback(context, time.monotonic() + CATALOG_READ_SECONDS)
+        self.catalog_context = (serial, context, time.monotonic())
+        return result
+
+    def catalog_with_fallback(self, context, deadline):
+        try:
+            return self.catalog_from_entry(context, include_upcoming=True, deadline=deadline)
+        except (OSError, ValueError, FarmError):
+            if self.api_route != "phone" or time.monotonic() >= deadline:
+                raise
+        print("Phone catalog read failed; trying the Mac route", file=sys.stderr, flush=True)
+        return self.catalog_from_entry(context, include_upcoming=True, use_phone=False, deadline=deadline)
+
+    @staticmethod
+    def get_from_entry(entry, route, **params):
+        host, headers, _ = entry
+        original = urlsplit(dict(headers)[":path"])
+        scope = {"drops_id", "room_id", "anchor_id", "user_type", "is_refresh", "is_subscribing"}
+        query = [p for p in original.query.split("&") if p and p.partition("=")[0] not in scope]
+        if params:
+            query.append(urlencode(params))
+        excluded = {":path", "content-type", "content-length", "x-bd-content-encoding", "x-ss-stub", "response-format"}
+        headers = [(k, "GET" if k == ":method" else v) for k, v in headers
+                   if k not in excluded and not k.startswith("tt-ticket-guard-")]
+        path = urlunsplit(original._replace(path=route, query="&".join(query)))
+        return host, [*headers, (":path", path)], b""
+
+    def catalog_from_entry(self, entry, *, include_upcoming=False, use_phone=True, deadline=None):
+        deadline = deadline or time.monotonic() + CATALOG_READ_SECONDS
+        with self.http_session(use_phone=use_phone) as client:
+            def fetch(route, **params):
+                if time.monotonic() >= deadline:
+                    raise FarmError("catalog-deadline")
+                result = self.mac(client, self.get_from_entry(entry, route, **params),
+                                  include_payload=True, json_format=True)
+                if result.get("business") != 0:
+                    raise FarmError("session-required" if result.get("http") == 401 else "reward-read-failed")
+                return result["_payload"].get("data") or {}
+
+            prefix = "/webcast/partnership/reward/"
+            data = fetch(prefix + "drops_list/v2/")
+            if not any(key in data for key in ("ongoing_drops_list", "current_drops", "upcoming_drops_list", "ended_drops_list")):
+                raise FarmError("reward-read-failed")
+            campaigns = catalog_rows([data.get("ongoing_drops_list"), data.get("current_drops")])
+            upcoming = catalog_rows(data.get("upcoming_drops_list"))
+            partial = max(len(campaigns), len(upcoming)) > CATALOG_LIMIT
+            events, active = [], []
+            for cid, (name, row) in list(campaigns.items())[:CATALOG_LIMIT]:
+                advertised = row.get("tasks") or []
+                info = catalog_event(cid, name, row)
+                status, candidates, other_tasks = self.campaign_events(fetch, cid, name, advertised)
+                durations = {task["view_duration"] for task in advertised if task.get("type") in (2, 5)
+                             and type(task.get("view_duration")) is int and 1 <= task["view_duration"] <= 86400}
+                durations.update(event["duration"] for event in candidates)
+                active.append({**info, "status": status, "otherTasks": other_tasks,
+                               "watchSeconds": sorted(durations)[:20]})
+                partial |= status == "incomplete"
+                events.extend({**event, "endsAt": info["endsAt"]} for event in candidates)
+            events.sort(key=lambda event: (event["remaining"], event["duration"], event["campaign"]))
+            if not include_upcoming:
+                return events[:CATALOG_LIMIT]
+            return {"events": events[:CATALOG_LIMIT], "campaigns": active, "partial": partial or len(events) > CATALOG_LIMIT,
+                    "upcoming": [catalog_event(cid, name, row) for cid, (name, row) in list(upcoming.items())[:CATALOG_LIMIT]]}
+
+    @staticmethod
+    def campaign_events(fetch, campaign, name, advertised):
+        def task_id(task):
+            value = str(task.get("id") or task.get("id_str") or "")
+            return value if re.fullmatch(r"[0-9]{1,22}", value) else None
+
+        def other_type(task, watch_types):
+            duration = task.get("view_duration")
+            return (task.get("type") not in watch_types or (task.get("gift") or {}).get("need_auth")
+                    or type(duration) is int and not 1 <= duration <= MAX_WATCH_SECONDS)
+
+        # The catalog labels some countdowns as type 2. Room detail uses type 5.
+        expected = {task_id(task) for task in advertised if not other_type(task, (2, 5))} - {None}
+        other_tasks = any(other_type(task, (2, 5)) for task in advertised)
+        candidates, resolved = {}, set()
+        saw_tasks = False
+        try:
+            feed = fetch("/webcast/partnership/reward/drops_page_feed/", drops_id=campaign, is_refresh="true")
+        except (OSError, ValueError, FarmError):
+            return "incomplete", [], other_tasks
+        rooms = feed.get("room_list") or []
+        if not rooms:
+            return ("incomplete" if feed.get("has_more") else "no-live-room"), [], other_tasks
+        seen_rooms = set()
+        for room in rooms:
+            rid, aid = str(room.get("room_id", "")), str(room.get("anchor_id", ""))
+            if rid in seen_rooms or not all(re.fullmatch(r"[0-9]{1,22}", value) for value in (rid, aid)):
+                continue
+            seen_rooms.add(rid)
+            try:
+                detail = fetch(DETAIL, drops_id=campaign, room_id=rid, anchor_id=aid, user_type=0)
+            except FarmError as error:
+                if error.phase in ("catalog-deadline", "session-required"):
+                    break
+                continue
+            except (OSError, ValueError):
+                continue
+            tasks = detail.get("tasks") or (detail.get("detail") or {}).get("tasks") or []
+            saw_tasks |= bool(tasks)
+            other_tasks |= any(other_type(task, (5,)) for task in tasks)
+            for task in tasks:
+                tid, duration, status = task_id(task), task.get("view_duration"), task.get("user_status")
+                if not tid or other_type(task, (5,)) or type(duration) is not int or status not in (0, 1, 2, 3, 4):
+                    continue
+                resolved.add(tid)
+                if status not in (1, 3):
+                    continue
+                seconds = task.get("countdown_passed")
+                seconds = min(duration, max(0, seconds)) if type(seconds) is int else 0
+                remaining = 0 if status == 3 else duration - seconds
+                if tid not in candidates or remaining < candidates[tid]["remaining"]:
+                    candidates[tid] = {"campaign": campaign, "name": name, "room": rid, "anchor": aid,
+                                       "task": tid, "duration": duration, "remaining": remaining}
+            # Detail is campaign-wide once it includes every advertised watch task.
+            if expected and expected <= resolved:
+                break
+        if expected - resolved or not saw_tasks:
+            return "incomplete", list(candidates.values()), other_tasks
+        if not expected and feed.get("has_more"):
+            return "incomplete", list(candidates.values()), other_tasks
+        return ("eligible" if candidates else "no-eligible-task"), list(candidates.values()), other_tasks
+
+    @contextmanager
+    def reward_session(self, read, job):
+        with self.http_session() as client:
+            try:
+                task = self.read_task(client, read, job)
+            except (OSError, ValueError, FarmError):
+                if self.api_route != "phone":
+                    raise
+            else:
+                yield client, task
+                return
+        print("Phone reward read failed; trying the Mac route", file=sys.stderr, flush=True)
+        with self.http_session(use_phone=False) as client:
+            task = self.read_task(client, read, job)
+            yield client, task
+
+    def complete(self, read, entry, job, update, preserve, *, native_playback=False):
+        with self.reward_session(read, job) as (client, task):
+            job = {**job, "task": str(task["id"])}
+            if task.get("user_status") not in (1, 3):
+                raise FarmError("ineligible")
+            remaining = task.get("view_duration")
+            if type(remaining) is not int or not 1 <= remaining <= MAX_WATCH_SECONDS:
+                raise FarmError("ineligible")
+            update("watching", int(task.get("countdown_passed") or 0))
+            if not native_playback:
+                result = self.mac(client, entry, refresh=False, json_format=True)
+                if result.get("business") != 0:
+                    raise FarmError("room-ended")
+            deadline = time.monotonic() + remaining + 45
+            while task.get("user_status") == 1 and time.monotonic() < deadline:
+                time.sleep(12)
+                task = self.read_task(client, read, job)
+                update("watching", int(task.get("countdown_passed") or 0))
+            if task.get("user_status") != 3:
+                raise FarmError("ineligible")
+
+            host, headers, _ = read
+            fields = dict(headers)
+            ids = self.trace["public_query"](fields)
+            query = "&".join(part for part in urlsplit(fields[":path"]).query.split("&")
+                             if part.partition("=")[0] not in {"drops_id", "room_id", "anchor_id", "user_type"})
+            form = urlencode({**ids, "task_id": job["task"], "input": "{}"}).encode()
+            send = [(k, v) for k, v in headers if k not in {":path", ":method", "content-type", "x-ss-stub"}]
+            send.extend([(":path", CLAIM + "?" + query), (":method", "POST"),
+                         ("content-type", "application/x-www-form-urlencoded; charset=UTF-8")])
+            update("claiming", int(task.get("countdown_passed") or 0))
+            result = self.mac(client, (host, send, form), include_payload=True, json_format=True)
+            code = (result.get("_payload", {}).get("data") or {}).get("cdkey")
+            if not isinstance(code, str) or not re.fullmatch(r"[\x21-\x7e]{1,512}", code):
+                raise FarmError("claim-uncertain")
+            return preserve(code)

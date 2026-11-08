@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TikTok Farm · RedeemHub</title>
+  <script>try{if(localStorage.getItem('theme')==='dark')document.documentElement.dataset.theme='dark'}catch{}</script>
+  <link rel="stylesheet" href="/tiktok/farm.css?v=20261108">
+  <script defer src="/theme.js"></script>
+  <script defer src="/admin-nav.js"></script>
+  <script defer src="/tiktok/farm.js?v=20261108"></script>
+</head>
+<body>
+  <aside class="nav" aria-label="Main navigation">
+    <a class="brand" href="/admin.html"><span class="mark" aria-hidden="true">R</span><b>RedeemHub<span>Admin console</span></b></a>
+    <nav class="links" aria-label="Admin pages">
+      <a href="/admin.html">Inbox</a><a href="/orders">Orders</a><a href="/inventory">Inventory</a>
+    </nav>
+    <div class="me"><span class="avatar" aria-hidden="true">RH</span><div><b id="meName">Admin</b><small id="meRole">Admin console</small></div><button type="button" id="themeToggle" data-theme-toggle aria-label="Toggle theme" title="Toggle theme">◐</button></div>
+  </aside>
+  <main>
+    <header class="page-head">
+      <div><div class="breadcrumb">Reward farms <span>/</span> TikTok</div><h1>TikTok Farm</h1><p class="subtitle">Automatic watch rewards, from discovery to stored codes.</p></div>
+      <div class="head-actions"><span id="connection" class="badge neutral">Connecting</span><button id="refresh" type="button">Refresh</button></div>
+    </header>
+    <div id="error" class="notice danger" role="alert" hidden></div>
+    <div id="status" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="farm-strip"><span class="pulse" id="farmDot"></span><div><strong id="farmTitle">Connecting to your farm</strong><small id="farmHelp">Loading account and host status…</small></div><a href="#accounts">Manage accounts <span aria-hidden="true">→</span></a></div>
+    <nav class="tabs" aria-label="TikTok Farm sections" role="tablist">
+      <button role="tab" id="tab-overview" aria-controls="overview" aria-selected="true">Overview</button>
+      <button role="tab" id="tab-events" aria-controls="eventsPanel" aria-selected="false">Events <span id="eventCount" class="count">0</span></button>
+      <button role="tab" id="tab-accounts" aria-controls="accountsPanel" aria-selected="false">Accounts</button>
+      <button role="tab" id="tab-runs" aria-controls="runsPanel" aria-selected="false">Activity</button>
+      <button role="tab" id="tab-codes" aria-controls="codesPanel" aria-selected="false">Code inventory</button>
+    </nav>
+    <div id="overview" role="tabpanel" aria-labelledby="tab-overview">
+      <div class="metrics">
+        <article class="metric"><span>Accounts online</span><strong id="online">—</strong><small id="onlineHelp">Waiting for workers</small></article>
+        <article class="metric"><span>Auto farm</span><strong id="automationCount">—</strong><small>Enabled accounts</small></article>
+        <article class="metric"><span>Farming now</span><strong id="activeCount">—</strong><small id="activeHelp">Active countdowns</small></article>
+        <article class="metric accent"><span>Codes stored</span><strong id="storedCount">—</strong><small id="storedHelp">Encrypted inventory</small></article>
+      </div>
+      <div class="overview-grid">
+        <section class="panel"><div class="panel-head"><div><h2>Account activity</h2><p>What each account is doing right now.</p></div><a href="#accounts">Manage</a></div><div id="workerSummary" class="worker-list"><p class="empty">Waiting for account status…</p></div></section>
+        <section class="panel host-panel"><div class="panel-head"><h2>Worker health</h2><span id="hostBadge" class="badge neutral">Waiting</span></div><div id="hostDetails"><p class="empty">Waiting for the worker’s health report.</p></div><div class="panel-note">The farm runs with this page closed. After a phone reboot, unlock it once so its services can start.</div></section>
+      </div>
+      <section class="panel"><div class="panel-head"><div><h2>Recent rewards</h2><p>Successfully claimed and saved.</p></div><a href="#codes">View inventory <span aria-hidden="true">→</span></a></div><div id="recentClaims" class="recent-grid"></div></section>
+      <div id="attention" class="notice warning" hidden></div>
+    </div>
+    <div id="eventsPanel" role="tabpanel" aria-labelledby="tab-events" hidden>
+      <section class="panel"><div class="panel-head"><div><h2>Ready to farm</h2><p id="scanScope">For selected accounts</p></div><div class="actions"><button id="scan">Check events</button><button id="auto" class="primary">Check &amp; farm once</button></div></div><div id="events" class="card-grid"></div></section>
+      <section class="panel"><div class="panel-head"><div><h2>Active campaigns</h2><p id="catalogCoverage">Waiting for the latest feed.</p></div><span class="eyebrow">TikTok account feeds</span></div><div id="activeCampaigns" class="card-grid"></div></section>
+      <section class="panel"><div class="panel-head"><div><h2>Upcoming events</h2><p>Published events will be checked automatically when available.</p></div></div><div id="upcoming" class="card-grid"></div></section>
+      <p class="footnote">Automatic farming supports watch countdowns up to one hour. Sharing, gifts and account-linking tasks need separate action. Availability can differ by account.</p>
+    </div>
+    <div id="accountsPanel" role="tabpanel" aria-labelledby="tab-accounts" hidden>
+      <section class="panel"><div class="panel-head"><div><h2>Your accounts</h2><p id="automationHelp">Automatic event checks run every ten minutes while idle.</p></div><div class="actions"><button id="enableAutomation" class="primary">Enable selected</button><button id="pauseAutomation">Pause selected</button></div></div><div id="accounts" class="account-picker"></div><div id="accountDetails" class="card-grid"></div><p class="footnote">Pause stops future automatic scans. Use Activity to stop a current run before claiming starts.</p></section>
+      <section class="panel"><details id="loginEditor"><summary>Saved logins and one-time setup</summary><p class="footnote">Saving a login stores it securely. It does not renew the phone’s active TikTok session.</p><form id="credentialsForm" class="login-form"><label>Account slot<input name="account" placeholder="tiktok-05" required pattern="tiktok-[0-9]{2}" maxlength="9"></label><label>Username or email<input name="username" autocomplete="off" required maxlength="254"></label><label>Password<input name="password" type="password" autocomplete="new-password" required maxlength="512"></label><button class="primary" type="submit" value="save">Save login</button></form><details class="advanced"><summary>Optional Mac setup</summary><p id="setupWorkerStatus" class="footnote">Checking setup availability…</p><p class="footnote">This older setup tool opens an Android instance on the Mac. Phone farming uses saved API sessions and does not need that instance left running.</p><button form="credentialsForm" type="submit" value="setup" id="setupButton" disabled>Start one-time setup</button></details></details></section>
+      <section class="panel"><details><summary>Advanced: run by campaign ID</summary><form id="start" class="login-form"><label>Campaign ID<input name="campaign" required pattern="[0-9]{1,22}" inputmode="numeric"></label><label>LIVE room ID<input name="room" required pattern="[0-9]{1,22}" inputmode="numeric"></label><label>Reward task ID<input name="task" required pattern="[0-9]{1,22}|auto" value="auto"></label><button class="primary" disabled>Queue run</button></form></details></section>
+    </div>
+    <div id="runsPanel" role="tabpanel" aria-labelledby="tab-runs" hidden>
+      <section class="panel"><div class="panel-head"><div><h2>Farm activity</h2><p>Current work and the latest 80 runs.</p></div><div class="filters"><label class="sr-only" for="runState">Filter activity</label><select id="runState"><option value="">All activity</option value="active">Active</option><option value="completed">Completed</option><option value="review">Needs review</option><option value="failed">Failed</option></select></div></div><div class="table-wrap"><table class="responsive-table"><thead><tr><th>Account / event</th><th>Result</th><th>Progress</th><th>Updated</th><th>Action</th></tr></thead><tbody id="runs"></tbody></table></div></section>
+    </div>
+    <div id="codesPanel" role="tabpanel" aria-labelledby="tab-codes" hidden>
+      <section class="panel"><div class="panel-head"><div><h2>Code inventory</h2><p>Codes stay hidden until you reveal them.</p></div><span id="inventoryCount" class="badge neutral">Loading</span></div><div class="inventory-filters"><label><span class="sr-only">Search inventory</span><input id="codeSearch" type="search" placeholder="Search event, campaign or task…" maxlength="100"></label><label><span class="sr-only">Filter by account</span><select id="codeAccount"><option value="">All accounts</option></select></label></div><div class="table-wrap"><table class="responsive-table"><thead><tr><th>Reward / account</th><th>Watch tier</th><th>Stored</th><th>Code</th></tr></thead><tbody id="codes"></tbody></table></div><div class="pagination"><span id="pageInfo">—</span><div class="actions"><button id="previousPage" disabled>Previous</button><button id="nextPage" disabled>Next</button></div></div></section>
+    </div>
+    <footer><span id="lastRefresh">Connecting…</span><span>Times shown in your local timezone</span></footer>
+  </main>
+  <dialog id="loginDialog"><form method="dialog"><div class="panel-head"><h2>Saved login</h2><button aria-label="Close saved login">Close</button></div><dl><dt>Username</dt><dd id="loginUsername"></dd><dt>Password</dt><dd id="loginPassword"></dd></dl></form></dialog>
+</body>
+</html>
