@@ -6853,11 +6853,17 @@ async function playerauctionsSendOrderMessage(orderId, content) {
         "offer's instruction field",
     );
   }
+  // PA's current message form binds multipart fields, even without attachments.
+  // JSON is rejected as missing Content/ObjectIdType (verified 2026-11-08).
+  const fd = new FormData();
+  fd.append("objectIdType", "Order");
+  fd.append("objectId", String(orderId));
+  fd.append("content", text);
   return await paSend(
     "POST",
     PA_USER_API,
     "/messages",
-    { objectIdType: "Order", objectId: Number(orderId), content: text },
+    fd,
     "PlayerAuctions send message",
   );
 }
