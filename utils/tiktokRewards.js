@@ -14,8 +14,12 @@ function imageUrl(value) {
   if (typeof value !== "string" || value.length > 2000) return "";
   try {
     const u = new URL(value);
-    return u.protocol === "https:" && u.hostname.endsWith(".tiktokcdn.com") &&
-      !u.username && !u.password && !u.port && !u.hash ? u.href : "";
+    const nativeCdn = [".tiktokcdn.com", ".tiktokcdn-us.com"].some((suffix) => u.hostname.endsWith(suffix));
+    if (!["https:", "http:"].includes(u.protocol) || !nativeCdn || u.username || u.password || u.port || u.hash) return "";
+    // The US native response still sends http links; the same signed artwork
+    // supports HTTPS. Covers only fetch the upgraded URL.
+    u.protocol = "https:";
+    return u.href;
   } catch { return ""; }
 }
 function parseReward(value) {

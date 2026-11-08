@@ -156,6 +156,8 @@ test("TikTok covers use refreshed native artwork and reject unrelated image host
   assert.equal(imageUrl("https://localhost/reward.png"), "");
   assert.equal(imageUrl("https://p19.tiktokcdn.com.evil.test/reward.png"), "");
   assert.equal(imageUrl("https://name:secret@p19.tiktokcdn.com/reward.png"), "");
+  assert.equal(imageUrl("http://p16-common-sign.tiktokcdn-us.com/reward.webp?x-expires=1"),
+    "https://p16-common-sign.tiktokcdn-us.com/reward.webp?x-expires=1");
   const old = "https://p19.tiktokcdn.com/reward.webp?x-expires=1", fresh = "https://p19.tiktokcdn.com/reward.webp?x-expires=9999999999";
   await seed("tiktok-01", { reward: reward({ image: old }) });
   await seed("tiktok-02", { reward: reward({ image: fresh, verifiedAt: NOW + 1 }) });
