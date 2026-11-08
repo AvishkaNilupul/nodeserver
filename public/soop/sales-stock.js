@@ -45,13 +45,16 @@
   // A code from the CHZZK farm is held under "chzzk:<account id>" (utils/codeShop/sources.js).
   const CHZZK = "chzzk:";
   const isChzzk = (id) => String(id || "").indexOf(CHZZK) === 0;
+  const isTiktok = (id) => String(id || "").startsWith("tiktok:");
   function who(id) {
+    if (isTiktok(id)) return "TikTok · " + String(id).slice(7);
     if (isChzzk(id)) return "CHZZK login " + String(id).slice(-6);
     const a = Soop.accountById(id);
     return a && a.nick && a.nick !== String(id) ? a.nick + " (" + id + ")" : String(id);
   }
   function loginLink(id) {
     if (!id) return el("span", { class: "s-muted" }, "–");
+    if (isTiktok(id)) return el("a", { class: "s-link", href: "/admin/tiktok-farm#accounts", title: "Open TikTok farm accounts" }, who(id));
     if (isChzzk(id)) {
       return el("a", { class: "s-link", href: "/chzzk.html#accounts?id=" + encodeURIComponent(String(id).slice(CHZZK.length)), title: "Open this login on the CHZZK farm page" }, who(id));
     }

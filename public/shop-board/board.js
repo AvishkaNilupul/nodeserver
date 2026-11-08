@@ -26,7 +26,7 @@
   const SOON_MS = 48 * 3600 * 1000;
   const MARKET_NAMES = { eldorado: "Eldorado", playerauctions: "PlayerAuctions", ggsel: "GGSel" };
   const MARKET_ORDER = ["eldorado", "playerauctions"];
-  const FARM_NAMES = { soop: "SOOP", chzzk: "CHZZK" };
+  const FARM_NAMES = { soop: "SOOP", chzzk: "CHZZK", tiktok: "TikTok" };
   const LISTING_WORD = { live: ["Live", "ok"], paused: ["Paused", "warn"], error: ["Error", "error"], down: ["Taken down", null] };
   const MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ");
   const WEEKDAYS = "Sun Mon Tue Wed Thu Fri Sat".split(" ");
@@ -143,7 +143,7 @@
 
     const st = {
       data: null, loadedAt: 0, error: "", busy: null, again: null, timer: 0, triedAt: 0, gone: false,
-      farm: stored("farm", own, ["soop", "chzzk", "all"]),
+      farm: stored("farm", own, ["soop", "chzzk", "tiktok", "all"]),
       view: stored("view", "games", ["games", "markets", "sales"]),
       sort: stored("sort", "onsale", ["onsale", "revenue", "recent", "name"]),
       metric: stored("metric", "units", ["units", "usd"]),
@@ -272,7 +272,7 @@
 
     // ---------- the model (what the farm chip and search let through) ----------------------
     // Per farm: a bundle counts for every farm it has codes from; money is that
-    // farm's share. "Both farms" counts every bundle once at its full price.
+    // farm's share. "All farms" counts every bundle once at its full price.
     const farmOk = (src) => st.farm === "all" || src === st.farm;
     const farmsOk = (list) => st.farm === "all" || (list || []).indexOf(st.farm) !== -1;
     const isLiveProduct = (p) => p.status === "active" && p.listings.some((l) => l.state === "live");
@@ -404,7 +404,7 @@
     // ---------- skeleton --------------------------------------------------------------------
     function render(r) {
       root = r;
-      v.farmChips = ui.chips({ options: [{ value: "soop", label: "SOOP" }, { value: "chzzk", label: "CHZZK" }, { value: "all", label: "Both farms" }],
+      v.farmChips = ui.chips({ options: [{ value: "soop", label: "SOOP" }, { value: "chzzk", label: "CHZZK" }, { value: "tiktok", label: "TikTok" }, { value: "all", label: "All farms" }],
         value: st.farm, onChange: (x) => { st.farm = x; store("farm", x); paint(); } });
       v.farmChips.setAttribute("aria-label", "Which farm");
       v.viewChips = ui.chips({
@@ -510,14 +510,15 @@
       v.farmChips.setOptions([
         { value: "soop", label: "SOOP", count: onSaleOf("soop") },
         { value: "chzzk", label: "CHZZK", count: onSaleOf("chzzk") },
-        { value: "all", label: "Both farms" },
+        { value: "tiktok", label: "TikTok", count: onSaleOf("tiktok") },
+        { value: "all", label: "All farms" },
       ]);
       (d.sources || []).forEach((s) => {
         let c = v.farmCards[s.id];
         if (!c) {
           c = { name: el("b", s.name + " farm"), line: el("span") };
           c.btn = el("button", { type: "button", onClick: () => { st.farm = st.farm === s.id ? "all" : s.id; store("farm", st.farm); paint(); } },
-            el("span", { class: "sb-farm-mark", "aria-hidden": "true" }, s.id === "chzzk" ? "CHZ" : "SOOP"),
+            el("span", { class: "sb-farm-mark", "aria-hidden": "true" }, s.id === "tiktok" ? "TT" : s.id === "chzzk" ? "CHZ" : "SOOP"),
             el("span", { class: "sb-farm-text" }, c.name, c.line));
           v.farmCards[s.id] = c;
           v.farms.append(c.btn);
@@ -525,7 +526,7 @@
         const on = st.farm === s.id;
         c.btn.className = cls("sb-farm-card", "is-" + s.id, on ? "is-on" : "");
         c.btn.setAttribute("aria-pressed", String(on));
-        c.btn.title = on ? "Showing " + s.name + " only — click to show both farms" : "Show " + s.name + " only";
+        c.btn.title = on ? "Showing " + s.name + " only — click to show all farms" : "Show " + s.name + " only";
         const sig = JSON.stringify([s.logins, s.codes.onSale, s.revenue.all, s.lastEarnedAt]);
         if (c.sig !== sig) {
           c.sig = sig;
@@ -600,7 +601,7 @@
           ? ui.empty("No game matches “" + st.q + "”", "Try a game, reward or listing name.",
             { label: "Clear search", onClick: () => { v.search.set(""); st.q = ""; paint(); v.search.input.focus({ preventScroll: true }); } })
           : ui.empty("Nothing here yet", st.farm === "all" ? "No farm has earned a code yet." : "The " + FARM_NAMES[st.farm] + " farm has not earned a code yet.",
-            st.farm === "all" ? null : { label: "Show both farms", onClick: () => {
+            st.farm === "all" ? null : { label: "Show all farms", onClick: () => {
               st.farm = "all"; store("farm", "all"); paint();
               const on = v.farmChips.querySelector('button[aria-pressed="true"]');
               if (on) on.focus({ preventScroll: true });
