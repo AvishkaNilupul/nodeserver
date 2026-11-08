@@ -12,6 +12,7 @@ class Metadata(unittest.TestCase):
     def setUp(self):
         self.job = {'campaign': '100', 'task': '200', 'codeHash': hashlib.sha256(b'SYNTHETIC').hexdigest()}
         self.gift = {'gift_code': 'SYNTHETIC', 'need_auth': False, 'end_time': 1796227199,
+                     'icon_url': 'https://p19.tiktokcdn.com/reward.webp?x-expires=1794711639',
                      'id_str': '300', 'name': 'Diamonds', 'items': [{'name': 'Diamond', 'count': 10}],
                      'gift_redeem_info': {'gift_redeem_type': 2, 'in_app_steps': 'Pear-Pal > Other > Redeem Code'}}
         self.task = {'id': '200', 'user_status': 4, 'gift': self.gift}
@@ -24,6 +25,7 @@ class Metadata(unittest.TestCase):
         self.assertNotEqual(result['useBy'], result['campaignEndAt'])
         self.assertNotIn('SYNTHETIC', str(result))
         self.assertEqual(result['items'], [{'name': 'Diamond', 'count': 10}])
+        self.assertEqual(result['image'], self.gift['icon_url'])
 
     def test_no_campaign_date_fallback(self):
         del self.gift['end_time']

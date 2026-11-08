@@ -60,7 +60,8 @@ function mount(router, { Model, authenticate, jsonOnly, wrap, admin, now }) {
   router.get("/api/tiktok-farm/sales", ...admin, wrap(async (_req, res) => {
     const cfg = await shop().modules.config.get();
     const products = await require("../models/CodeProduct").find({ groupKeys: /:tiktok-/ })
-      .select("name status texts.title pricing useBy proposed publish offer slots.slotKey").lean();
+      .select("name status texts pricing useBy proposed publish offer slots marketGame markets").lean();
+    const problems = new Map(await Promise.all(products.map(async (p) => [String(p._id), await shop().modules.publisher.problems(p)])));
     const offers = products.map((p) => p.offer).filter(Boolean);
     const listings = offers.length ? await require("../models/MarketplaceListing").find({ accountOffer: { $in: offers } })
       .select("accountOffer marketplace status url title price quantity").lean() : [];
@@ -72,7 +73,7 @@ function mount(router, { Model, authenticate, jsonOnly, wrap, admin, now }) {
       .select("account campaign task eventName reward revealedAt rewardCheckError rewardBlocked").lean();
     res.json({ enabled: cfg.sources.tiktok === true, autoPublish: cfg.autoPublish, leadHours: cfg.expiryLeadHours,
       products: products.map((p) => { const times = p.slots.map((s) => dateOfSlot.get(s.slotKey)).filter(Number.isFinite); return {
-        ...p, useBy: times.length ? new Date(Math.min(...times)) : p.useBy,
+        ...p, problems: problems.get(String(p._id)), useBy: times.length ? new Date(Math.min(...times)) : p.useBy,
         listings: listings.filter((l) => String(l.accountOffer) === String(p.offer)) }; }),
       counts: Object.fromEntries(counts.map((c) => [c._id, c.count])), inventory: await inventoryStatus(pending, now()) });
   }));

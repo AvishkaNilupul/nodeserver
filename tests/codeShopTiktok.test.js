@@ -150,3 +150,35 @@ test("code shop blocks duplicates across farms and attributes TikTok revenue sep
   assert.equal(board.sales[0].bySource.tiktok.usd, 2);
   assert.deepEqual(board.sales[0].sources, ["tiktok"]);
 });
+
+test("TikTok covers use refreshed native artwork and reject unrelated image hosts", async () => {
+  const { imageUrl } = require("../utils/tiktokRewards");
+  assert.equal(imageUrl("https://localhost/reward.png"), "");
+  assert.equal(imageUrl("https://p19.tiktokcdn.com.evil.test/reward.png"), "");
+  assert.equal(imageUrl("https://name:secret@p19.tiktokcdn.com/reward.png"), "");
+  const old = "https://p19.tiktokcdn.com/reward.webp?x-expires=1", fresh = "https://p19.tiktokcdn.com/reward.webp?x-expires=9999999999";
+  await seed("tiktok-01", { reward: reward({ image: old }) });
+  await seed("tiktok-02", { reward: reward({ image: fresh, verifiedAt: NOW + 1 }) });
+  await createIngest(deps()).run();
+  const slotKey = (await Stock.findOne({}).lean()).slotKey;
+  assert.equal((await source.images(deps(), [{ slotKey, image: old }])).get(slotKey), fresh);
+  let passed;
+  const cover = require("../utils/codeShop/cover").createCover({ ...deps(),
+    sharp: () => ({ png: () => ({ toBuffer: async () => Buffer.from("synthetic-png") }) }),
+    setImage: () => ({ buildPromoCoverImage: async (options) => { passed = options; return "synthetic-cover"; } }),
+  });
+  await cover.build({ slots: [{ slotKey, image: "" }], texts: { coverTitle: "Fixture", coverServiceText: "Redeem code" } });
+  assert.equal(passed.itemImages[0], fresh);
+});
+
+test("Sales exposes draft validation problems without code fields", async (t) => {
+  await seed(); await createIngest(deps()).run(); await createPlanner(deps()).run();
+  const p = await models.CodeProduct.findOne({}); p.slots[0].label = ""; await p.save();
+  const app = express(); app.use((req, res, next) => { req.session = { admin: { role: "superadmin", tfa: true } }; next(); });
+  app.use(require("../routes/tiktokFarmRoutes"));
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const r = await fetch(`http://127.0.0.1:${server.address().port}/api/tiktok-farm/sales`); assert.equal(r.status, 200);
+  const out = await r.json(); assert.ok(out.products[0].problems.includes("label 1 is empty"));
+  assert.ok(!JSON.stringify(out).includes("SYNTHETIC-"));
+});

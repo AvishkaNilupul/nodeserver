@@ -10,6 +10,14 @@ const PROFILES = Object.freeze({
 });
 const date = (v) => Number.isSafeInteger(v) && v >= 946684800000 && v < 4102444800000;
 const text = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x08\x0b-\x1f]/.test(v);
+function imageUrl(value) {
+  if (typeof value !== "string" || value.length > 2000) return "";
+  try {
+    const u = new URL(value);
+    return u.protocol === "https:" && u.hostname.endsWith(".tiktokcdn.com") &&
+      !u.username && !u.password && !u.port && !u.hash ? u.href : "";
+  } catch { return ""; }
+}
 function parseReward(value) {
   if (!value || ![value.campaign, value.task, value.gameId, value.giftId].every((v) => typeof v === "string" && ID.test(v)) ||
       !text(value.gameName, 100) || !text(value.name, 160) || value.needAuth !== false ||
@@ -24,7 +32,7 @@ function parseReward(value) {
   }
   return Object.fromEntries(["campaign", "task", "gameId", "gameName", "giftId", "name", "needAuth", "campaignStartAt",
     "campaignEndAt", "useBy", "redeemType", "redeemUrl", "instructions"].map((k) => [k, value[k]]).concat([
-      ["items", value.items.map(({ name, count }) => ({ name: name.trim(), count }))],
+      ["items", value.items.map(({ name, count }) => ({ name: name.trim(), count }))], ["image", imageUrl(value.image)],
     ]));
 }
 function eligibility(reward) {
@@ -39,4 +47,4 @@ function eligibility(reward) {
 function labelOf(reward) {
   return (Array.isArray(reward?.items) ? reward.items : []).map((i) => `${i.count}x ${i.name}`).join(" + ");
 }
-module.exports = { parseReward, eligibility, labelOf, PROFILES };
+module.exports = { parseReward, eligibility, labelOf, imageUrl, PROFILES };

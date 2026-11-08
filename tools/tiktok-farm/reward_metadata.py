@@ -31,7 +31,7 @@ def extract(detail, job):
             'campaign': job['campaign'], 'task': tid,
             'gameId': str(data.get('game_id_str') or data.get('game_id') or ''),
             'gameName': data.get('game_name'), 'giftId': str(gift.get('id_str') or ''),
-            'name': gift.get('name'), 'needAuth': False,
+            'name': gift.get('name'), 'needAuth': False, 'image': gift.get('icon_url') or '',
             'campaignStartAt': stamp(data.get('start_time')), 'campaignEndAt': stamp(data.get('end_time')),
             'useBy': stamp(gift.get('end_time')), 'redeemType': redeem.get('gift_redeem_type'),
             'redeemUrl': redeem.get('link') or '',

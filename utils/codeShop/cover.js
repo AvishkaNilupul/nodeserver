@@ -93,7 +93,8 @@ function createCover(deps = {}) {
     const n = slots.length;
     const { cols, rows } = gridFor(n);
     const total = cols * rows;
-    const images = slots.slice(0, MAX_TILES).map((s) => tileRef(s && s.image));
+    const current = await require("./tiktok").images(deps, slots);
+    const images = slots.slice(0, MAX_TILES).map((s) => tileRef(current.get(s.slotKey) || (/:tiktok-/.test(s.slotKey) ? "" : s.image)));
     if (!images.some(Boolean)) throw new Error("no item images for the cover");
 
     let filler = null;

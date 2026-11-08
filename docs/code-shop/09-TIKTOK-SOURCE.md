@@ -22,6 +22,9 @@ or duplicate the marketplace delivery paths.
   withdraws its unsold units on the next shop cycle; sold units are preserved.
   Read failures preserve verified expiry; retries
   are hourly, with successful refreshes every six hours.
+- Native reward artwork is carried with the metadata. Covers resolve the latest
+  verified image URL when rendered, since CDN image links have their own expiry.
+  Only the reward CDN is accepted; missing artwork blocks publication.
 - Source import defaults off for a staged deployment. Enable
   `sources.tiktok` after checking metadata and a draft/delivery rehearsal.
   Existing code-shop autoPublish, permitted markets and pricing apply. Initial

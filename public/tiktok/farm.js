@@ -268,6 +268,7 @@
           card.append(row);
         }
         if (product.publish?.lastError) card.append(make('p', 'footnote', product.publish.lastError));
+        for (const problem of product.problems || []) card.append(make('p', 'footnote', 'Needs review: ' + problem));
         products.append(card);
       }
       const review = $('#salesReview'); review.replaceChildren();
