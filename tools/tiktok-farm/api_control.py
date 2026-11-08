@@ -12,9 +12,10 @@ class StopRequested(Exception):
     pass
 
 class Control:
-    def __init__(self, url, token):
+    def __init__(self, url, token, runtime=None):
         self.url = urlsplit(url)
         self.token = token
+        self.runtime = runtime
         if (not self.url.hostname or self.url.path not in ("", "/") or
                 self.url.query or self.url.fragment or self.url.username or self.url.password):
             raise ValueError("Expected a bare control server URL")
@@ -24,6 +25,8 @@ class Control:
         self.tls = ssl.create_default_context()
 
     def post(self, route, data):
+        if self.runtime is not None:
+            data = {**data, "runtime": self.runtime()}
         if self.url.scheme == "https":
             connection = http.client.HTTPSConnection(
                 self.url.hostname, self.url.port, timeout=12, context=self.tls)

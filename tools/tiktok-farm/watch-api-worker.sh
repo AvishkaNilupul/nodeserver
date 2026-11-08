@@ -2,6 +2,7 @@
 export HOME=/data/data/com.termux/files/home
 export PREFIX=/data/data/com.termux/files/usr
 export PATH=$PREFIX/bin:/system/bin
+export TIKTOK_SUPERVISED=1
 umask 077
 D=$HOME/tiktok-api-worker
 exec 9>"$D/supervisor.lock"

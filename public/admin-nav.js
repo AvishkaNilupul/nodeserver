@@ -313,7 +313,7 @@
     },
     {
       key: "soop",
-      label: "SOOP",
+      label: "Reward farms",
       icon: ICONS.soop,
       items: [
         {

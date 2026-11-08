@@ -222,3 +222,65 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   const backoff = await Schedule.findOne({ account: scheduled }).select("nextScanAt").lean();
   assert.equal(+backoff.nextScanAt, clock + 10 * 60_000);
 });
+
+test("dashboard keeps paused accounts, saved feeds, complete inventory and deduplicated host health", async (t) => {
+  process.env.CRED_SECRET = "test-only dashboard encryption secret";
+  const { encrypt } = require("../utils/secretBox");
+  const mongo = await MongoMemoryServer.create();
+  t.after(async () => { await mongoose.disconnect(); await mongo.stop(); });
+  await mongoose.connect(mongo.getUri());
+  await Promise.all([Run.init(), Schedule.init()]);
+  let clock = Date.now();
+  const key = "dashboard fixture worker authentication key";
+  const app = express(); app.use(express.json());
+  app.use((req, _res, next) => { if (req.headers["x-admin"] === "1") req.session = { admin: { role: "superadmin", tfa: true } }; next(); });
+  app.use(createRouter({ workerKey: () => key, now: () => clock }));
+  app.use("/reboot", createRouter({ workerKey: () => key, now: () => clock }));
+  const server = app.listen(0, "127.0.0.1"); await new Promise((r) => server.once("listening", r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const base = "http://127.0.0.1:" + server.address().port;
+  async function call(path, body, prefix = "", admin = true) {
+    const response = await fetch(base + prefix + "/api/tiktok-farm/" + path, { method: body ? "POST" : "GET",
+      headers: { "Content-Type": "application/json", ...(admin ? { "x-admin": "1" } : { authorization: "Bearer " + key }) },
+      ...(body && { body: JSON.stringify(body) }) });
+    return { status: response.status, ...await response.json() };
+  }
+  const runtime = { kind: "android-api", instance: "a".repeat(32), slots: 2, uptimeSeconds: 300,
+    rssKiB: 40000, peakRssKiB: 42000, supervised: true, cookie: "must-not-be-stored" };
+  for (const account of ["tiktok-01", "tiktok-02"]) {
+    assert.equal((await call("worker/poll", { account, runtime, scanCapable: true, apiRoute: "phone" }, "", false)).status, 200);
+  }
+  assert.equal((await call("worker/poll", { account: "tiktok-01", runtime: { ...runtime, rssKiB: -1 } }, "", false)).status, 400);
+  await Schedule.updateOne({ account: "tiktok-01" }, { $set: { enabled: false } });
+  await call("scan", { accounts: ["tiktok-01"], auto: false });
+  const scan = (await call("worker/poll", { account: "tiktok-01", scanCapable: true }, "", false)).scan;
+  const campaign = { campaign: "123", name: "New game fixture", game: "New game", status: "no-live-room", otherTasks: false, watchSeconds: [60] };
+  await call("worker/catalog", { account: "tiktok-01", id: scan.id, events: [], campaigns: [campaign], upcoming: [], apiRoute: "phone" }, "", false);
+  const records = Array.from({ length: 205 }, (_, n) => ({ account: "tiktok-01", campaign: String(1000 + n), task: "1", room: "2", batch: "fixture", active: false,
+    state: "completed", phase: "stored", eventName: n === 0 ? "Literal [reward]" : "Fixture reward", code: encrypt("fixture-" + n) }));
+  await Run.insertMany(records);
+  await Run.create({ account: "tiktok-02", campaign: "900", room: "901", task: "902", batch: "fixture", active: true, state: "queued", createdAt: new Date(clock - 86400_000 * 7) });
+  const state = await call("state");
+  assert.equal(state.accounts.length, 2);
+  assert.equal(state.hosts.length, 1); assert.equal(state.hosts[0].rssKiB, 40000);
+  assert.equal(state.hosts[0].accounts.length, 2); assert.equal(state.codeCount, 205);
+  assert.equal(state.accounts[0].statistics.codes, 205);
+  assert(state.runs.some((run) => run.account === "tiktok-02" && run.active));
+  assert(!JSON.stringify(state).includes("must-not-be-stored"));
+  assert(!JSON.stringify(state).includes("enc:v1:"));
+  const stored = await Schedule.findOne({ account: "tiktok-01" }).lean();
+  assert.equal(stored.runtime.cookie, undefined);
+  const restarted = await call("state", undefined, "/reboot");
+  const paused = restarted.accounts.find((a) => a.account === "tiktok-01");
+  assert.equal(paused.online, false); assert.equal(paused.automation, undefined);
+  assert.equal(paused.catalog.stale, true); assert.equal(paused.catalog.campaigns[0].name, campaign.name);
+  assert(paused.lastSeen); assert.equal(paused.statistics.codes, 205);
+  const first = await call("inventory?page=1"), last = await call("inventory?page=5");
+  assert.equal(first.codes.length, 50); assert.equal(last.codes.length, 5); assert.equal(last.total, 205);
+  assert.equal(new Set([...first.codes, ...last.codes].map((c) => c._id)).size, 55);
+  assert(!JSON.stringify(first).includes("enc:v1:"));
+  assert.equal((await call("inventory?q=%5Breward%5D")).total, 1);
+  assert.equal((await call("inventory?account=tiktok-02")).total, 0);
+  assert.equal((await call("inventory?page=-1")).status, 400);
+  assert.equal((await call("inventory", undefined, "", false)).status, 401);
+});

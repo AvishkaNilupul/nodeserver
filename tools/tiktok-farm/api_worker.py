@@ -16,11 +16,30 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from api_client import ApiClient, CurlSession, FarmError, DETAIL, POLL, ENTER, CLAIM, public_query
 from api_control import Control, LeaseLost, process
 from native_socket import NativeSocketProbe, proto_fields, frame_summary
+
+
+PROCESS_STARTED = time.monotonic()
+PROCESS_INSTANCE = uuid.uuid4().hex
+PROCESS_SLOTS = 1
+
+
+def runtime_snapshot():
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    try:
+        status = Path('/proc/self/status').read_text()
+        rss = int(re.search(r'^VmRSS:\s+(\d+)', status, re.M)[1])
+    except (OSError, TypeError, ValueError):
+        rss = peak
+    return {'kind': 'android-api', 'instance': PROCESS_INSTANCE,
+            'uptimeSeconds': int(time.monotonic() - PROCESS_STARTED),
+            'rssKiB': rss, 'peakRssKiB': peak, 'slots': PROCESS_SLOTS,
+            'supervised': os.environ.get('TIKTOK_SUPERVISED') == '1'}
 
 
 def load_config(state):
@@ -261,7 +280,7 @@ class Worker:
 
 def run_loop(worker, stopping):
     packet, state = worker.packet, worker.state
-    control = Control(packet['server'], packet['workerKey'])
+    control = Control(packet['server'], packet['workerKey'], runtime=runtime_snapshot)
     pending = state / 'pending-result.json'
     failures = 0
     try:
@@ -331,9 +350,11 @@ def account_loop(state, stopping, startup_lock):
 
 
 def run_fleet(root, stopping):
+    global PROCESS_SLOTS
     prepare_state(root)
     states = sorted(path for path in root.iterdir()
                     if path.is_dir() and re.fullmatch(r'tiktok-[0-9]{2}', path.name))
+    PROCESS_SLOTS = len(states)
     if not states:
         raise ValueError('No enrolled accounts')
     with (root / 'fleet.lock').open('a') as held:

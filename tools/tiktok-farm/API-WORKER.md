@@ -40,7 +40,9 @@ singleton lock. Each slot has an independent worker thread, request context, job
 lease, known-room history and pending-result file. A stalled or expired account
 cannot block the other accounts. Startup decryptors run serially to limit memory.
 The root status file reports the shared process peak RSS and active account threads;
-per-slot status files report their individual activity. Adding a saved session
+per-slot status files report their individual activity. The dashboard receives a
+validated shared-process identifier, current/peak memory, uptime and supervisor
+status on worker requests. No session values are included in health reports. Adding a saved session
 requires an idle fleet restart. Install `30-tiktok-api.sh` in Termux:Boot. It uses its own service
 task and does not change SOOP or Epic scripts. Android still requires the owner's
 normal unlock after reboot. Phone power and connectivity remain prerequisites.
