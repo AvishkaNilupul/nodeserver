@@ -36,6 +36,7 @@ const { eventStarts } = require("./eventDates");
 const { guideFor } = require("./games");
 const { DEFAULTS, marketsForGame } = require("./config");
 const { createLabeler, cleanLabel } = require("./labels");
+const { startingPriceUsd } = require("./startingPrice");
 const { isVoucher } = require("./vouchers");
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -314,7 +315,7 @@ function createPlanner(deps = {}) {
       const units = set.units;
 
       // Any non-retired product with this exact set already covers it.
-      const owners = await leanOf(Product.find({ slotSetHash: hash, status: { $ne: "retired" } }, "_id status edited stale slots"));
+      const owners = await leanOf(Product.find({ slotSetHash: hash, status: { $ne: "retired" } }, "_id status origin edited stale slots"));
       if (owners.length) {
         for (const p of owners) {
           if (p.status !== "draft") continue; // live products are never touched
@@ -324,6 +325,12 @@ function createPlanner(deps = {}) {
             // rebuild the texts it feeds (never on a draft the owner edited).
             const repaired = await repairLabels(p, g, cfg, ctx);
             if (repaired) Object.assign($set, repaired);
+            // Pending automatic OW drafts get the same starting tiers, also
+            // after a missing label is repaired. Owner edits and live prices
+            // are never reset by the planner.
+            if (p.origin === "auto" && String(g.gameNo) === "12") {
+              $set["pricing.priceUsd"] = startingPriceUsd(g.gameNo, repaired ? repaired.slots : p.slots);
+            }
             const r = await Product.updateOne({ _id: p._id, status: "draft", edited: false }, { $set });
             if (r.matchedCount) out.updated += 1;
             if (r.matchedCount && repaired) ctx.extra.relabelled += 1;
@@ -364,7 +371,7 @@ function createPlanner(deps = {}) {
         edited: false,
         stale: false,
         texts: defaultTexts({ slots, guide, useBy: useBy === null ? null : new Date(useBy), now: ctx.now, eventStarts: starts }),
-        pricing: { mode: "fixed", priceUsd: 1, floorUsd: 0.5, clearance: false, followCompetitors: false },
+        pricing: { mode: "fixed", priceUsd: startingPriceUsd(g.gameNo, slots), floorUsd: 0.5, clearance: false, followCompetitors: false },
         // PlayerAuctions only for a game allowed there (Overwatch, not Delta Force).
         markets: marketsForGame(ctx.markets, g.gameNo, cfg),
         proposed: { units, at },

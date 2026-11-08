@@ -149,6 +149,49 @@ const noErrors = (events) =>
 
 const drafts = () => CodeProduct.find({}).sort({ "proposed.units": -1, _id: 1 }).lean();
 
+test("automatic OW drafts use reward tiers and preserve edited and active prices", async () => {
+  await reset();
+  await addSlot({ nameRaw: "OWCS Home Sombra Skin", count: 5 });
+  await addSlot({ nameRaw: "Esports Loot Box", count: 5 });
+  const { planner, events } = setup();
+  await planner.run();
+  let [p] = await drafts();
+  assert.equal(p.pricing.priceUsd, 1.99);
+  assert.equal(p.pricing.mode, "fixed");
+  assert.equal(p.pricing.followCompetitors, false);
+
+  // A pending automatic draft made under the old flat-$1 default is updated.
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { "pricing.priceUsd": 1 } });
+  await planner.run();
+  assert.equal((await CodeProduct.findById(p._id)).pricing.priceUsd, 1.99);
+
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { edited: true, "pricing.priceUsd": 3.49 } });
+  await planner.run();
+  assert.equal((await CodeProduct.findById(p._id)).pricing.priceUsd, 3.49);
+
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { edited: false, status: "active", "pricing.priceUsd": 1 } });
+  await planner.run();
+  assert.equal((await CodeProduct.findById(p._id)).pricing.priceUsd, 1);
+  noErrors(events);
+});
+
+test("automatic box bundle starts at $1.49 after labels are repaired", async () => {
+  await reset();
+  await addSlot({ nameRaw: "Esports Loot Box", count: 5 });
+  await addSlot({ nameRaw: "Banana Cat Icon", count: 5 });
+  const { planner, events } = setup();
+  await planner.run();
+  const [p] = await drafts();
+  assert.equal(p.pricing.priceUsd, 1.49);
+  const blank = p.slots.map((s) => ({ ...s, label: "" }));
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { slots: blank, "pricing.priceUsd": 1 } });
+  await planner.run();
+  const repaired = await CodeProduct.findById(p._id).lean();
+  assert.equal(repaired.pricing.priceUsd, 1.49);
+  assert.ok(repaired.slots.every((s) => s.label));
+  noErrors(events);
+});
+
 test("autoDraft off: nothing is drafted", async () => {
   await reset();
   await addSlot({ nameRaw: "Prost Spray", count: 10 });
