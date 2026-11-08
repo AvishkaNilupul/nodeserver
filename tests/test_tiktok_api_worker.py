@@ -8,10 +8,10 @@ import tempfile
 import threading
 import unittest
 from urllib.parse import parse_qs
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools/tiktok-farm'))
-from api_worker import Worker, build_entry, build_claim, entry_matches
+from api_worker import Worker, build_entry, build_claim, entry_matches, run_loop, run_fleet, account_loop
 from api_client import FarmError, DETAIL
 from api_control import process
 from native_socket import pb_pack
@@ -52,7 +52,7 @@ class ApiWorkerTests(unittest.TestCase):
     def worker(self, state, claim):
         worker = object.__new__(Worker)
         worker.state, worker.stopping = Path(state), threading.Event()
-        worker.packet = {'seedRoom': '1111111111111111111', 'seedAnchor': '2222222222222222222'}
+        worker.packet = {'account': 'tiktok-04', 'seedRoom': '1111111111111111111', 'seedAnchor': '2222222222222222222'}
         worker.seed, worker.handshakes = self.read, []
         worker.known_rooms = {}
         worker.status = Mock()
@@ -123,6 +123,61 @@ class ApiWorkerTests(unittest.TestCase):
                 {'campaign': self.job['campaign'], 'name': 'Fixture', 'status': 'no-live-room'}],
                 'partial': False, 'upcoming': []}
             self.assertEqual(worker.catalog()['events'], [])
+
+    def test_other_account_job_cannot_use_this_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = self.worker(directory, {})
+            with self.assertRaises(FarmError):
+                worker.run(None, {**self.job, 'account': 'tiktok-03'}, Mock(), Mock())
+            worker.api.mac.assert_not_called()
+
+    def test_pending_result_is_recovered_before_polling_only_its_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = self.worker(directory, {})
+            worker.packet.update(server='https://example.test', workerKey='fixture')
+            pending = Path(directory)/'pending-result.json'
+            pending.write_text(json.dumps({'id': 'saved-run', 'code': 'fixture-code'}))
+            stop = threading.Event()
+            control = Mock()
+            def post(route, value):
+                if route == 'poll':
+                    self.assertFalse(pending.exists())
+                    self.assertEqual(value['account'], 'tiktok-04')
+                    stop.set()
+                    return {}
+                self.assertEqual(route, 'update')
+                self.assertEqual(value['id'], 'saved-run')
+                return {'ok': True}
+            control.post.side_effect = post
+            with patch('api_worker.Control', return_value=control):
+                run_loop(worker, stop)
+            self.assertEqual([call.args[0] for call in control.post.call_args_list], ['update', 'poll'])
+
+    def test_fleet_keeps_independent_slots_running_concurrently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for slot in ('tiktok-01', 'tiktok-02', 'tiktok-03', 'tiktok-04'):
+                (root/slot).mkdir(mode=0o700)
+            barrier = threading.Barrier(4, timeout=3)
+            visited = []
+            stop = threading.Event()
+            def run(state, stopping, lock):
+                visited.append(state.name)
+                barrier.wait()
+                stopping.set()
+            with patch('api_worker.account_loop', side_effect=run):
+                run_fleet(root, stop)
+            self.assertEqual(sorted(visited), ['tiktok-01', 'tiktok-02', 'tiktok-03', 'tiktok-04'])
+
+    def test_wrong_slot_packet_never_starts_a_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)/'tiktok-01'
+            stopping = Mock()
+            stopping.is_set.side_effect = [False, True]
+            with patch('api_worker.load_config', return_value={'account': 'tiktok-02'}), patch('api_worker.Worker') as create:
+                account_loop(state, stopping, threading.Lock())
+            create.assert_not_called()
+            self.assertEqual(json.loads((state/'status.json').read_text())['phase'], 'account-error')
 
 
 if __name__ == '__main__':

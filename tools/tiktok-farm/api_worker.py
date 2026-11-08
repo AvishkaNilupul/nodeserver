@@ -190,6 +190,8 @@ class Worker:
         temporary.replace(self.state / 'known-rooms.json')
 
     def run(self, _device, job, update, preserve):
+        if job.get('account') != self.packet['account']:
+            raise FarmError('worker-error')
         if not all(re.fullmatch(r'[0-9]{1,22}', job.get(key) or '')
                    for key in ('campaign', 'room', 'anchor', 'task')):
             raise FarmError('worker-error')
@@ -257,60 +259,135 @@ class Worker:
                 socket.close()
 
 
+def run_loop(worker, stopping):
+    packet, state = worker.packet, worker.state
+    control = Control(packet['server'], packet['workerKey'])
+    pending = state / 'pending-result.json'
+    failures = 0
+    try:
+        while not stopping.is_set():
+            try:
+                if pending.exists():
+                    if control.post('update', json.loads(pending.read_text())).get('ok') is not True:
+                        raise OSError('Result storage is not acknowledged')
+                    pending.unlink()
+                reply = control.post('poll', {'account': packet['account'], 'scanCapable': True, 'apiRoute': 'phone'})
+                if job := reply.get('job'):
+                    if job.get('account') != packet['account']:
+                        raise ValueError('Account mismatch')
+                    process(control, job, worker.run, None, pending)
+                    worker.status('job-reported', run=job['id'])
+                elif scan := reply.get('scan'):
+                    result = {'account': packet['account'], 'id': scan['id'], 'events': [], 'apiRoute': 'phone'}
+                    try:
+                        result.update(worker.catalog())
+                    except (OSError, ValueError, FarmError) as error:
+                        result['error'] = 'session-required' if getattr(error, 'phase', '') == 'session-required' else 'scan-failed'
+                        worker.status(result['error'])
+                    control.post('catalog', result)
+                else:
+                    worker.status('idle')
+                failures = 0
+                stopping.wait(6)
+            except (OSError, ValueError, LeaseLost) as error:
+                failures += 1
+                worker.status('storage-pending' if pending.exists() else 'control-unavailable', error=type(error).__name__)
+                stopping.wait(min(60, 5*failures))
+    finally:
+        worker.status('stopped')
+
+
+def prepare_state(state):
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if state.stat().st_mode & 0o077:
+        raise ValueError('State directory must be private')
+
+
+def account_loop(state, stopping, startup_lock):
+    # Each slot keeps its own lock, credentials, room history and durable outbox.
+    # A broken/expired slot cannot take down another account's live watch.
+    prepare_state(state)
+    with (state / 'worker.lock').open('a') as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        while not stopping.is_set():
+            try:
+                # Node decryptors run one at a time to bound startup memory.
+                with startup_lock:
+                    packet = load_config(state)
+                    if packet['account'] != state.name:
+                        raise ValueError('Account directory mismatch')
+                    worker = Worker(packet, state, stopping)
+                (state / 'worker.pid').write_text(str(os.getpid()))
+                run_loop(worker, stopping)
+            except Exception as error:
+                value = {'phase': 'account-error', 'account': state.name, 'pid': os.getpid(),
+                         'updatedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                         'error': type(error).__name__}
+                temporary = state / 'status.tmp'
+                temporary.write_text(json.dumps(value))
+                temporary.replace(state / 'status.json')
+                logging.error(json.dumps(value))
+                stopping.wait(30)
+
+
+def run_fleet(root, stopping):
+    prepare_state(root)
+    states = sorted(path for path in root.iterdir()
+                    if path.is_dir() and re.fullmatch(r'tiktok-[0-9]{2}', path.name))
+    if not states:
+        raise ValueError('No enrolled accounts')
+    with (root / 'fleet.lock').open('a') as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        startup_lock = threading.Lock()
+        threads = [threading.Thread(target=account_loop, args=(state, stopping, startup_lock),
+                                    name=state.name) for state in states]
+        for thread in threads:
+            thread.start()
+        try:
+            while not stopping.is_set():
+                value = {'pid': os.getpid(), 'accounts': [thread.name for thread in threads if thread.is_alive()],
+                         'updatedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                         'maxRssKiB': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
+                temporary = root / 'status.tmp'
+                temporary.write_text(json.dumps(value))
+                temporary.replace(root / 'status.json')
+                if not any(thread.is_alive() for thread in threads):
+                    raise RuntimeError('All account workers exited')
+                stopping.wait(6)
+        finally:
+            stopping.set()
+            for thread in threads:
+                thread.join()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--state', required=True, type=Path)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument('--state', type=Path)
+    target.add_argument('--fleet', type=Path)
     parser.add_argument('--scan', action='store_true')
     args = parser.parse_args()
+    if args.fleet and args.scan:
+        parser.error('--scan requires one --state')
     os.umask(0o077)
-    args.state.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if args.state.stat().st_mode & 0o077:
-        raise ValueError('State directory must be private')
+    root = args.fleet or args.state
+    prepare_state(root)
     stopping = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     signal.signal(signal.SIGINT, lambda *_: stopping.set())
-    handler = RotatingFileHandler(args.state / 'worker.log', maxBytes=2_000_000, backupCount=2)
+    handler = RotatingFileHandler(root / 'worker.log', maxBytes=2_000_000, backupCount=2)
     logging.basicConfig(level=logging.INFO, handlers=[handler])
-    with (args.state / 'worker.lock').open('a') as held:
+    if args.fleet:
+        run_fleet(root, stopping)
+        return
+    with (root / 'worker.lock').open('a') as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        packet = load_config(args.state)
-        worker = Worker(packet, args.state, stopping)
-        (args.state / 'worker.pid').write_text(str(os.getpid()))
-        try:
-            if args.scan:
-                print(json.dumps(worker.catalog()), flush=True)
-                return
-            control = Control(packet['server'], packet['workerKey'])
-            pending = args.state / 'pending-result.json'
-            failures = 0
-            while not stopping.is_set():
-                try:
-                    if pending.exists():
-                        if control.post('update', json.loads(pending.read_text())).get('ok') is not True:
-                            raise OSError('Result storage is not acknowledged')
-                        pending.unlink()
-                    reply = control.post('poll', {'account': packet['account'], 'scanCapable': True, 'apiRoute': 'phone'})
-                    if job := reply.get('job'):
-                        process(control, job, worker.run, None, pending)
-                        worker.status('job-reported', run=job['id'])
-                    elif scan := reply.get('scan'):
-                        result = {'account': packet['account'], 'id': scan['id'], 'events': [], 'apiRoute': 'phone'}
-                        try:
-                            result.update(worker.catalog())
-                        except (OSError, ValueError, FarmError) as error:
-                            result['error'] = 'session-required' if getattr(error, 'phase', '') == 'session-required' else 'scan-failed'
-                            worker.status(result['error'])
-                        control.post('catalog', result)
-                    else:
-                        worker.status('idle')
-                    failures = 0
-                    stopping.wait(6)
-                except (OSError, ValueError, LeaseLost) as error:
-                    failures += 1
-                    worker.status('storage-pending' if pending.exists() else 'control-unavailable', error=type(error).__name__)
-                    stopping.wait(min(60, 5*failures))
-        finally:
-            worker.status('stopped')
+        worker = Worker(load_config(root), root, stopping)
+        (root / 'worker.pid').write_text(str(os.getpid()))
+        if args.scan:
+            print(json.dumps(worker.catalog()), flush=True)
+            return
+        run_loop(worker, stopping)
 
 
 if __name__ == '__main__':
