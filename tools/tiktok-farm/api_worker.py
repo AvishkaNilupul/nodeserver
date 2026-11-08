@@ -114,6 +114,14 @@ class Worker:
         self.packet, self.state, self.stopping = packet, state, stopping
         self.api = ApiClient()
         self.seed = unpack(packet['seed'])
+        history = state / 'known-rooms.json'
+        self.known_rooms = json.loads(history.read_text()) if history.exists() else {}
+        if (not isinstance(self.known_rooms, dict) or len(self.known_rooms) > 100
+                or any(not re.fullmatch(r'[0-9]{1,22}', campaign)
+                       or not isinstance(room, dict)
+                       or any(not re.fullmatch(r'[0-9]{1,22}', room.get(key) or '') for key in ('room', 'anchor'))
+                       for campaign, room in self.known_rooms.items())):
+            raise ValueError('Invalid known-room history')
         self.handshakes = []
         for source in packet['wire']:
             row = {**source, 'frames': [base64.b64decode(value, validate=True) for value in source['frames']]}
@@ -134,7 +142,52 @@ class Worker:
 
     def catalog(self):
         self.status('scanning')
-        return self.api.catalog_from_entry(self.seed, include_upcoming=True)
+        deadline = time.monotonic() + 170
+        result = self.api.catalog_from_entry(self.seed, include_upcoming=True, deadline=deadline)
+        seen = {(event['campaign'], event['task']) for event in result['events']}
+        # Completed countdowns can remain claimable after the final live room ends.
+        # Historical rooms are used only to recover finished tasks, never to start watches.
+        for campaign in result['campaigns']:
+            if time.monotonic() >= deadline:
+                result['partial'] = True
+                break
+            known = self.known_rooms.get(campaign['campaign'])
+            if not known:
+                continue
+            read = self.api.get_from_entry(self.seed, DETAIL, drops_id=campaign['campaign'],
+                                            room_id=known['room'], anchor_id=known['anchor'], user_type=0)
+            response = self.api.mac(CurlSession(), read, include_payload=True, json_format=True)
+            if response.get('business') != 0:
+                result['partial'] = True
+                continue
+            data = response['_payload'].get('data') or {}
+            if data.get('can_join') is False:
+                continue
+            for task in data.get('tasks') or (data.get('detail') or {}).get('tasks') or []:
+                task_id = str(task.get('id') or '')
+                duration = task.get('view_duration')
+                if (task.get('type') != 5 or task.get('user_status') != 3
+                        or (task.get('gift') or {}).get('need_auth')
+                        or type(duration) is not int or not 1 <= duration <= 3600
+                        or not re.fullmatch(r'[0-9]{1,22}', task_id)
+                        or (campaign['campaign'], task_id) in seen):
+                    continue
+                result['events'].append({'campaign': campaign['campaign'], 'name': campaign['name'],
+                                         **known, 'task': task_id, 'duration': duration,
+                                         'remaining': 0, 'endsAt': campaign.get('endsAt')})
+                seen.add((campaign['campaign'], task_id))
+                campaign['status'] = 'eligible'
+        result['partial'] |= len(result['events']) > 100
+        result['events'] = sorted(result['events'], key=lambda event: event['remaining'])[:100]
+        return result
+
+    def remember(self, job):
+        self.known_rooms.pop(job['campaign'], None)
+        self.known_rooms[job['campaign']] = {'room': job['room'], 'anchor': job['anchor']}
+        self.known_rooms = dict(list(self.known_rooms.items())[-100:])
+        temporary = self.state / 'known-rooms.tmp'
+        temporary.write_text(json.dumps(self.known_rooms))
+        temporary.replace(self.state / 'known-rooms.json')
 
     def run(self, _device, job, update, preserve):
         if not all(re.fullmatch(r'[0-9]{1,22}', job.get(key) or '')
@@ -149,7 +202,8 @@ class Worker:
         duration = task.get('view_duration')
         if type(duration) is not int or not 1 <= duration <= 3600 or task.get('user_status') not in (1, 3):
             raise FarmError('ineligible')
-        seconds = int(task.get('countdown_passed') or 0)
+        self.remember(job)
+        seconds = min(duration, max(0, int(task.get('countdown_passed') or 0)))
         update('watching', seconds)
         self.status('watching', run=job['id'], seconds=seconds, duration=duration, initialSeconds=seconds)
         socket = None
@@ -169,7 +223,7 @@ class Worker:
                     if self.stopping.wait(12):
                         raise FarmError('worker-error')
                     task = self.api.read_task(client, poll, job)
-                    current = int(task.get('countdown_passed') or 0)
+                    current = min(duration, max(0, int(task.get('countdown_passed') or 0)))
                     if current > seconds:
                         changed = time.monotonic()
                     seconds = current

@@ -54,6 +54,7 @@ class ApiWorkerTests(unittest.TestCase):
         worker.state, worker.stopping = Path(state), threading.Event()
         worker.packet = {'seedRoom': '1111111111111111111', 'seedAnchor': '2222222222222222222'}
         worker.seed, worker.handshakes = self.read, []
+        worker.known_rooms = {}
         worker.status = Mock()
         worker.api = Mock()
         worker.api.get_from_entry.return_value = self.read
@@ -96,6 +97,32 @@ class ApiWorkerTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 worker.run(None, self.job, update, Mock())
             worker.api.mac.assert_not_called()
+
+    def test_ended_room_recovers_ready_claims_but_never_starts_an_unfinished_watch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = self.worker(directory, {'business': 0, '_payload': {'data': {'detail': {'tasks': [
+                {'id': self.job['task'], 'type': 5, 'user_status': 3, 'view_duration': 300},
+                {'id': '5555555555555555555', 'type': 5, 'user_status': 1, 'view_duration': 900},
+            ]}}}})
+            worker.remember(self.job)
+            worker.api.catalog_from_entry.return_value = {'events': [], 'campaigns': [
+                {'campaign': self.job['campaign'], 'name': 'Fixture', 'status': 'no-live-room'}],
+                'partial': False, 'upcoming': []}
+            result = worker.catalog()
+            self.assertEqual(len(result['events']), 1)
+            self.assertEqual(result['events'][0]['task'], self.job['task'])
+            self.assertEqual(result['events'][0]['remaining'], 0)
+            self.assertEqual(result['campaigns'][0]['status'], 'eligible')
+
+    def test_historical_claim_recovery_respects_current_eligibility(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = self.worker(directory, {'business': 0, '_payload': {'data': {'can_join': False,
+                'tasks': [{'id': self.job['task'], 'type': 5, 'user_status': 3, 'view_duration': 60}]}}})
+            worker.remember(self.job)
+            worker.api.catalog_from_entry.return_value = {'events': [], 'campaigns': [
+                {'campaign': self.job['campaign'], 'name': 'Fixture', 'status': 'no-live-room'}],
+                'partial': False, 'upcoming': []}
+            self.assertEqual(worker.catalog()['events'], [])
 
 
 if __name__ == '__main__':

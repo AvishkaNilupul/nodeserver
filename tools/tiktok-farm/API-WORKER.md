@@ -9,6 +9,8 @@ playback. Initial session enrollment and expired-session renewal remain external
 - Reuse the existing dashboard worker authentication, automatic discovery schedule,
   exact job leases, duplicate guards and encrypted code store.
 - Only supported type-5 countdown rewards, up to one hour; skip share/link/gift tasks.
+- Remember verified campaign rooms so already-finished rewards can still be claimed
+  after the live-room feed empties. Historical rooms never start unfinished watches.
 - Confirm the requested room in the native entry response before watching.
 - Renew the job lease before claiming. Send a claim once. Uncertain claims enter
   review; a returned code is fsynced locally before delivery and recovered before
