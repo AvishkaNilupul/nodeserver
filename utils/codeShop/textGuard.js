@@ -21,6 +21,7 @@ const DEFAULT_SOURCE_WORDS = Object.freeze([
   "kakao",
   "chzzk",
   "naver",
+  "tik\\s*tok",
 ]);
 
 const LIMITS = Object.freeze({ title: 160, description: 2000, coverBullets: 4, label: 80 });
@@ -128,6 +129,7 @@ function checkBuyerText(texts = {}, { sourceWords } = {}) {
     ...labels.map((l, i) => [`label ${i + 1}`, l]),
   ];
   for (const [name, value] of fields) {
+    if (/tik\s*tok/i.test(value)) problems.push(`${name} names the reward source`);
     const word = findSourceWord(value, re);
     if (word) problems.push(`${name} names where the codes come from: "${word}"`);
     const bad = firstNonAscii(value);

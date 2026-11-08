@@ -6,6 +6,7 @@
   const root = '/api/tiktok-farm';
   let data = { accounts: [], runs: [], codes: [], hosts: [] }, skew = 0, refreshing, lastGood = 0, pickerSignature = '', accountSignature = '';
   let activeTab = 'overview', inventory = null, inventoryPage = 1, inventoryRequest = 0, inventoryBusy = false, searchTimer, lastInventory = 0;
+  let salesLoading = false, lastSales = 0;
   const choices = new Map(), pending = new Set();
   const now = () => Date.now() + skew;
   const date = (value) => value ? new Date(value).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Not recorded';
@@ -92,6 +93,7 @@
     activeTab = next;
     for (const tab of tabs) { const yes = tab === active; tab.setAttribute('aria-selected', String(yes)); tab.tabIndex = yes ? 0 : -1; document.getElementById(tab.getAttribute('aria-controls')).hidden = !yes; }
     if (next === 'codes') loadInventory();
+    if (next === 'sales') loadSales();
   }
   tabs.forEach((tab, index) => {
     tab.onclick = () => { location.hash = tab.id.slice(4); };
@@ -229,15 +231,51 @@
       const cells = tableRow(box, ['', 'Watch tier', 'Stored', '']); cells[0].append(make('strong', '', titleFor(code)), make('small', '', code.account));
       const ids = make('details'); ids.append(make('summary', '', 'Campaign / task IDs'), make('code', '', code.campaign + ' / ' + code.task)); cells[0].append(ids);
       cells[1].textContent = code.duration ? duration(code.duration) : 'Watch reward'; cells[2].textContent = date(code.updatedAt);
+      if (code.rewardLabel) cells[0].append(make('small', '', code.rewardLabel));
+      cells[2].append(make('small', '', code.useBy ? 'Redeem by ' + date(code.useBy) : 'Redemption deadline unverified'));
+      if (code.shop) cells[0].append(badge(code.shop.state.replaceAll('_', ' '), code.shop.state === 'review' ? 'warning' : 'neutral'));
       const buttons = make('div', 'actions'), reveal = make('button', '', 'Reveal'), copy = make('button', '', 'Copy'); copy.hidden = true; let clear = null, secret;
       reveal.onclick = async () => {
         if (clear !== null) { clear = null; secret?.remove(); reveal.textContent = 'Reveal'; copy.hidden = true; return; }
+        if (!confirm('Revealing a code holds it from automatic sale. Continue?')) return;
         reveal.disabled = true;
         try { const result = await api('/codes/' + code._id); if (!reveal.isConnected || activeTab !== 'codes' || document.hidden) return; clear = result.code; secret = make('code', 'secret-value', clear); cells[3].prepend(secret); reveal.textContent = 'Hide'; copy.hidden = false; } catch (failure) { error(failure.message); } finally { reveal.disabled = false; }
       };
       copy.onclick = async () => { if (!clear) return; try { await navigator.clipboard.writeText(clear); report('Code copied.'); } catch { error('Clipboard access was unavailable. Select the revealed code to copy it.'); } };
       buttons.append(reveal, copy); cells[3].append(buttons);
+      if (['in_unit', 'sold', 'dead'].includes(code.shop?.state)) { reveal.disabled = true; reveal.title = 'Manage allocated or sold codes in Code shop'; }
     }
+  }
+  async function loadSales() {
+    if (salesLoading) return;
+    salesLoading = true;
+    try {
+      const sales = await api('/sales'); lastSales = Date.now();
+      set('#salesMode', sales.enabled ? (sales.autoPublish ? 'Automatic listing enabled' : 'Automatic drafts enabled; publishing paused') : 'New code imports paused');
+      set('#salesExpiry', 'Verified redemption deadlines only. Stock is withdrawn ' + sales.leadHours + ' hours before expiry. New games and uncertain rewards wait for review. The code shop checks every five minutes.');
+      const counts = $('#salesCounts'); counts.replaceChildren();
+      for (const [key, label] of [['in_stock', 'Ready codes'], ['in_unit', 'Allocated codes'], ['sold', 'Sold codes'], ['held', 'Held codes'], ['expired', 'Expired codes']]) {
+        const card = make('div'); card.append(make('strong', '', sales.counts[key] || 0), make('small', '', label)); counts.append(card);
+      }
+      const products = $('#salesProducts'); products.replaceChildren();
+      if (!sales.products.length) empty(products, 'No products yet', 'Verified stock is grouped by reward and event. Ready bundles appear here automatically.');
+      for (const product of sales.products) {
+        const card = make('article', 'account-card'); card.append(make('h3', '', product.texts?.title || product.name), badge(product.status));
+        card.append(make('p', '', 'Redeem by ' + date(product.useBy)));
+        for (const listing of product.listings || []) {
+          const row = make('p', '', listing.marketplace + ' · ' + listing.status + (listing.price != null ? ' · $' + listing.price : ''));
+          if (typeof listing.url === 'string' && /^https:\/\//.test(listing.url)) { const link = make('a', '', 'View listing'); link.href = listing.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; row.append(' · ', link); }
+          card.append(row);
+        }
+        if (product.publish?.lastError) card.append(make('p', 'footnote', product.publish.lastError));
+        products.append(card);
+      }
+      const review = $('#salesReview'); review.replaceChildren();
+      const held = sales.inventory.filter((r) => ['review', 'held'].includes(r.shop?.state));
+      if (!held.length) empty(review, 'No review holds', 'Verified, unused codes can enter the automatic listing flow.');
+      for (const row of held) { const item = make('article', 'sales-review-item'); item.append(make('strong', '', row.account + ' · ' + (row.rewardLabel || row.eventName || row.campaign)), make('small', '', row.shop.reason)); review.append(item); }
+    } catch (failure) { error(failure.message); }
+    finally { salesLoading = false; }
   }
   async function loadInventory() {
     const request = ++inventoryRequest; inventoryBusy = true; $('#previousPage').disabled = $('#nextPage').disabled = true;
@@ -271,6 +309,7 @@
         renderOverview(); renderAccounts(); renderEvents(); renderRuns(); controls();
         set('#lastRefresh', 'Updated ' + new Date().toLocaleTimeString());
         if (activeTab === 'codes' && !inventoryBusy && (codeChanged || Date.now() - lastInventory > 30000)) await loadInventory();
+        if (activeTab === 'sales' && Date.now() - lastSales > 30000) await loadSales();
       } catch (failure) {
         error(failure.message); $('#connection').className = 'badge warning'; set('#connection', 'Updates interrupted');
         set('#lastRefresh', lastGood ? 'Last successful update ' + new Date(lastGood).toLocaleTimeString() : 'No server response yet');

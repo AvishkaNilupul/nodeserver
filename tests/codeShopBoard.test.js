@@ -316,7 +316,7 @@ test("products: live ones plus retired ones that sold; listings with links and s
   assert.deepEqual(p1.listings.map((l) => [l.market, l.externalId, l.state]), [["eldorado", "E-1", "live"], ["playerauctions", "PA-1", "live"]],
     "a market with a live row shows only its live rows");
   assert.match(p1.listings[0].url, /^https:\/\/www\.eldorado\.test\//);
-  const soopOnly = (units, usd) => ({ soop: { units, usd }, chzzk: { units: 0, usd: 0 } });
+  const soopOnly = (units, usd) => ({ soop: { units, usd }, chzzk: { units: 0, usd: 0 }, tiktok: { units: 0, usd: 0 } });
   assert.deepEqual(p1.sold, {
     units: 2, codes: 2, usd: 6, lastAt: iso(NOW - 2 * HOUR), bySource: soopOnly(2, 6),
     byMarket: {
@@ -337,9 +337,9 @@ test("products: live ones plus retired ones that sold; listings with links and s
   const p3 = b.products.find((p) => p.id === String(ids.P3));
   assert.equal(p3.rewards[0].image, "https://img.test/spray.png", "the ledger's newest picture wins over an old saved one");
   assert.deepEqual(p6.sold.byMarket, {
-    playerauctions: { units: 1, usd: 3, lastAt: iso(NOW - HOUR), bySource: { soop: { units: 1, usd: 1.5 }, chzzk: { units: 1, usd: 1.5 } } },
+    playerauctions: { units: 1, usd: 3, lastAt: iso(NOW - HOUR), bySource: { soop: { units: 1, usd: 1.5 }, chzzk: { units: 1, usd: 1.5 }, tiktok: { units: 0, usd: 0 } } },
   }, "one bundle of two codes: it counts as a bundle for each farm, each with its share of the money");
-  assert.deepEqual(p6.sold.bySource, { soop: { units: 1, usd: 1.5 }, chzzk: { units: 1, usd: 1.5 } });
+  assert.deepEqual(p6.sold.bySource, { soop: { units: 1, usd: 1.5 }, chzzk: { units: 1, usd: 1.5 }, tiktok: { units: 0, usd: 0 } });
   const p3r = b.products.find((p) => p.id === String(ids.P3));
   assert.equal(p3r.status, "retired");
   assert.deepEqual(p3r.listings.map((l) => l.state), ["down"]);
@@ -385,7 +385,7 @@ test("sales: newest first, one row per bundle, with the farm, the dead count and
     { product: String(ids.P6), productName: "OW mix", gameNo: "12", market: "playerauctions", usd: 3, codes: 2, dead: 0, sources: ["soop", "chzzk"] },
   );
   assert.equal(mix.soldAt, iso(NOW - HOUR));
-  assert.deepEqual(mix.bySource, { soop: { usd: 1.5 }, chzzk: { usd: 1.5 } }, "each farm's share of the bundle");
+  assert.deepEqual(mix.bySource, { soop: { usd: 1.5 }, chzzk: { usd: 1.5 }, tiktok: { usd: 0 } }, "each farm's share of the bundle");
   assert.equal(mix.orderId, "order-playerauctions-" + (NOW - HOUR));
   assert.deepEqual([dead.dead, dead.sources], [1, ["soop"]]);
   assert.deepEqual(chz.sources, ["chzzk"]);
@@ -402,7 +402,7 @@ test("daily: bundles per day in the viewer's zone, by market and farm; an unknow
   assert.equal(utc.daily.length, 14);
   assert.equal(utc.daily[0].day, "2026-10-12");
   assert.equal(utc.daily[13].day, "2026-10-25");
-  const farms = (su, sd, cu, cd) => ({ soop: { units: su, usd: sd }, chzzk: { units: cu, usd: cd } });
+  const farms = (su, sd, cu, cd) => ({ soop: { units: su, usd: sd }, chzzk: { units: cu, usd: cd }, tiktok: { units: 0, usd: 0 } });
   assert.deepEqual(utc.daily[13].rows, [
     { market: "eldorado", units: 1, usd: 1, ...farms(1, 1, 0, 0) },
     { market: "playerauctions", units: 1, usd: 3, ...farms(1, 1.5, 1, 1.5) },
@@ -574,7 +574,7 @@ test("an empty shop answers an empty board, not an error", async () => {
   assert.equal(b.daily.length, 3);
   assert.ok(b.daily.every((d) => d.rows.length === 0));
   assert.deepEqual(b.totals.listings, { live: 0, paused: 0, down: 0, error: 0 });
-  assert.deepEqual(b.sources.map((s) => s.logins), [0, 0]);
+  assert.deepEqual(b.sources.map((s) => s.logins), [0, 0, 0]);
 });
 
 test("helpers: names, campaign refs, listing states, image URLs", () => {

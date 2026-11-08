@@ -27,6 +27,7 @@ const MARKETS = [
 const SOURCES = [
   { id: "soop", name: "SOOP" },
   { id: "chzzk", name: "CHZZK" },
+  { id: "tiktok", name: "TikTok" },
 ];
 const CHZZK_PREFIX = "chzzk:";
 const PRODUCT_STATUS_RANK = { active: 0, paused: 1, draft: 2 };
@@ -80,8 +81,8 @@ function modelOf(deps, name) {
 }
 
 const isChzzkKey = (key) => /:chzzk-/.test(str(key));
-const sourceOfLogin = (loginId) => (str(loginId).startsWith(CHZZK_PREFIX) ? "chzzk" : "soop");
-const sourceOfGroup = (groupKey) => (isChzzkKey(groupKey) ? "chzzk" : "soop");
+const sourceOfLogin = (loginId) => (str(loginId).startsWith("tiktok:") ? "tiktok" : str(loginId).startsWith(CHZZK_PREFIX) ? "chzzk" : "soop");
+const sourceOfGroup = (groupKey) => (/:tiktok-/.test(str(groupKey)) ? "tiktok" : isChzzkKey(groupKey) ? "chzzk" : "soop");
 
 // "12:13787" -> { source: "soop", dropsIdx: "13787" }; "12:chzzk-1954" -> { source: "chzzk", campaignNo: 1954 }.
 function campaignRef(groupKey) {
@@ -154,15 +155,15 @@ function roundMoney(m) {
   return m;
 }
 const emptyListings = () => ({ live: 0, paused: 0, down: 0, error: 0 });
-const emptyFarms = () => ({ soop: { units: 0, usd: 0 }, chzzk: { units: 0, usd: 0 } });
+const emptyFarms = () => Object.fromEntries(SOURCES.map(({ id }) => [id, { units: 0, usd: 0 }]));
 function addFarms(into, f) {
-  for (const k of ["soop", "chzzk"]) {
+  for (const { id: k } of SOURCES) {
     into[k].units += (f && f[k] && f[k].units) || 0;
     into[k].usd += Number(f && f[k] && f[k].usd) || 0;
   }
   return into;
 }
-const roundFarms = (f) => ({ soop: { units: f.soop.units, usd: cents(f.soop.usd) }, chzzk: { units: f.chzzk.units, usd: cents(f.chzzk.usd) } });
+const roundFarms = (f) => Object.fromEntries(SOURCES.map(({ id }) => [id, { units: f[id].units, usd: cents(f[id].usd) }]));
 
 // A listing row's place on the board: live, paused, error or down.
 function listingState(l) {
@@ -207,10 +208,13 @@ function timeZoneOf(v) {
 const CHZZK_FLAG = { $cond: [{ $eq: [{ $substrCP: [{ $ifNull: ["$loginId", ""] }, 0, CHZZK_PREFIX.length] }, CHZZK_PREFIX] }, 1, 0] };
 // Per-bundle fields (a $group by unit over rows carrying `chzzk`): each farm's
 // share of the money, and whether the bundle holds that farm's codes at all.
+const TIKTOK_FLAG = { $cond: [{ $eq: [{ $substrCP: [{ $ifNull: ["$loginId", ""] }, 0, 7] }, "tiktok:"] }, 1, 0] };
 const PER_FARM = {
-  soopUsd: { $sum: { $cond: [{ $eq: ["$chzzk", 1] }, 0, "$saleUsd"] } },
+  soopUsd: { $sum: { $cond: [{ $eq: [{ $add: ["$chzzk", "$tiktok"] }, 0] }, "$saleUsd", 0] } },
+  tiktokUsd: { $sum: { $cond: [{ $eq: ["$tiktok", 1] }, "$saleUsd", 0] } },
+  hasTiktok: { $max: "$tiktok" },
   chzzkUsd: { $sum: { $cond: [{ $eq: ["$chzzk", 1] }, "$saleUsd", 0] } },
-  hasSoop: { $max: { $subtract: [1, "$chzzk"] } },
+  hasSoop: { $max: { $subtract: [1, { $add: ["$chzzk", "$tiktok"] }] } },
   hasChzzk: { $max: "$chzzk" },
 };
 // A row's money and bundle count, all farms and per farm.
@@ -218,6 +222,7 @@ function farmSplit(r) {
   return {
     soop: { units: r.soopUnits || 0, usd: cents(r.soopUsd) },
     chzzk: { units: r.chzzkUnits || 0, usd: cents(r.chzzkUsd) },
+    tiktok: { units: r.tiktokUnits || 0, usd: cents(r.tiktokUsd) },
   };
 }
 
@@ -363,7 +368,7 @@ function createBoard(deps = {}) {
     const usdSince = (days) => ({ $sum: { $cond: [{ $gte: ["$at", since(days)] }, "$usd", 0] } });
     return M("CodeStock").aggregate([
       { $match: { state: { $in: SOLD_STATES }, unit: { $ne: null } } },
-      { $project: { product: 1, market: 1, unit: 1, saleUsd: 1, soldAt: 1, chzzk: CHZZK_FLAG } },
+      { $project: { product: 1, market: 1, unit: 1, saleUsd: 1, soldAt: 1, tiktok: TIKTOK_FLAG, chzzk: CHZZK_FLAG } },
       // One row per bundle first (its product and market as the feed reads
       // them), so a bundle whose rows disagree is still counted once.
       {
@@ -386,6 +391,8 @@ function createBoard(deps = {}) {
           lastAt: { $max: "$at" },
           soopUnits: { $sum: "$hasSoop" },
           soopUsd: { $sum: "$soopUsd" },
+          tiktokUnits: { $sum: "$hasTiktok" },
+          tiktokUsd: { $sum: "$tiktokUsd" },
           chzzkUnits: { $sum: "$hasChzzk" },
           chzzkUsd: { $sum: "$chzzkUsd" },
           units1: unitsSince(1),
@@ -414,7 +421,7 @@ function createBoard(deps = {}) {
           saleUsd: 1,
           soldAt: 1,
           state: 1,
-          chzzk: CHZZK_FLAG,
+          tiktok: TIKTOK_FLAG, chzzk: CHZZK_FLAG,
         },
       },
       {
@@ -448,7 +455,7 @@ function createBoard(deps = {}) {
             market: 1,
             saleUsd: 1,
             soldAt: 1,
-            chzzk: CHZZK_FLAG,
+            tiktok: TIKTOK_FLAG, chzzk: CHZZK_FLAG,
           },
         },
         {
@@ -470,7 +477,9 @@ function createBoard(deps = {}) {
             usd: { $sum: "$usd" },
             soopUnits: { $sum: "$hasSoop" },
             soopUsd: { $sum: "$soopUsd" },
-            chzzkUnits: { $sum: "$hasChzzk" },
+            tiktokUnits: { $sum: "$hasTiktok" },
+          tiktokUsd: { $sum: "$tiktokUsd" },
+          chzzkUnits: { $sum: "$hasChzzk" },
             chzzkUsd: { $sum: "$chzzkUsd" },
           },
         },
@@ -1034,6 +1043,7 @@ function createBoard(deps = {}) {
       const srcs = [];
       if (r.hasSoop) srcs.push("soop");
       if (r.hasChzzk) srcs.push("chzzk");
+      if (r.hasTiktok) srcs.push("tiktok");
       return {
         id: String(r._id),
         product: pid || null,
@@ -1046,7 +1056,7 @@ function createBoard(deps = {}) {
         codes: r.codes || 0,
         dead: r.dead || 0,
         sources: srcs,
-        bySource: { soop: { usd: cents(r.soopUsd) }, chzzk: { usd: cents(r.chzzkUsd) } },
+        bySource: { soop: { usd: cents(r.soopUsd) }, chzzk: { usd: cents(r.chzzkUsd) }, tiktok: { usd: cents(r.tiktokUsd) } },
       };
     });
 

@@ -82,9 +82,19 @@ async function eventStarts(models, groupKeys) {
   }
 
   const missing = keys.filter((k) => !startOf.has(k));
-  if (missing.length && CodeStock) {
+  const tik = keys.filter((k) => /:tiktok-/.test(k));
+  const TikTokFarmRun = models?.TikTokFarmRun;
+  if (tik.length && TikTokFarmRun) {
+    const runs = await leanOf(TikTokFarmRun.find({ campaign: { $in: tik.map((k) => k.split(":tiktok-")[1]) },
+      "reward.verifiedAt": { $exists: true } }).select("campaign reward.campaignStartAt"));
+    for (const k of tik) {
+      const values = (runs || []).filter((r) => r.campaign === k.split(":tiktok-")[1]).map((r) => toMs(r.reward?.campaignStartAt)).filter((v) => v !== null);
+      if (values.length) startOf.set(k, Math.min(...values));
+    }
+  }
+  if (missing.filter((k) => !startOf.has(k)).length && CodeStock) {
     const rows = await CodeStock.aggregate([
-      { $match: { groupKey: { $in: missing }, earnedAt: { $ne: null } } },
+      { $match: { groupKey: { $in: missing.filter((k) => !startOf.has(k)) }, earnedAt: { $ne: null } } },
       { $group: { _id: "$groupKey", at: { $min: "$earnedAt" } } },
     ]);
     for (const r of rows || []) {

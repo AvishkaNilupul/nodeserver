@@ -61,6 +61,10 @@ const DEFAULTS = deepFreeze({
   expiryLeadHours: 36,
   markets: { eldorado: true, ggsel: false, playerauctions: false },
   games: {
+    "930001": { sell: true, marketGame: "Infinity Nikki", displayName: "Infinity Nikki" },
+    "930002": { sell: true, marketGame: "Happy Clinic", displayName: "Happy Clinic" },
+    "930003": { sell: true, marketGame: "World of Tanks", displayName: "World of Tanks (EU)" },
+    "930004": { sell: true, marketGame: "Wolvesville", displayName: "Wolvesville" },
     // gameNo -> { sell, marketGame, displayName }; unknown games do not sell
     "12": { sell: true, marketGame: "Overwatch", displayName: "Overwatch 2" },
     "200": { sell: true, marketGame: "Delta Force", displayName: "Delta Force" },
@@ -73,10 +77,10 @@ const DEFAULTS = deepFreeze({
     "910005": { sell: false, marketGame: "FC Online", displayName: "FC Online" },
   },
   // Where stored codes are read from. SOOP always; CHZZK can be switched off.
-  sources: { chzzk: true },
+  sources: { chzzk: true, tiktok: false },
   ready: { graceHours: 4, stallHours: 24, earlyListDays: 7 },
   // minUnitsChzzk: CHZZK groups come from one or two logins (07-CHZZK-SOURCE.md).
-  drafts: { minUnits: 3, maxPerGroup: 2, leftovers: true, minUnitsChzzk: 1 },
+  drafts: { minUnits: 3, maxPerGroup: 2, leftovers: true, minUnitsChzzk: 1, minUnitsTiktok: 1 },
   pricing: {
     clearanceSteps: [
       { days: 7, cutPct: 0 },
@@ -94,7 +98,7 @@ const DEFAULTS = deepFreeze({
   playerauctionsGames: ["12"],
   competitorScan: { enabled: true, everyHours: 12 },
   ownEldoradoUserIds: [],
-  sourceWords: ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao", "chzzk", "naver"],
+  sourceWords: ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao", "chzzk", "naver", "tik\\s*tok"],
   claimAlert: { enabled: true, leadHours: 24 },
   digest: { enabled: true, hourUtc: 3, lastSentDay: "" },
   farmPriority: { enabled: false, botIds: [], minHoursBetween: 6, lastChangeAt: null },

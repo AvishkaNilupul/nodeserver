@@ -25,6 +25,11 @@ const schema = new mongoose.Schema({
   seconds: { type: Number, default: 0 },
   code: { type: String, select: false },
   codeHash: { type: String, select: false },
+  reward: mongoose.Schema.Types.Mixed,
+  rewardNextCheckAt: Date,
+  rewardCheckError: String,
+  rewardBlocked: { type: Boolean, default: false },
+  revealedAt: Date,
 }, { timestamps: true });
 
 schema.index({ account: 1, campaign: 1, task: 1 }, { unique: true });

@@ -28,6 +28,7 @@
 const crypto = require("node:crypto");
 const slots = require("./slots");
 const sources = require("./sources");
+const tiktok = require("./tiktok");
 const { PROBLEMS: HELD_PROBLEMS, releasedWhy } = require("./held");
 
 // Bounded writes: one ledger read and at most this many writes per round trip.
@@ -488,8 +489,14 @@ function createIngest(deps = {}) {
     }
     // CHZZK rows arrive with their campaign already resolved ("chzzk-<no>"),
     // so they never match a SOOP campaign or share a SOOP group or slot.
-    const chz = await chzzkRows((await configOf().get()) || {});
+    const sourceConfig = (await configOf().get()) || {};
+    await tiktok.withdrawBlocked(deps);
+    const chz = await chzzkRows(sourceConfig);
     for (const r of chz) rows.push(r);
+    if (sourceConfig.sources?.tiktok === true) {
+      try { rows.push(...await tiktok.rows(deps)); }
+      catch { await note({ level: "warn", kind: "ingest", msg: "TikTok stock was not read; the next cycle will retry" }); }
+    }
     out.scanned = rows.length;
 
     // Oldest first, so of two rows holding the same code the earlier one is
@@ -510,7 +517,7 @@ function createIngest(deps = {}) {
     // so a reward's slot never depends on what else got skipped this run.
     const ordinals = slots.assignOrdinals(rows);
     for (const row of rows) {
-      row.slotKey = slots.slotKeyOf(row.groupKey, row.nameRaw, ordinals.get(`${row.loginId}|${row.itemKey}`));
+      row.slotKey = row.explicitSlotKey || slots.slotKeyOf(row.groupKey, row.nameRaw, ordinals.get(`${row.loginId}|${row.itemKey}`));
     }
 
     const live = [];
@@ -752,7 +759,8 @@ function createIngest(deps = {}) {
     } catch {
       chzReveals = new Map();
     }
-    const lastReveal = chzReveals.size ? new Map([...revealSeen, ...chzReveals]) : revealSeen;
+    const tikReveals = await tiktok.reveals(deps);
+    const lastReveal = new Map([...revealSeen, ...chzReveals, ...tikReveals]);
     if (!lastReveal.size) return 0;
     const CodeStock = model("CodeStock");
     let held = 0;

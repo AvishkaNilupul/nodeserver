@@ -7,6 +7,7 @@ const Run = require("../models/TikTokFarmRun");
 const Schedule = require("../models/TikTokFarmSchedule");
 const { parseRuntime, groupHosts, summaryPipeline } = require("../utils/tiktokFarmDashboard");
 const { mountOnboarding, parseCredential } = require("./tiktokFarmOnboarding");
+const farmShop = require("./tiktokFarmShop");
 
 const SLOT = /^[a-z][a-z0-9-]{0,31}$/;
 const ID = /^\d{1,22}$/;
@@ -112,6 +113,7 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     return latest && ID.test(latest.room) ? latest.room : process.env.TIKTOK_CATALOG_SEED_ROOM || "7704940109955353374";
   }
   const setupOnline = mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online, discoveryRoom });
+  farmShop.mount(router, { Model, authenticate, jsonOnly, wrap, admin, now });
 
   router.get("/admin/tiktok-farm", ...admin, (_req, res) => {
     res.set("Cache-Control", "no-store");
@@ -161,13 +163,13 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     const filter = { state: "completed", code: { $exists: true }, ...(account && { account }) };
     if (q.trim()) {
       const pattern = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      filter.$or = ["account", "eventName", "campaign", "task"].map((field) => ({ [field]: { $regex: pattern, $options: "i" } }));
+      filter.$or = ["account", "eventName", "campaign", "task", "reward.gameName", "reward.items.name"].map((field) => ({ [field]: { $regex: pattern, $options: "i" } }));
     }
     const total = await Model.countDocuments(filter);
     const pages = Math.max(1, Math.ceil(total / 50)), current = Math.min(Number(page), pages);
-    const codes = await Model.find(filter).select("account campaign task eventName duration updatedAt")
+    const codes = await Model.find(filter).select("account campaign task eventName duration updatedAt reward revealedAt rewardBlocked")
       .sort({ updatedAt: -1, _id: -1 }).skip((current - 1) * 50).limit(50).lean();
-    res.json({ codes, total, page: current, pages });
+    res.json({ codes: await farmShop.inventoryStatus(codes, now()), total, page: current, pages });
   }));
   router.post("/api/tiktok-farm/accounts/:account/credentials", ...admin, wrap(async (req, res) => {
     const { account } = req.params;
@@ -353,9 +355,8 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
   }));
   router.get("/api/tiktok-farm/codes/:id", ...admin, wrap(async (req, res) => {
     if (!OBJECT_ID.test(req.params.id)) return res.status(400).json({ error: "Invalid code ID" });
-    const row = await Model.findOne({ _id: req.params.id, state: "completed" }).select("+code").lean();
-    if (!row?.code) return res.status(404).json({ error: "Code not found" });
-    res.json({ code: decrypt(row.code) });
+    const result = await farmShop.reveal(Model, req.params.id, now());
+    res.status(result.status || 200).json(result.error ? { error: result.error } : { code: result.code });
   }));
   router.post("/api/tiktok-farm/worker/poll", authenticate, jsonOnly, wrap(async (req, res) => {
     const { account, scanCapable, jobId, apiRoute } = req.body || {};
@@ -392,6 +393,15 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
         scan.sent = true;
         return res.json({ job: null, scan: { id: scan.id, room: scan.room, fallbackRoom: scan.fallbackRoom } });
       }
+    }
+    if (!run && !jobId && req.body.stockCapable === true && !await Model.exists({ account, active: true })) {
+      const stock = await Model.findOneAndUpdate({ account, state: "completed", code: { $exists: true },
+        $or: [{ rewardNextCheckAt: { $exists: false } }, { rewardNextCheckAt: { $lte: new Date(now()) } }] },
+      { $set: { rewardNextCheckAt: new Date(now() + 3600e3) } },
+      { returnDocument: "after", sort: { rewardNextCheckAt: 1, createdAt: 1 }, timestamps: false })
+        .select("account campaign room task anchor +codeHash").lean();
+      if (stock) return res.json({ job: null, stock: { id: String(stock._id), account, campaign: stock.campaign,
+        room: stock.room, task: stock.task, anchor: stock.anchor || "0", codeHash: stock.codeHash } });
     }
     res.json({ job: run ? { id: String(run._id), account, campaign: run.campaign, room: run.room, task: run.task,
       anchor: run.anchor, automatic: run.automatic === true, lease } : null });

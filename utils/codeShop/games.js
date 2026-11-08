@@ -13,6 +13,37 @@
 // the market's limit, so the least needed line goes last.
 
 const GUIDES = {
+  "930001": {
+    displayName: "Infinity Nikki", marketGame: "Infinity Nikki", accountWord: "Infinity Nikki",
+    howTo: ["1. Open Infinity Nikki and sign in to your own game account.",
+      "2. Open Pear-Pal > Settings > Other > Redeem Code, then enter each code exactly as delivered.",
+      "3. Collect the rewards in your game. Each reward from this event is redeemable once per account."],
+    goodToKnow: ["- These are item codes, not a game account. Do not buy if you already redeemed the same event rewards.",
+      "- Redeem before the stated deadline. No account details are required."],
+    deliveryHelp: "Redeem in Infinity Nikki: Pear-Pal > Settings > Other > Redeem Code. Each event reward works once per game account. Redeem before the listing's deadline.",
+  },
+  "930002": {
+    displayName: "Happy Clinic", marketGame: "Happy Clinic", accountWord: "Happy Clinic",
+    howTo: ["1. Sign in to your Nordcurrent ID at store.nordcurrent.com and connect your Happy Clinic game.",
+      "2. Open store.nordcurrent.com/en/redeem, enter the code and select Redeem.",
+      "3. Collect the reward in Happy Clinic."],
+    goodToKnow: ["- Requires your own Happy Clinic game connected to your Nordcurrent ID.", "- Each code can be used once; do not buy repeat rewards from the same event."],
+    deliveryHelp: "Sign in to your Nordcurrent ID with Happy Clinic connected, then redeem at https://store.nordcurrent.com/en/redeem. Each code works once.",
+  },
+  "930003": {
+    displayName: "World of Tanks (EU)", marketGame: "World of Tanks", accountWord: "World of Tanks EU",
+    howTo: ["1. Requires a World of Tanks PC account on the EU server. Not for Blitz, Console or other regions.",
+      "2. Sign in at worldoftanks.eu, click your account name > Activate Wargaming Code.",
+      "3. Enter each code exactly as delivered, redeem it, then check your game."],
+    goodToKnow: ["- One of each event reward per game account. Do not buy if already redeemed.", "- Redeem before the stated deadline."],
+    deliveryHelp: "World of Tanks PC EU only, not Blitz/Console. Sign in at https://worldoftanks.eu > account name > Activate Wargaming Code. Each event reward once per account.",
+  },
+  "930004": {
+    displayName: "Wolvesville", marketGame: "Wolvesville", accountWord: "Wolvesville",
+    howTo: ["1. Open vouchers.wolvesville.com.", "2. Enter the delivered code and your exact in-game username, then redeem."],
+    goodToKnow: ["- Each code can be used once. Do not buy the same event reward again for the same game account."],
+    deliveryHelp: "Redeem at https://vouchers.wolvesville.com using your in-game username. Each code works once.",
+  },
   "12": {
     displayName: "Overwatch 2",
     marketGame: "Overwatch",

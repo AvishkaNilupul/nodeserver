@@ -184,7 +184,7 @@ test("one problem per field even when a field holds several source words", () =>
 test("the default word list is the contract's list", () => {
   assert.deepEqual(
     [...DEFAULT_SOURCE_WORDS],
-    ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao", "chzzk", "naver"],
+    ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao", "chzzk", "naver", "tik\\s*tok"],
   );
   assert.ok(Object.isFrozen(DEFAULT_SOURCE_WORDS));
 });

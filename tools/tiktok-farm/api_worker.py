@@ -22,6 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from api_client import ApiClient, CurlSession, FarmError, DETAIL, POLL, ENTER, CLAIM, public_query
 from api_control import Control, LeaseLost, process
 from native_socket import NativeSocketProbe, proto_fields, frame_summary
+from reward_metadata import read as read_reward_metadata
 
 
 PROCESS_STARTED = time.monotonic()
@@ -290,7 +291,7 @@ def run_loop(worker, stopping):
                     if control.post('update', json.loads(pending.read_text())).get('ok') is not True:
                         raise OSError('Result storage is not acknowledged')
                     pending.unlink()
-                reply = control.post('poll', {'account': packet['account'], 'scanCapable': True, 'apiRoute': 'phone'})
+                reply = control.post('poll', {'account': packet['account'], 'scanCapable': True, 'stockCapable': True, 'apiRoute': 'phone'})
                 if job := reply.get('job'):
                     if job.get('account') != packet['account']:
                         raise ValueError('Account mismatch')
@@ -304,6 +305,16 @@ def run_loop(worker, stopping):
                         result['error'] = 'session-required' if getattr(error, 'phase', '') == 'session-required' else 'scan-failed'
                         worker.status(result['error'])
                     control.post('catalog', result)
+                elif stock := reply.get('stock'):
+                    if stock.get('account') != packet['account']:
+                        raise ValueError('Account mismatch')
+                    payload = {'id': stock['id'], 'account': packet['account'], 'codeHash': stock['codeHash']}
+                    try:
+                        payload['reward'] = read_reward_metadata(worker.api, worker.seed, stock)
+                    except (OSError, ValueError, FarmError):
+                        payload['error'] = 'Reward details could not be verified'
+                    control.post('stock', payload)
+                    worker.status('idle')
                 else:
                     worker.status('idle')
                 failures = 0

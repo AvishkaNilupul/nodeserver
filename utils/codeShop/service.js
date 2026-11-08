@@ -120,6 +120,7 @@ const MODEL_NAMES = [
   "ChzzkReward",
   "ChzzkAccount",
   "ChzzkCampaign",
+  "TikTokFarmRun",
   "AccountOffer",
   "SuppliedAccount",
   "MarketplaceListing",
@@ -485,6 +486,7 @@ function createService(overrides = {}) {
     const chzzkMin = Number(cfg.drafts && cfg.drafts.minUnitsChzzk);
     const needChzzk = Number.isFinite(chzzkMin) && chzzkMin >= 0 ? chzzkMin : need;
     const needFor = (p) =>
+      (Array.isArray(p.groupKeys) ? p.groupKeys : []).some((k) => /:tiktok-/.test(text(k))) ? cfg.drafts.minUnitsTiktok :
       (Array.isArray(p.groupKeys) ? p.groupKeys : []).some((k) => /:chzzk-/.test(text(k))) ? needChzzk : need;
     const out = { checked: 0, approved: 0, refused: 0, failed: 0, products: [] };
 

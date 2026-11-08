@@ -99,6 +99,7 @@ function isChzzkGroup(groupKey) {
 }
 
 function minUnitsFor(groupKey, d) {
+  if (/:tiktok-/.test(text(groupKey))) return num(d.minUnitsTiktok, DEFAULTS.drafts.minUnitsTiktok);
   return isChzzkGroup(groupKey)
     ? num(d.minUnitsChzzk, DEFAULTS.drafts.minUnitsChzzk)
     : num(d.minUnits, DEFAULTS.drafts.minUnits);
@@ -234,7 +235,7 @@ function createPlanner(deps = {}) {
       if (u !== null && u !== undefined && (useBy === null || u < useBy)) useBy = u;
     }
     const guide = guideFor(g.gameNo, cfg);
-    const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, CodeStock: CodeStock() }, [g.groupKey]);
+    const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, TikTokFarmRun: models.TikTokFarmRun, CodeStock: CodeStock() }, [g.groupKey]);
     return defaultTexts({ slots, guide, useBy: useBy === null ? null : new Date(useBy), now: ctx.now, eventStarts: starts });
   }
 
@@ -284,7 +285,7 @@ function createPlanner(deps = {}) {
     if (!g.free.length) return;
     const metas = [...g.slots.values()].sort(slotOrder);
     if (!metas.some((s) => s.label)) return;
-    const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, CodeStock: CodeStock() }, [g.groupKey]);
+    const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, TikTokFarmRun: models.TikTokFarmRun, CodeStock: CodeStock() }, [g.groupKey]);
     const labels = rewardLabels(metas, { eventStart: Array.isArray(starts) && starts.length ? starts[0] : null });
     for (const s of metas) if (labels.has(s.slotKey)) s.label = labels.get(s.slotKey);
   }
@@ -348,7 +349,7 @@ function createPlanner(deps = {}) {
       }
       const guide = guideFor(g.gameNo, cfg);
       const n = slots.length;
-      const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, CodeStock: CodeStock() }, [g.groupKey]);
+      const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, TikTokFarmRun: models.TikTokFarmRun, CodeStock: CodeStock() }, [g.groupKey]);
       const product = await Product.create({
         name: `${g.gameName || guide.displayName} - ${g.campaignTitle} (${n} code${n === 1 ? "" : "s"})`,
         gameNo: g.gameNo,

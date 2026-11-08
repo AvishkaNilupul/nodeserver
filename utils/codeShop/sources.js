@@ -14,6 +14,7 @@
 // Never a plaintext code here: callers decrypt what encOf() returns.
 
 const { groupKeyOf } = require("./slots");
+const tiktok = require("./tiktok");
 
 const CHZZK_PREFIX = "chzzk:";
 const CODE_TYPES = ["CODE_FIRST_COME", "CODE_LOTTERY"];
@@ -84,8 +85,14 @@ async function encOf(deps, rows) {
   const out = new Map();
   const soop = [];
   const chzzk = [];
+  const tik = [];
   for (const r of rows || []) {
     if (!r) continue;
+    if (text(r.loginId).startsWith(tiktok.PREFIX)) {
+      const identity = tiktok.parse(r.loginId, r.itemKey);
+      if (identity) tik.push(identity);
+      continue;
+    }
     const c = parseChzzk(r.loginId, r.itemKey);
     if (c) chzzk.push(c);
     else if (!isChzzkLogin(r.loginId)) soop.push({ loginId: text(r.loginId), key: text(r.itemKey) });
@@ -104,6 +111,7 @@ async function encOf(deps, rows) {
     );
     for (const x of found || []) out.set(idKey(chzzkLoginId(x.accountId), chzzkItemKey(x.rewardNo)), x.codeEnc);
   }
+  for (const r of await tiktok.encrypted(deps, tik)) out.set(idKey(tiktok.loginId(r.account), tiktok.itemKey(r._id)), r.code);
   return out;
 }
 
@@ -130,6 +138,8 @@ async function soldLoginIds(deps) {
 }
 
 async function isSoldLogin(deps, loginId) {
+  // TikTok farm accounts are never offered as account products.
+  if (text(loginId).startsWith(tiktok.PREFIX)) return false;
   const c = isChzzkLogin(loginId) ? text(loginId).slice(CHZZK_PREFIX.length) : null;
   if (c !== null) {
     const Account = chzzkModel(deps, "ChzzkAccount");
