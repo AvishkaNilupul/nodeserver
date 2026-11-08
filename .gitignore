@@ -88,3 +88,8 @@ tools/pump-paper-bot/runs/
 # PlayerAuctions cross-process refresh lock (see utils/marketplaces.js)
 utils/.playerauctions-refresh.lock
 utils/.playerauctions-refresh.stamp
+
+# TikTok API runtime state belongs only on the private worker host.
+tools/tiktok-farm/state/
+tools/tiktok-farm/session.enc
+tools/tiktok-farm/session.key
