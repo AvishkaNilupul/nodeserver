@@ -82,6 +82,10 @@ class Device:
         raise SetupError("boot-timeout")
 
     def install(self):
+        snapshot = Path(__file__).with_name('ui-snapshot.jar')
+        if snapshot.is_file():
+            self.adb('push', str(snapshot), '/data/local/tmp/nodeserver-ui-snapshot.jar', timeout=30)
+            self.snapshot_ready = True
         path = self.adb("shell", "pm", "path", APP, check=False).stdout.strip()
         if not path.startswith(b"package:"):
             subprocess.run([os.sys.executable, ROOT / "tiktok_mac.py", "install", self.name],

@@ -1,4 +1,5 @@
 import importlib.util
+import itertools
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,18 @@ def node(text,kind='android.widget.Button',**extra):
     return {'text':text,'class':kind,'bounds':'[0,0][100,50]','enabled':'true','clickable':'true',**extra}
 
 class LoginTests(unittest.TestCase):
+    def test_prepared_device_uses_snapshot_reader_and_preserves_real_bounds(self):
+        device=Mock();device.snapshot_ready=True
+        device.adb.return_value.stdout=b'<?xml version="1.0"?><hierarchy><node text="Profile" class="android.widget.Button" package="com.zhiliaoapp.musically" enabled="true" clickable="true" bounds="[576,1196][720,1280]" /></hierarchy>'
+        items=login.nodes(device)
+        self.assertEqual(items[0]['bounds'],'[576,1196][720,1280]')
+        self.assertIn('UiSnapshot',device.adb.call_args.args)
+
+    def test_legacy_device_retains_stock_reader(self):
+        device=Mock();device.snapshot_ready=False;device.adb.return_value.stdout=b'ERROR: could not get idle state.'
+        self.assertEqual(login.nodes(device),[])
+        device.adb.assert_called_once_with('exec-out','uiautomator','dump','/dev/stdout',timeout=13)
+
     def test_new_signup_footer_enters_login_without_submitting_signup(self):
         with tempfile.TemporaryDirectory() as directory:
             device=Mock();device.state=Path(directory)
@@ -76,5 +89,13 @@ class LoginTests(unittest.TestCase):
                 result=login.sign_in(device,{'username':'fixture.account','password':'fixture-pass'},Mock())
             self.assertEqual(result,'@fixture.account');tap.assert_not_called()
             device.adb.assert_called_once_with('shell','input','keyevent','4')
+
+    def test_profile_navigation_retries_when_the_first_tap_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory);profile=node('Profile')
+            screens=[[profile],[profile],[node('Edit profile'),node('@fixture.account')]]
+            with patch.object(login,'nodes',side_effect=screens),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'),patch.object(login.time,'monotonic',side_effect=itertools.count(0,6)):
+                result=login.sign_in(device,{'username':'fixture.account','password':'fixture-pass'},Mock())
+            self.assertEqual(result,'@fixture.account');self.assertEqual(tap.call_count,2)
 
 if __name__=='__main__':unittest.main()

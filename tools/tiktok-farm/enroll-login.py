@@ -13,7 +13,12 @@ class LoginAttention(Exception):
 
 
 def nodes(device):
-    result = device.adb("exec-out", "uiautomator", "dump", "/dev/stdout", timeout=13)
+    if getattr(device, 'snapshot_ready', False) is True:
+        result = device.adb('exec-out', 'env',
+            'CLASSPATH=/data/local/tmp/nodeserver-ui-snapshot.jar:/system/framework/uiautomator.jar',
+            'app_process', '/system/bin', 'UiSnapshot', timeout=13)
+    else:
+        result = device.adb("exec-out", "uiautomator", "dump", "/dev/stdout", timeout=13)
     output = result.stdout
     start, end = output.find(b"<?xml"), output.rfind(b"</hierarchy>")
     if start < 0 or end < start:
@@ -136,7 +141,7 @@ def sign_in(device, credential, status):
     entered_username = False
     entered_password = False
     selected_email = False
-    opened_profile = False
+    next_profile_attempt = 0
     while time.monotonic() - progress < 110:
         if time.monotonic() >= next_check:
             status("signing-in")
@@ -204,8 +209,8 @@ def sign_in(device, credential, status):
                 tap(device, submit)
                 time.sleep(4)
                 continue
-        elif not opened_profile and open_profile(device, items):
-            opened_profile = True
+        elif time.monotonic() >= next_profile_attempt and open_profile(device, items):
+            next_profile_attempt = time.monotonic() + 10
         elif button := find(items, {"log in", "log in to tiktok", "already have an account? log in"}, button=True):
             if not password_sent.exists() and not identity_sent.exists():
                 tap(device, button)
