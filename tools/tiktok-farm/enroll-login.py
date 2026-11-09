@@ -106,6 +106,27 @@ def verified_profile(items, username):
     raise LoginAttention("login-rejected")
 
 
+def open_profile(device, items):
+    if button := find(items, {"profile"}):
+        tap(device, button)
+        return True
+    # This stock app sometimes reports zero bounds for every bottom tab while
+    # rendering them normally. Only use the known five-tab layout in that case.
+    tabs = {label for node in items if node.get("clickable") == "true" and
+            node.get("bounds") == "[0,0][0,0]" for label in labels(node)}
+    if not {"home", "shop", "create", "inbox", "profile"} <= tabs:
+        return False
+    output = device.adb("shell", "wm", "size").stdout.decode("ascii", errors="ignore")
+    sizes = re.findall(r"(?:Physical|Override) size: (\d+)x(\d+)", output)
+    if not sizes:
+        return False
+    width, height = map(int, sizes[-1])
+    if not (320 <= width <= 2560 and height > width):
+        return False
+    device.adb("shell", "input", "tap", str(width * 9 // 10), str(height * 97 // 100))
+    return True
+
+
 def sign_in(device, credential, status):
     username, password = credential["username"], credential["password"]
     progress = time.monotonic()
@@ -132,6 +153,12 @@ def sign_in(device, credential, status):
         login, secret = form_fields(items)
         if challenge(items) and not secret:
             raise LoginAttention("verification-required")
+        # Fresh devices may show optional feed interests after a successful login.
+        # Scope Skip to this screen; never dismiss an unknown verification prompt.
+        if find(items, {"choose what you like"}) and (button := find(items, {"skip"}, button=True)):
+            tap(device, button)
+            time.sleep(2)
+            continue
         if secret:
             if password_sent.exists():
                 time.sleep(3)
@@ -171,8 +198,7 @@ def sign_in(device, credential, status):
                 tap(device, submit)
                 time.sleep(4)
                 continue
-        elif not opened_profile and (button := find(items, {"profile"})):
-            tap(device, button)
+        elif not opened_profile and open_profile(device, items):
             opened_profile = True
         elif button := find(items, {"log in", "log in to tiktok", "already have an account? log in"}, button=True):
             if not password_sent.exists() and not identity_sent.exists():
