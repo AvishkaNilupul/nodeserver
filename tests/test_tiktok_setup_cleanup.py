@@ -10,6 +10,16 @@ spec.loader.exec_module(device_tools)
 
 
 class SetupCleanup(unittest.TestCase):
+    def test_resume_leaves_live_player_for_profile_verification(self):
+        for activity, backs in [('com.bytedance.live.LivePlayActivity',1),('com.ss.android.ugc.aweme.splash.SplashActivity',0)]:
+            with self.subTest(activity=activity):
+                device=object.__new__(device_tools.Device)
+                device.adb=Mock(side_effect=[Mock(stdout=b'package:/data/app/base.apk'),
+                    Mock(stdout=(device_tools.APP+'/'+activity).encode()),Mock()])
+                with patch.object(Path,'is_file',return_value=False):device.install()
+                self.assertEqual(device.adb.call_count,2+backs)
+                if backs:device.adb.assert_called_with('shell','input','keyevent','4')
+
     def test_only_marked_stopped_device_is_removed(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);avds=root/'avds';avds.mkdir();state=root/'state';state.mkdir()

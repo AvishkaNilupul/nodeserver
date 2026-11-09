@@ -94,6 +94,10 @@ class Device:
         foreground = self.adb("shell", "dumpsys activity activities | grep mResumedActivity || true").stdout
         if APP.encode() + b"/" not in foreground:
             self.adb("shell", "am", "start", "-n", ACTIVITY)
+        elif b'.live.LivePlayActivity' in foreground:
+            # A resumed policy checkpoint may still be inside the LIVE player.
+            # Return to navigation so sign_in can verify the account's own profile.
+            self.adb('shell', 'input', 'keyevent', '4')
 
     def tracing(self):
         root = "/debug_ramdisk/magisk"
