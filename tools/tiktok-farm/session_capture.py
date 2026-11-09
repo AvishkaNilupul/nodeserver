@@ -5,6 +5,39 @@ import re
 from urllib.parse import parse_qsl, urlsplit
 
 
+def origin_allowed(host):
+    # Match the controller's bounded native-session destination allowlist.
+    return bool(re.fullmatch(r'(?:webcast[a-z0-9-]*|aggr[0-9]+-normal|tnc[a-z0-9-]*|cp-rp[a-z0-9-]*|web-ttp2\.us)\.(?:tiktokv?\.com|tiktokv\.us|tiktokv\.eu)', host or ''))
+
+
+TRACE_SOURCE = r"""
+const seenModules = new Set();
+Process.attachModuleObserver({
+  onAdded(module) {
+    if (!['libttboringssl.so', 'libssl.so'].includes(module.name) || seenModules.has(module.name)) return;
+    seenModules.add(module.name);
+    const servername = new NativeFunction(module.getExportByName('SSL_get_servername'), 'pointer', ['pointer', 'int']);
+    for (const [symbol, direction] of [['SSL_write', 'out'], ['SSL_read', 'in']]) {
+      Interceptor.attach(module.getExportByName(symbol), {
+        onEnter(args) { this.ssl = args[0]; this.buffer = args[1]; },
+        onLeave(result) {
+          try {
+            const count = result.toInt32();
+            if (count <= 0 || count > 131072) return;
+            const pointer = servername(this.ssl, 0);
+            if (pointer.isNull()) return;
+            const host = pointer.readUtf8String();
+            if (!/(?:^|\.)(?:tiktokv?\.com|tiktokv\.(?:us|eu))$/.test(host)) return;
+            send({host, connection:module.name + ':' + this.ssl, direction}, this.buffer.readByteArray(count));
+          } catch (_) {}
+        }
+      });
+    }
+  }
+});
+"""
+
+
 class WireCapture:
     def __init__(self):
         self.connections = {}

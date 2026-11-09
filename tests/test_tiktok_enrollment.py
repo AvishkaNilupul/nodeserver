@@ -11,10 +11,16 @@ TOOLS = Path(__file__).resolve().parents[1] / 'tools/tiktok-farm'
 sys.path.insert(0, str(TOOLS))
 from api_enrollment import install, acknowledge
 from api_control import LeaseLost
-from session_capture import WireCapture, pack_session
+from session_capture import WireCapture, pack_session, origin_allowed
 
 
 class Enrollment(unittest.TestCase):
+    def test_capture_origin_matches_regional_destinations(self):
+        for host in ['webcast16-normal-c-alisg.tiktokv.com','webcast.tiktokv.eu','aggr19-normal.tiktokv.us','tnc16-normal-useast8.tiktokv.us']:
+            self.assertTrue(origin_allowed(host),host)
+        for host in ['webcast.tiktokv.com.evil.test','evil.tiktokv.com','localhost','webcast.tiktokv.com:443',None]:
+            self.assertFalse(origin_allowed(host),host)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

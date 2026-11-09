@@ -142,6 +142,10 @@ class Driver:
         device = frida.get_device(serial, timeout=5)
         discovery = job.get("discovery") is True
         session_capture = wire_capture is not None
+        if session_capture:
+            from session_capture import origin_allowed, TRACE_SOURCE
+        else:
+            origin_allowed = self.trace['origin_allowed']
 
         def shell(command, **options):
             return subprocess.run([ADB, "-s", serial, "shell", command], timeout=12,
@@ -174,6 +178,8 @@ class Driver:
         readers, uploads, matched = {}, {}, {}
         failed = set()
         observations = {"reward_reads": 0, "room_entries": 0}
+        if session_capture:
+            observations['origins'] = {}
         rules = []
         uid_line = shell(f"cmd package list packages -U {APP}", check=True, text=True).stdout
         uid = re.search(r"uid:(\d+)", uid_line)
@@ -186,7 +192,7 @@ class Driver:
             shell(f"/debug_ramdisk/magisk su -c '{tool} -w 4 {action} {rule}'", check=True)
 
         try:
-            script = session.create_script(self.trace["SOURCE"])
+            script = session.create_script(TRACE_SOURCE if session_capture else self.trace["SOURCE"])
             script.on("message", receive)
             with frida_deadline():
                 script.load()
@@ -222,11 +228,16 @@ class Driver:
                 except queue.Empty:
                     continue
                 if session_capture:
+                    observed_host = event.get('host', '')
+                    if re.fullmatch(r'[a-z0-9.-]+\.(?:tiktokv?\.com|tiktokv\.us|tiktokv\.eu)', observed_host):
+                        origins = observations['origins']
+                        if observed_host in origins or len(origins) < 30:
+                            origins[observed_host] = origins.get(observed_host, 0) + 1
                     wire_capture.feed(event, data)
                     if "entry" in matched and wire_capture.ready() and time.monotonic() >= collect_until:
                         return None, matched["entry"]
                 host = event["host"]
-                if event["direction"] != "out" or not self.trace["origin_allowed"](host):
+                if event["direction"] != "out" or not origin_allowed(host):
                     continue
                 key = event["connection"]
                 if key in failed:
@@ -238,7 +249,7 @@ class Driver:
                         if kind == "headers":
                             headers = [(name, value) for name, value in payload if not name.startswith("x-unknown-index-")]
                             route, fields = self.trace["clean_route"](headers)
-                            if not self.trace["origin_allowed"](fields.get(":authority")):
+                            if not origin_allowed(fields.get(":authority")):
                                 continue
                             if (discovery and not session_capture and fields[":authority"].startswith("webcast") and route.startswith("/webcast/")
                                     and fields.get(":method") == "GET" and {"cookie", "x-tt-token"} <= fields.keys()):
@@ -283,6 +294,8 @@ class Driver:
                         session.detach()
                 except (frida.TransportError, frida.InvalidOperationError, frida.OperationCancelledError):
                     pass
+        if session_capture:
+            observations['native_entry_ready'] = wire_capture.ready()
         print(f"{serial} bootstrap timed out ({observations}, matched {sorted(matched)})",
               file=sys.stderr, flush=True)
         raise FarmError("capture-timeout")
