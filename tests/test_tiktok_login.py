@@ -65,4 +65,14 @@ class LoginTests(unittest.TestCase):
         self.assertFalse(login.open_profile(device,[node('Profile',bounds='[0,0][0,0]')]))
         device.adb.assert_not_called()
 
+    def test_profile_tutorial_is_dismissed_without_saving_preferences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory)
+            screens=[[node('Viewer history'),node('Bottom sheet'),node('Save')],
+                     [node('Edit profile'),node('@fixture.account')]]
+            with patch.object(login,'nodes',side_effect=screens),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
+                result=login.sign_in(device,{'username':'fixture.account','password':'fixture-pass'},Mock())
+            self.assertEqual(result,'@fixture.account');tap.assert_not_called()
+            device.adb.assert_called_once_with('shell','input','keyevent','4')
+
 if __name__=='__main__':unittest.main()

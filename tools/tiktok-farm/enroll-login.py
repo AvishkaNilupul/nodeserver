@@ -153,6 +153,12 @@ def sign_in(device, credential, status):
         login, secret = form_fields(items)
         if challenge(items) and not secret:
             raise LoginAttention("verification-required")
+        if (find(items, {"viewer history", "viewer history turned on"}) and
+                find(items, {"bottom sheet"}) and find(items, {"save"}, button=True)):
+            # Dismiss the first-profile tutorial without saving a privacy choice.
+            device.adb("shell", "input", "keyevent", "4")
+            time.sleep(2)
+            continue
         # Fresh devices may show optional feed interests after a successful login.
         # Scope Skip to this screen; never dismiss an unknown verification prompt.
         if find(items, {"choose what you like"}) and (button := find(items, {"skip"}, button=True)):
