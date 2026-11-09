@@ -12,6 +12,20 @@ def node(text,kind='android.widget.Button',**extra):
     return {'text':text,'class':kind,'bounds':'[0,0][100,50]','enabled':'true','clickable':'true',**extra}
 
 class LoginTests(unittest.TestCase):
+    def test_empty_identity_field_on_email_login_is_filled_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory)
+            field=node('',kind='android.widget.EditText');submit=node('Continue')
+            screens=[[node('Log in'),node('Email / Username'),field],
+                     [node('Log in'),node('Email / Username'),node('fixture.account',kind='android.widget.EditText'),submit],
+                     [node('Enter the code')]]
+            with patch.object(login,'nodes',side_effect=screens),patch.object(login,'type_text') as typing,patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
+                with self.assertRaises(login.LoginAttention):
+                    login.sign_in(device,{'username':'fixture.account','password':'fixture-pass'},Mock())
+            typing.assert_called_once_with(device,field,'fixture.account')
+            tap.assert_called_once_with(device,submit)
+            self.assertTrue((device.state/'identity-attempted').exists())
+
     def test_prepared_device_uses_snapshot_reader_and_preserves_real_bounds(self):
         device=Mock();device.snapshot_ready=True
         device.adb.return_value.stdout=b'<?xml version="1.0"?><hierarchy><node text="Profile" class="android.widget.Button" package="com.zhiliaoapp.musically" enabled="true" clickable="true" bounds="[576,1196][720,1280]" /></hierarchy>'

@@ -71,11 +71,17 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
     res.status(202).json({ account, state: next });
   }));
 
-  router.post(PREFIX + "/worker/setup/poll", authenticate, jsonOnly, wrap(async (_req, res) => {
+  router.post(PREFIX + "/worker/setup/poll", authenticate, jsonOnly, wrap(async (req, res) => {
+    const { capacityAvailable = true, activeAccounts = [] } = req.body || {};
+    if (typeof capacityAvailable !== "boolean" || !Array.isArray(activeAccounts) || activeAccounts.length > 8 ||
+        !activeAccounts.every((account) => typeof account === "string" && SETUP_SLOT.test(account))) {
+      return res.status(400).json({ error: "Invalid setup capacity" });
+    }
     seenAt = now();
     const lease = randomUUID();
     const record = await Automation.findOneAndUpdate({
       setupTarget: "phone", enabled: false, setupState: { $in: ["queued", ...RUNNING] },
+      ...(!capacityAvailable && { account: { $in: activeAccounts } }),
       $or: [{ setupLeaseUntil: { $exists: false } }, { setupLeaseUntil: { $lte: new Date(now()) } }],
     }, {
       $set: { setupState: "booting", setupLease: lease, setupLeaseUntil: new Date(now() + SETUP_LEASE_MS) },

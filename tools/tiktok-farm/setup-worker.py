@@ -17,6 +17,14 @@ worker_tools = runpy.run_path(str(HERE / "mac-worker.py"))
 RUNTIME, TRACE = device_tools["RUNTIME"], device_tools["TRACE"]
 
 
+def capacity(max_running):
+    pilot = runpy.run_path(str(device_tools['ROOT'] / 'tiktok_mac.py'))
+    active = [name for name, row in pilot['records']().items() if pilot['is_active'](row)]
+    accounts = [name.removesuffix('-managed') for name in active
+                if re.fullmatch(r'tiktok-(0[3-9]|[1-9][0-9])-managed', name)]
+    return {'capacityAvailable': len(active) < max_running, 'activeAccounts': accounts[:8]}
+
+
 def live_room(hint):
     from curl_cffi import requests
     def alive(room):
@@ -148,7 +156,7 @@ def main():
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while True:
             try:
-                if job := control.post("setup/poll", {}).get("job"):
+                if job := control.post("setup/poll", capacity(args.max_running)).get("job"):
                     setup(control, job, args)
             except (OSError, ValueError, subprocess.SubprocessError, device_tools["SetupError"], worker_tools["LeaseLost"]):
                 print("Setup control unavailable", flush=True)

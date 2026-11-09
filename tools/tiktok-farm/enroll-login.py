@@ -156,6 +156,9 @@ def sign_in(device, credential, status):
         if rejected(items):
             raise LoginAttention("login-rejected")
         login, secret = form_fields(items)
+        email_form = find(items, {"email / username", "email or username"}) and find(items, {"log in"})
+        identity_field = login and (labels(login) & {"email or username", "email", "username"} or
+                                   email_form and not login.get("text", "").strip())
         if challenge(items) and not secret:
             raise LoginAttention("verification-required")
         if (find(items, {"viewer history", "viewer history turned on"}) and
@@ -174,7 +177,7 @@ def sign_in(device, credential, status):
             if password_sent.exists():
                 time.sleep(3)
                 continue
-            if login and labels(login) & {"email or username", "username", "email"} and not entered_username:
+            if identity_field and not entered_username:
                 type_text(device, login, username)
                 entered_username = True
                 time.sleep(1)
@@ -199,7 +202,7 @@ def sign_in(device, credential, status):
         elif button := find(items, {"log in with password", "use password", "enter password"}):
             tap(device, button)
         elif login and not secret and not identity_sent.exists():
-            if not entered_username and labels(login) & {"email or username", "email", "username"}:
+            if not entered_username and identity_field:
                 type_text(device, login, username)
                 entered_username = True
                 time.sleep(1)

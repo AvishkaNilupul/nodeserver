@@ -124,7 +124,10 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal((await request(setupPath, { credential: login }, "admin")).status, 202);
   assert.equal((await request(setupPath, { credential: login }, "admin")).status, 409);
   assert.equal((await request("worker/setup/poll", {}, "worker")).status, 401);
-  const localJob = (await request("worker/setup/poll", {}, "setup")).job;
+  assert.equal((await request("worker/setup/poll", {capacityAvailable:false,activeAccounts:["tiktok-06"]}, "setup")).job, null);
+  assert.equal((await Schedule.findOne({account:newSlot}).lean()).setupState, "queued");
+  assert.equal((await request("worker/setup/poll", {capacityAvailable:false,activeAccounts:["../invalid"]}, "setup")).status, 400);
+  const localJob = (await request("worker/setup/poll", {capacityAvailable:false,activeAccounts:[newSlot]}, "setup")).job;
   assert.equal(localJob.account, newSlot);
   assert.deepEqual(localJob.credential, login);
   const progress = (job, state, reason) => request("worker/setup/update", {
