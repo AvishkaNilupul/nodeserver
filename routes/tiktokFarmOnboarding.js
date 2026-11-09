@@ -7,7 +7,7 @@ const PREFIX = "/api/tiktok-farm";
 const SETUP_SLOT = /^tiktok-(0[3-9]|[1-9][0-9])$/;
 const RUNNING = ["booting", "installing", "signing-in", "verifying", "registering", "capturing"];
 const TERMINAL = ["ready", "attention", "failed"];
-const REASONS = new Set(["verification-required", "login-rejected", "unsupported-input", "trace-permission",
+const REASONS = new Set(["verification-required", "birthdate-required", "login-rejected", "unsupported-input", "trace-permission",
   "capacity", "disk-space", "sdk-assets", "boot-timeout", "no-profile", "session-check", "worker-error",
   "app-not-ready", "unexpected-ui", "credentials-unavailable", "phone-check-failed", "capture-timeout", "duplicate-account", "no-live-room"]);
 const SETUP_LEASE_MS = 6 * 60_000;

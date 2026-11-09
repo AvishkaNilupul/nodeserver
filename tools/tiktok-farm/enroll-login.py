@@ -157,13 +157,15 @@ def sign_in(device, credential, status):
             return handle
         if rejected(items):
             raise LoginAttention("login-rejected")
-        if (not identity_sent.exists() and not password_sent.exists() and not left_signup_birthday and
-                find(items, {"when’s your birthdate?", "when's your birthdate?", "when's your birthday?"})):
+        birthday = find(items, {"when’s your birthdate?", "when's your birthdate?", "when's your birthday?"})
+        if not identity_sent.exists() and not password_sent.exists() and not left_signup_birthday and birthday:
             # Existing-account login must not enter the new-account birthday flow.
             left_signup_birthday = True
             device.adb("shell", "input", "keyevent", "4")
             time.sleep(2)
             continue
+        if birthday:
+            raise LoginAttention('birthdate-required')
         login, secret = form_fields(items)
         email_form = find(items, {"email / username", "email or username"}) and find(items, {"log in"})
         identity_field = login and (labels(login) & {"email or username", "email", "username"} or

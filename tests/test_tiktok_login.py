@@ -61,6 +61,15 @@ class LoginTests(unittest.TestCase):
             device.adb.assert_called_once_with('shell','input','keyevent','4')
             tap.assert_called_once_with(device,footer)
 
+    def test_required_birthdate_pauses_after_one_back_attempt_without_selecting_a_date(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory)
+            with patch.object(login,'nodes',return_value=[node('When’s your birthdate?')]),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
+                with self.assertRaises(login.LoginAttention) as caught:
+                    login.sign_in(device,{'username':'fixture.account','password':'fixture-pass'},Mock())
+            self.assertEqual(caught.exception.reason,'birthdate-required')
+            device.adb.assert_called_once_with('shell','input','keyevent','4');tap.assert_not_called()
+
     def test_verification_stops_without_clicking_or_typing(self):
         with tempfile.TemporaryDirectory() as directory:
             device=Mock();device.state=Path(directory)

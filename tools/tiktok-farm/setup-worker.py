@@ -146,7 +146,7 @@ def setup(control, job, args):
             marker.write_text(json.dumps({'account': account, 'credentialVersion': job['credentialVersion']}))
         print(f"{account} transferred to phone", flush=True)
     except login_tools["LoginAttention"] as error:
-        attention = error.reason == "verification-required"
+        attention = error.reason in {"verification-required", "birthdate-required"}
         update("attention", error.reason)
     except device_tools["SetupError"] as error:
         update("attention" if error.reason == "trace-permission" else "failed", error.reason)
