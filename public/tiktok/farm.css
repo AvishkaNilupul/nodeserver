@@ -15,3 +15,4 @@ main{min-width:0;width:100%;max-width:1550px;padding:30px 36px 20px;margin:0 aut
 .sales-review-item small { color:var(--muted,#6b7489); }
 @media(max-width:900px) { #salesCounts { grid-template-columns:repeat(3,minmax(0,1fr)); } }
 @media(max-width:540px) { #salesCounts { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; padding:0 0 16px; } .sales-review-item { padding:16px 0; } }
+#batchForm{display:grid;gap:10px;margin-top:14px}#batchForm label{font-size:12px}#batchLogins{display:block;width:100%;min-width:0;resize:vertical;font:inherit;padding:10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink);-webkit-text-security:disc}#batchLogins:focus-visible{outline:2px solid var(--accent);outline-offset:3px}#batchSetupButton{justify-self:start}#batchResult{overflow-wrap:anywhere}

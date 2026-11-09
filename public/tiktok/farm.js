@@ -75,6 +75,7 @@
     $('#pauseAutomation').disabled = busy || !chosen.some((a) => a.automation);
     $('#start button').disabled = busy || !free.length;
     $('#setupButton').disabled = busy || !data.setupOnline;
+    $('#batchSetupButton').disabled = busy || !data.setupOnline;
     set('#scanScope', chosen.length + ' account' + (chosen.length === 1 ? '' : 's') + ' selected · ' + free.length + ' available now');
   }
   async function action(key, path, body) {
@@ -226,6 +227,7 @@
 
   function scrubSecrets() {
     $('#loginUsername').textContent = ''; $('#loginPassword').textContent = ''; if ($('#loginDialog').open) $('#loginDialog').close();
+    $('#batchLogins').value = '';
     if (inventory) renderCodes();
   }
   $('#loginDialog').addEventListener('close', () => { set('#loginUsername', ''); set('#loginPassword', ''); });
@@ -304,6 +306,28 @@
   for (const [id, auto] of [['scan', false], ['auto', true]]) $('#' + id).onclick = () => action(id, '/scan', { accounts: available().map((a) => a.account), auto });
   for (const [id, enabled] of [['enableAutomation', true], ['pauseAutomation', false]]) $('#' + id).onclick = () => action(id, '/automation', { accounts: selected().filter((a) => enabled ? a.online && a.canScan && !a.automation : a.automation).map((a) => a.account), enabled });
   $('#start').onsubmit = (event) => { event.preventDefault(); action('manual', '/start', { ...Object.fromEntries(new FormData(event.currentTarget)), accounts: available().map((a) => a.account) }); };
+  $('#batchForm').onsubmit = async (event) => {
+    event.preventDefault();
+    if (pending.size || !data.setupOnline) return;
+    let entries;
+    try { entries = window.TikTokAccountInput.plan($('#batchLogins').value, data.accounts); }
+    catch (failure) { return error(failure.message); }
+    $('#batchLogins').value = ''; pending.add('batch'); controls(); error('');
+    const queued = [];
+    try {
+      for (const entry of entries) {
+        set('#batchResult', 'Queuing row ' + entry.row + ' of ' + entries.length + '…');
+        await api('/accounts/' + entry.account + '/setup', { credential: entry.credential });
+        queued.push(entry.account);
+        entry.credential = null;
+      }
+      set('#batchResult', queued.length + ' accounts queued: ' + queued.join(', ') + '.');
+      report('Account batch queued. Progress is shown above.');
+    } catch (failure) {
+      set('#batchResult', queued.length + ' accounts confirmed: ' + (queued.join(', ') || 'none') + '. Row ' + (queued.length + 1) + ' was not confirmed; later rows were not submitted. Check the account list before retrying.');
+      error(failure.message);
+    } finally { entries.length = 0; pending.delete('batch'); await refresh(); controls(); }
+  };
   $('#credentialsForm').onsubmit = async (event) => {
     event.preventDefault(); const form = event.currentTarget, button = event.submitter || $('#setupButton'), setup = button.value === 'setup';
     if (setup && !data.setupOnline) return error('The Mac setup worker is offline. Saving a login does not require it.');

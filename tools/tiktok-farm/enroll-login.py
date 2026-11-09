@@ -79,6 +79,7 @@ def challenge(items):
         "verify it's really you", "verify identity",
         "verification code", "enter the code", "check your email", "slide to verify", "captcha",
         "two-step verification", "confirm it's you", "prove you're human",
+        "when's your birthdate", "when's your birthday",
     ))
 
 
