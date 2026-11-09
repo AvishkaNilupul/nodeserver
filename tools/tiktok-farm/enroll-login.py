@@ -34,8 +34,8 @@ def labels(node):
 
 
 def visible(node):
-    coords = list(map(int, re.findall(r"\d+", node.get("bounds", ""))))
-    return len(coords) == 4 and coords[2] > coords[0] and coords[3] > coords[1]
+    coords = list(map(int, re.findall(r"-?\d+", node.get("bounds", ""))))
+    return len(coords) == 4 and coords[2] > coords[0] and coords[3] > coords[1] and coords[2] > 0 and coords[3] > 0
 
 
 def find(items, names, *, button=False):
@@ -52,7 +52,7 @@ def find(items, names, *, button=False):
 
 
 def tap(device, node):
-    left, top, right, bottom = map(int, re.findall(r"\d+", node["bounds"]))
+    left, top, right, bottom = map(int, re.findall(r"-?\d+", node["bounds"]))
     device.adb("shell", "input", "tap", str((left + right) // 2), str((top + bottom) // 2))
 
 
@@ -195,7 +195,7 @@ def enter_birthdate(device, supplied, status):
         wheel = find(items, {part + ' picker'})
         if not wheel or not wheel.get('class', '').endswith('.SeekBar'):
             break
-        left, top, right, bottom = map(int, re.findall(r'\d+', wheel['bounds']))
+        left, top, right, bottom = map(int, re.findall(r'-?\d+', wheel['bounds']))
         x, y, step = (left + right) // 2, (top + bottom) // 2, (bottom - top) // 3
         device.adb('shell', 'input', 'swipe', str(x), str(y), str(x), str(y + direction * step), '500')
         time.sleep(.4)
@@ -249,6 +249,14 @@ def sign_in(device, credential, status):
                                    email_form and not login.get("text", "").strip())
         if challenge(items) and not secret:
             raise LoginAttention("verification-required")
+        if find(items, {'swipe up for more'}) and (profile := find(items, {'profile'})) and find(items, {'home'}):
+            # The first-feed tutorial intercepts navigation until one swipe is made.
+            _, _, width, height = map(int, re.findall(r'-?\d+', profile['bounds']))
+            if 320 <= width <= 2560 and height > width:
+                device.adb('shell', 'input', 'swipe', str(width // 2), str(height * 3 // 4),
+                           str(width // 2), str(height // 3), '500')
+                time.sleep(2)
+                continue
         if (find(items, {"viewer history", "viewer history turned on"}) and
                 find(items, {"bottom sheet"}) and find(items, {"save"}, button=True)):
             # Dismiss the first-profile tutorial without saving a privacy choice.

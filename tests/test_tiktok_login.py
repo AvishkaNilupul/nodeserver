@@ -12,6 +12,20 @@ def node(text,kind='android.widget.Button',**extra):
     return {'text':text,'class':kind,'bounds':'[0,0][100,50]','enabled':'true','clickable':'true',**extra}
 
 class LoginTests(unittest.TestCase):
+    def test_offscreen_phone_field_does_not_hide_active_email_field(self):
+        hidden=node('Phone number',kind='android.widget.EditText',bounds='[0,537][-60,577]')
+        active=node('',kind='android.widget.EditText',bounds='[60,537][660,577]')
+        self.assertFalse(login.visible(hidden));self.assertEqual(login.form_fields([hidden,active]),(active,None))
+
+    def test_first_feed_swipe_tutorial_is_dismissed_before_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory)
+            screens=[[node('Swipe up for more'),node('Home'),node('Profile',bounds='[576,1196][720,1280]')],
+                     [node('Edit profile'),node('@fixture')]]
+            with patch.object(login,'nodes',side_effect=screens),patch.object(login.time,'sleep'):
+                self.assertEqual(login.sign_in(device,{'username':'fixture','password':'fixture-password'},Mock()),'@fixture')
+            device.adb.assert_called_once_with('shell','input','swipe','360','960','360','426','500')
+
     def test_agreement_pauses_without_accepting_terms(self):
         with tempfile.TemporaryDirectory() as directory:
             device=Mock();device.state=Path(directory)
