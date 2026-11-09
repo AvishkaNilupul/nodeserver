@@ -174,7 +174,7 @@ def sign_in(device, credential, status):
         elif not opened_profile and (button := find(items, {"profile"})):
             tap(device, button)
             opened_profile = True
-        elif button := find(items, {"log in", "log in to tiktok"}, button=True):
+        elif button := find(items, {"log in", "log in to tiktok", "already have an account? log in"}, button=True):
             if not password_sent.exists() and not identity_sent.exists():
                 tap(device, button)
         time.sleep(2)
