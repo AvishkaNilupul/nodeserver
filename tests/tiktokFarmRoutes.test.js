@@ -7,6 +7,67 @@ const Run = require("../models/TikTokFarmRun");
 const Schedule = require("../models/TikTokFarmSchedule");
 const { createRouter } = require("../routes/tiktokFarmRoutes");
 
+test("phone pauses retain a bounded lease and only pre-claim expiry permits retry", async (t) => {
+  process.env.CRED_SECRET = "test-only credential encryption secret";
+  const mongo = await MongoMemoryServer.create();
+  t.after(async () => { await mongoose.disconnect(); await mongo.stop(); });
+  await mongoose.connect(mongo.getUri());
+  await Run.init();
+  let clock = Date.now();
+  const key = "fixture worker key for lease recovery tests";
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    if (req.headers["x-test-admin"]) req.session = { admin: { role: "superadmin", tfa: true } };
+    next();
+  });
+  app.use(createRouter({ now: () => clock, workerKey: () => key }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  t.after(() => server.close());
+  async function call(route, body, admin = false) {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/tiktok-farm/${route}`, {
+      method: body ? "POST" : "GET",
+      headers: { "content-type": "application/json", ...(admin ? { "x-test-admin": "1" } : { authorization: "Bearer " + key }) },
+      ...(body && { body: JSON.stringify(body) }),
+    });
+    return { status: response.status, ...await response.json() };
+  }
+  const account = "tiktok-05", event = { accounts: [account], campaign: "123", room: "456", task: "789" };
+  assert.equal((await call("worker/poll", { account })).status, 200);
+  assert.equal((await call("start", event, true)).results[0].queued, true);
+  const job = (await call("worker/poll", { account })).job;
+  const update = { id: job.id, lease: job.lease, phase: "watching", seconds: 45 };
+  clock += 62_000; // The live phone missed the original 60-second window.
+  assert.equal((await call("worker/update", update)).status, 200);
+  clock += 181_000;
+  await call("state", undefined, true);
+  const expired = await Run.findById(job.id).lean();
+  assert.equal(expired.state, "failed");
+  assert.equal(expired.phase, "lease-expired");
+  assert.equal(expired.claimAuthorized, false);
+  assert.equal((await call("worker/update", { ...update, phase: "claiming" })).status, 409);
+  assert.equal((await call("worker/update", { ...update, status: "completed", code: "fixture-stale-code" })).status, 409);
+  await call("worker/poll", { account });
+  assert.equal((await call("start", event, true)).results[0].queued, true);
+  const retry = (await call("worker/poll", { account })).job;
+  assert.notEqual(retry.lease, job.lease);
+  assert.equal((await call("worker/update", { ...update, phase: "claiming" })).status, 409);
+  assert.equal((await call("worker/update", { id: retry.id, lease: retry.lease, phase: "claiming", seconds: 300 })).status, 200);
+  clock += 181_000;
+  await call("state", undefined, true);
+  assert.equal((await Run.findById(retry.id).lean()).state, "review");
+  // Missing authorization evidence is ambiguous even if a legacy phase says watching.
+  await Run.collection.insertOne({ account: "legacy", campaign: "123", room: "456", task: "789",
+    active: true, state: "running", phase: "watching", leaseUntil: new Date(clock - 1) });
+  await call("state", undefined, true);
+  assert.equal((await Run.findOne({ account: "legacy" }).lean()).state, "review");
+  await Run.create({ account: "stopped", campaign: "123", room: "456", task: "789", batch: "fixture",
+    active: true, state: "running", phase: "watching", stopRequested: true, leaseUntil: new Date(clock - 1) });
+  await call("state", undefined, true);
+  assert.equal((await Run.findOne({ account: "stopped" }).lean()).state, "review");
+});
+
 test("isolates TikTok runs, encrypted codes, and event discovery across accounts", async (t) => {
   process.env.CRED_SECRET = "test-only credential encryption secret";
   const key = "a distinct test-only machine worker key";
@@ -166,7 +227,7 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.deepEqual(retry.results.map(({ queued }) => queued), [false, true]);
   const renewed = (await poll("tiktok-02")).job;
   assert.equal((await update(renewed, { phase: "claiming" })).status, 200);
-  clock += 61_000;
+  clock += 181_000;
   assert.equal((await request("state", undefined, "admin")).runs.find((r) => r._id === renewed.id).state, "review");
   assert.equal((await update(renewed, { status: "completed", code: "TEST-CODE-456" })).status, 200);
 

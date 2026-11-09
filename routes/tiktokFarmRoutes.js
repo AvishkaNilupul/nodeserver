@@ -12,7 +12,9 @@ const farmShop = require("./tiktokFarmShop");
 const SLOT = /^[a-z][a-z0-9-]{0,31}$/;
 const ID = /^\d{1,22}$/;
 const OBJECT_ID = /^[a-f0-9]{24}$/;
-const LEASE_MS = 60_000;
+// Android can suspend between otherwise healthy polls. Keep a bounded grace
+// window without permitting a stale worker to authorize a claim.
+const LEASE_MS = 180_000;
 const ONLINE_MS = 45_000;
 const CATALOG_MS = 15 * 60_000;
 const UPCOMING_MS = 30 * 60_000;
@@ -102,10 +104,17 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       } catch (error) { heartbeatSaved.delete(account); throw error; }
     }
   }
-  const sweep = (account) => Model.updateMany(
-    { ...(account && { account }), active: true, state: "running", leaseUntil: { $lte: new Date(now()) } },
-    { $set: { active: false, state: "review", phase: "lease-expired" } },
-  );
+  const sweep = async (account) => {
+    const expired = { ...(account && { account }), active: true, state: "running",
+      leaseUntil: { $lte: new Date(now()) } };
+    // Only positively known pre-claim runs may enter the normal capped retry
+    // path. An authorized or ambiguous claim still requires review.
+    await Model.updateMany({ ...expired, claimAuthorized: false, stopRequested: false,
+      phase: { $in: ["bootstrap", "watching"] }, code: { $exists: false } },
+    { $set: { active: false, state: "failed", phase: "lease-expired" } });
+    await Model.updateMany(expired,
+      { $set: { active: false, state: "review", phase: "lease-expired" } });
+  };
   async function discoveryRoom(account) {
     const recent = await Model.findOne({ account, state: "completed" }).sort({ updatedAt: -1 }).select("room updatedAt").lean();
     if (recent && now() - recent.updatedAt < 2 * 60 * 60_000 && ID.test(recent.room)) return recent.room;
