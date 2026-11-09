@@ -55,10 +55,12 @@ class LoginTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason,'login-rejected')
 
     def test_zero_bounds_navigation_uses_current_screen_override(self):
-        device=Mock();device.adb.return_value.stdout=b'Physical size: 1080x1920\nOverride size: 720x1280\n'
-        tabs=[node(name,bounds='[0,0][0,0]') for name in ['Home','Shop','Create','Inbox','Profile']]
-        self.assertTrue(login.open_profile(device,tabs))
-        device.adb.assert_called_with('shell','input','tap','648','1241')
+        for second_tab in ['Shop','Friends']:
+            with self.subTest(second_tab=second_tab):
+                device=Mock();device.adb.return_value.stdout=b'Physical size: 1080x1920\nOverride size: 720x1280\n'
+                tabs=[node(name,bounds='[0,0][0,0]') for name in ['Home',second_tab,'Create','Inbox','Profile']]
+                self.assertTrue(login.open_profile(device,tabs))
+                device.adb.assert_called_with('shell','input','tap','648','1241')
 
     def test_zero_bounds_profile_alone_does_not_use_coordinates(self):
         device=Mock()

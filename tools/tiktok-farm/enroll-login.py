@@ -114,7 +114,7 @@ def open_profile(device, items):
     # rendering them normally. Only use the known five-tab layout in that case.
     tabs = {label for node in items if node.get("clickable") == "true" and
             node.get("bounds") == "[0,0][0,0]" for label in labels(node)}
-    if not {"home", "shop", "create", "inbox", "profile"} <= tabs:
+    if not ({"home", "create", "inbox", "profile"} <= tabs and tabs & {"shop", "friends"}):
         return False
     output = device.adb("shell", "wm", "size").stdout.decode("ascii", errors="ignore")
     sizes = re.findall(r"(?:Physical|Override) size: (\d+)x(\d+)", output)
