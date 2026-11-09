@@ -7,7 +7,7 @@
   let data = { accounts: [], runs: [], codes: [], hosts: [] }, skew = 0, refreshing, lastGood = 0, pickerSignature = '', accountSignature = '';
   let activeTab = 'overview', inventory = null, inventoryPage = 1, inventoryRequest = 0, inventoryBusy = false, searchTimer, lastInventory = 0;
   let salesLoading = false, lastSales = 0;
-  const choices = new Map(), pending = new Set();
+  const choices = new Map(), pending = new Set(), birthdateDrafts = new Map();
   const now = () => Date.now() + skew;
   const date = (value) => value ? new Date(value).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Not recorded';
   const expiryDate = (value) => value ? new Date(value).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Unverified';
@@ -169,7 +169,37 @@
         login.disabled = true;
         try { const result = await api('/accounts/' + worker.account + '/credentials'); set('#loginUsername', result.username); set('#loginPassword', result.password); $('#loginDialog').showModal(); } catch (failure) { error(failure.message); } finally { login.disabled = false; }
       }; card.append(login);
-      if (worker.setup && worker.setup.state !== 'ready' && !worker.online) { const detail = make('details', 'advanced'); detail.open = ['attention', 'failed'].includes(worker.setup.state); detail.append(make('summary', '', 'Account setup: ' + worker.setup.state.replaceAll('-', ' ')), make('p', '', worker.setup.reason === 'birthdate-required' ? 'TikTok needs a birthdate before login. Complete it in the Android window, then choose Resume setup.' : worker.setup.reason === 'verification-required' ? 'Complete verification in the Android window on the Mac, then choose Resume setup.' : worker.setup.reason === 'phone-check-failed' ? 'The phone could not verify this session. Resume retries the handoff.' : worker.setup.reason ? worker.setup.reason.replaceAll('-', ' ') : 'Login → session capture → phone verification → automatic farming.')); if (['attention', 'failed'].includes(worker.setup.state)) { const resume = make('button', '', 'Resume setup'); resume.disabled = worker.setup.reason !== 'phone-check-failed' && !data.setupOnline; resume.onclick = () => action('resume-' + worker.account, '/accounts/' + worker.account + '/setup/resume', {}); detail.append(resume); } card.append(detail); }
+      if (worker.setup && worker.setup.state !== 'ready' && !worker.online) {
+        const detail = make('details', 'advanced'), birthday = worker.setup.reason === 'birthdate-required';
+        detail.open = ['attention', 'failed'].includes(worker.setup.state);
+        const messages = {
+          'birthdate-required': 'TikTok needs a birthdate before login. Enter it here, or complete it in the Android window, then resume.',
+          'agreement-required': 'Review the agreement in the Android window, then choose Resume setup.',
+          'verification-required': 'Complete verification in the Android window on the Mac, then choose Resume setup.',
+          'phone-check-failed': 'The phone could not verify this session. Resume retries the handoff.',
+        };
+        detail.append(make('summary', '', 'Account setup: ' + worker.setup.state.replaceAll('-', ' ')),
+          make('p', '', messages[worker.setup.reason] || worker.setup.reason?.replaceAll('-', ' ') || 'Login → session capture → phone verification → automatic farming.'));
+        let birthdate;
+        if (birthday) {
+          const label = make('label', '', 'Birthdate'); birthdate = make('input'); birthdate.type = 'date';
+          birthdate.min = '1900-01-01'; birthdate.max = new Date().toISOString().slice(0, 10);
+          birthdate.value = birthdateDrafts.get(worker.account) || '';
+          birthdate.oninput = () => birthdateDrafts.set(worker.account, birthdate.value);
+          label.append(birthdate); detail.append(label);
+        } else birthdateDrafts.delete(worker.account);
+        if (['attention', 'failed'].includes(worker.setup.state)) {
+          const resume = make('button', '', 'Resume setup');
+          resume.disabled = worker.setup.reason !== 'phone-check-failed' && !data.setupOnline;
+          resume.onclick = () => {
+            if (birthdate && !birthdate.reportValidity()) return;
+            action('resume-' + worker.account, '/accounts/' + worker.account + '/setup/resume',
+              birthdate?.value ? { birthdate: birthdate.value } : {});
+          };
+          detail.append(resume);
+        }
+        card.append(detail);
+      }
       box.append(card);
     }
     set('#automationHelp', 'Checks every ' + data.autoScanMinutes + ' minutes while idle, even with this page closed.');
@@ -228,6 +258,8 @@
   function scrubSecrets() {
     $('#loginUsername').textContent = ''; $('#loginPassword').textContent = ''; if ($('#loginDialog').open) $('#loginDialog').close();
     $('#batchLogins').value = '';
+    birthdateDrafts.clear();
+    document.querySelectorAll('input[type="date"]').forEach((input) => { input.value = ''; });
     if (inventory) renderCodes();
   }
   $('#loginDialog').addEventListener('close', () => { set('#loginUsername', ''); set('#loginPassword', ''); });
@@ -312,12 +344,13 @@
     let entries;
     try { entries = window.TikTokAccountInput.plan($('#batchLogins').value, data.accounts); }
     catch (failure) { return error(failure.message); }
-    $('#batchLogins').value = ''; pending.add('batch'); controls(); error('');
+    const birthdate = event.currentTarget.elements.birthdate.value;
+    event.currentTarget.reset(); pending.add('batch'); controls(); error('');
     const queued = [];
     try {
       for (const entry of entries) {
         set('#batchResult', 'Queuing row ' + entry.row + ' of ' + entries.length + '…');
-        await api('/accounts/' + entry.account + '/setup', { credential: entry.credential });
+        await api('/accounts/' + entry.account + '/setup', { credential: { ...entry.credential, ...(birthdate && { birthdate }) } });
         queued.push(entry.account);
         entry.credential = null;
       }
@@ -331,8 +364,8 @@
   $('#credentialsForm').onsubmit = async (event) => {
     event.preventDefault(); const form = event.currentTarget, button = event.submitter || $('#setupButton'), setup = button.value === 'setup';
     if (setup && !data.setupOnline) return error('The Mac setup worker is offline. Saving a login does not require it.');
-    const { account, username, password } = Object.fromEntries(new FormData(form)); if (pending.has('credentials')) return; pending.add('credentials'); button.disabled = true;
-    try { await api('/accounts/' + encodeURIComponent(account) + (setup ? '/setup' : '/credentials'), { credential: { username, password } }); form.reset(); report(setup ? 'Account setup queued for ' + account : 'Login saved securely for ' + account + '. The active API session is unchanged.'); await refresh(); } catch (failure) { error(failure.message); } finally { pending.delete('credentials'); button.disabled = false; controls(); }
+    const { account, username, password, birthdate } = Object.fromEntries(new FormData(form)); if (pending.has('credentials')) return; pending.add('credentials'); button.disabled = true;
+    try { await api('/accounts/' + encodeURIComponent(account) + (setup ? '/setup' : '/credentials'), { credential: { username, password, ...(birthdate && { birthdate }) } }); form.reset(); report(setup ? 'Account setup queued for ' + account : 'Login saved securely for ' + account + '. The active API session is unchanged.'); await refresh(); } catch (failure) { error(failure.message); } finally { pending.delete('credentials'); button.disabled = false; controls(); }
   };
   function refresh() {
     if (refreshing) return refreshing;
@@ -354,6 +387,7 @@
   }
   $('#refresh').onclick = async () => { $('#refresh').disabled = true; await refresh(); $('#refresh').disabled = false; };
   $('#themeToggle').onclick = () => { if (typeof window.toggleTheme === 'function') window.toggleTheme(); };
+  document.querySelectorAll('input[type="date"]').forEach((input) => { input.max = new Date().toISOString().slice(0, 10); });
   fetch('/whoami', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => { if (value?.admin) { set('#meName', value.admin.username || value.admin.name || 'Admin'); set('#meRole', value.admin.role === 'superadmin' ? 'Superadmin' : 'Admin'); } }).catch(() => {});
   openTab(location.hash.slice(1)); refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 })();

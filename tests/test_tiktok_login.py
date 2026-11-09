@@ -12,6 +12,44 @@ def node(text,kind='android.widget.Button',**extra):
     return {'text':text,'class':kind,'bounds':'[0,0][100,50]','enabled':'true','clickable':'true',**extra}
 
 class LoginTests(unittest.TestCase):
+    def test_agreement_pauses_without_accepting_terms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory)
+            with patch.object(login,'nodes',return_value=[node('Agree to our Terms of Service'),node('Agree and continue')]),patch.object(login,'tap') as tap:
+                with self.assertRaises(login.LoginAttention) as caught:
+                    login.sign_in(device,{'username':'fixture','password':'fixture-password'},Mock())
+            self.assertEqual(caught.exception.reason,'agreement-required');tap.assert_not_called();device.adb.assert_not_called()
+
+    def test_birthdate_checks_each_change_and_submits_only_exact_date(self):
+        device=Mock();submit=node('Continue')
+        def screen(value):
+            return [node('When’s your birthdate?'),node('Get more great features? Sign up'),
+                    node('To use TikTok, you need to enter your birthdate. This helps us customize your experience.'),
+                    node(value,kind='android.widget.EditText'),submit,
+                    node('',kind='android.widget.SeekBar',**{'content-desc':'Year picker','bounds':'[480,700][640,970]'}),
+                    node('',kind='android.widget.SeekBar',**{'content-desc':'Day picker','bounds':'[280,700][440,970]'})]
+        with patch.object(login,'nodes',side_effect=[screen('March 5, 2005'),screen('March 5, 2004'),screen('March 4, 2004')]),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
+            login.enter_birthdate(device,'2004-03-04',Mock())
+        self.assertEqual(device.adb.call_count,2)
+        tap.assert_called_once_with(device,submit)
+
+    def test_birthdate_never_submits_invalid_date_or_unrecognized_screen(self):
+        for value in ['2001-02-29','2004-2-3','2099-01-01',None,'2004-03-04']:
+            with self.subTest(value=value),patch.object(login,'nodes',return_value=[node('When’s your birthdate?'),node('Continue')]),patch.object(login,'tap') as tap:
+                device=Mock()
+                with self.assertRaises(login.LoginAttention):login.enter_birthdate(device,value,Mock())
+                device.adb.assert_not_called();tap.assert_not_called()
+
+    def test_unmoving_birthdate_picker_is_bounded_and_never_submitted(self):
+        items=[node('When’s your birthdate?'),node('Get more great features? Sign up'),
+               node('To use TikTok, you need to enter your birthdate.'),
+               node('March 5, 2005',kind='android.widget.EditText'),node('Continue'),
+               node('',kind='android.widget.SeekBar',**{'content-desc':'Year picker','bounds':'[480,700][640,970]'})]
+        device=Mock()
+        with patch.object(login,'nodes',return_value=items),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
+            with self.assertRaises(login.LoginAttention):login.enter_birthdate(device,'2004-03-04',Mock())
+        self.assertEqual(device.adb.call_count,3);tap.assert_not_called()
+
     def test_empty_identity_field_on_email_login_is_filled_once(self):
         with tempfile.TemporaryDirectory() as directory:
             device=Mock();device.state=Path(directory)

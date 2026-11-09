@@ -83,12 +83,17 @@ def capture(device, room, update):
         activity = device.adb('shell', 'dumpsys activity activities | grep mResumedActivity || true').stdout
         if b'.live.LivePlayActivity' in activity:
             break
-        if login_tools['challenge'](login_tools['nodes'](device)):
+        items = login_tools['nodes'](device)
+        if login_tools['agreement_required'](items):
+            raise login_tools['LoginAttention']('agreement-required')
+        if login_tools['challenge'](items):
             raise login_tools['LoginAttention']('verification-required')
         time.sleep(2)
     else:
         raise login_tools['LoginAttention']('app-not-ready')
     time.sleep(5)
+    if login_tools['agreement_required'](login_tools['nodes'](device)):
+        raise login_tools['LoginAttention']('agreement-required')
     device.adb('shell', 'input', 'keyevent', '4')
     time.sleep(2)
     wire = WireCapture()
@@ -146,7 +151,7 @@ def setup(control, job, args):
             marker.write_text(json.dumps({'account': account, 'credentialVersion': job['credentialVersion']}))
         print(f"{account} transferred to phone", flush=True)
     except login_tools["LoginAttention"] as error:
-        attention = error.reason in {"verification-required", "birthdate-required"}
+        attention = error.reason in {"verification-required", "birthdate-required", "agreement-required"}
         update("attention", error.reason)
     except device_tools["SetupError"] as error:
         update("attention" if error.reason == "trace-permission" else "failed", error.reason)

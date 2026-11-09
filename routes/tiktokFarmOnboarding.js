@@ -7,18 +7,25 @@ const PREFIX = "/api/tiktok-farm";
 const SETUP_SLOT = /^tiktok-(0[3-9]|[1-9][0-9])$/;
 const RUNNING = ["booting", "installing", "signing-in", "verifying", "registering", "capturing"];
 const TERMINAL = ["ready", "attention", "failed"];
-const REASONS = new Set(["verification-required", "birthdate-required", "login-rejected", "unsupported-input", "trace-permission",
+const REASONS = new Set(["verification-required", "birthdate-required", "agreement-required", "login-rejected", "unsupported-input", "trace-permission",
   "capacity", "disk-space", "sdk-assets", "boot-timeout", "no-profile", "session-check", "worker-error",
   "app-not-ready", "unexpected-ui", "credentials-unavailable", "phone-check-failed", "capture-timeout", "duplicate-account", "no-live-room"]);
 const SETUP_LEASE_MS = 6 * 60_000;
 const hash = (value) => createHash("sha256").update(value).digest();
 
+function validBirthdate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value < "1900-01-01") return false;
+  const stamp = Date.parse(value + "T00:00:00Z");
+  return Number.isFinite(stamp) && new Date(stamp).toISOString().slice(0, 10) === value && stamp <= Date.now();
+}
+
 function parseCredential(input) {
-  const { username, password } = input || {};
+  const { username, password, birthdate } = input || {};
   if (typeof username !== "string" || !username.trim() || username.length > 254 ||
       typeof password !== "string" || !password.length || password.length > 512 ||
-      /[\u0000-\u001f\u007f]/.test(username + password)) return null;
-  return { username: username.trim(), password };
+      /[\u0000-\u001f\u007f]/.test(username + password) ||
+      (birthdate !== undefined && !validBirthdate(birthdate))) return null;
+  return { username: username.trim(), password, ...(birthdate !== undefined && { birthdate }) };
 }
 
 function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online, discoveryRoom, authenticate: phoneAuth }) {
@@ -61,10 +68,28 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
   router.post(PREFIX + "/accounts/:account/setup/resume", ...admin, wrap(async (req, res) => {
     const { account } = req.params;
     if (!SETUP_SLOT.test(account)) return res.status(400).json({ error: "Invalid setup slot" });
-    const pending = await Automation.findOne({ account }).select("+sessionPacket").lean();
+    const birthdate = req.body?.birthdate;
+    if (birthdate !== undefined && !validBirthdate(birthdate))
+      return res.status(400).json({ error: "Enter a valid birthdate as YYYY-MM-DD" });
+    const pending = await Automation.findOne({ account }).select("+sessionPacket +credentials").lean();
+    let credentials;
+    if (birthdate !== undefined) {
+      if (!pending?.credentials || pending.sessionPacket || pending.enabled ||
+          !["queued", "attention", "failed"].includes(pending.setupState))
+        return res.status(409).json({ error: "Birthdate can only be supplied before setup continues" });
+      const clear = decrypt(pending.credentials);
+      const credential = clear && parseCredential({ ...JSON.parse(clear), birthdate });
+      if (!credential) return res.status(409).json({ error: "Saved login is unavailable" });
+      credentials = encrypt(JSON.stringify(credential));
+    }
     const next = pending?.sessionPacket ? "transferring" : "queued";
-    const result = await Automation.updateOne({ account, enabled: false, setupState: { $in: ["attention", "failed"] } }, {
-      $set: { setupState: next }, $unset: { setupReason: 1, setupLease: 1, setupLeaseUntil: 1, deliveryLease: 1, deliveryLeaseUntil: 1 },
+    const result = await Automation.updateOne({ account, enabled: false,
+      setupState: { $in: credentials ? ["queued", "attention", "failed"] : ["attention", "failed"] },
+      ...(credentials && { credentials: pending.credentials, credentialsSavedAt: pending.credentialsSavedAt,
+        sessionPacket: { $exists: false } }),
+    }, {
+      // A date does not change login identity/version or clear the preserved Android session.
+      $set: { setupState: next, ...(credentials && { credentials }) }, $unset: { setupReason: 1, setupLease: 1, setupLeaseUntil: 1, deliveryLease: 1, deliveryLeaseUntil: 1 },
       $push: { setupLog: log(next) },
     });
     if (!result.matchedCount) return res.status(409).json({ error: "Setup is not paused" });
@@ -203,4 +228,4 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
   return () => seenAt !== null && now() - seenAt < SETUP_LEASE_MS;
 }
 
-module.exports = { mountOnboarding, parseCredential };
+module.exports = { mountOnboarding, parseCredential, validBirthdate };

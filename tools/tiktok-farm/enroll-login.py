@@ -1,5 +1,6 @@
 """Drive the stock TikTok login UI and pause on account verification."""
 import re
+from datetime import date, datetime
 import shlex
 import subprocess
 import time
@@ -89,6 +90,12 @@ def rejected(items):
         "wrong password", "couldn't find this account", "account doesn't exist", "too many attempts"))
 
 
+def agreement_required(items):
+    text = ' '.join(label for item in items for label in labels(item))
+    return ('terms of service' in text and find(items, {'agree and continue'}, button=True)) or (
+        'virtual items' in text and find(items, {'got it'}, button=True))
+
+
 def verified_profile(items, username):
     # The newer own-profile screen has a pencil without an Edit Profile label.
     own_profile = find(items, {"edit profile"}) or (
@@ -133,6 +140,68 @@ def open_profile(device, items):
     return True
 
 
+def enter_birthdate(device, supplied, status):
+    """Set only the guest age gate, checking its displayed date after every step."""
+    try:
+        target = date.fromisoformat(supplied)
+        if supplied != target.isoformat() or not date(1900, 1, 1) <= target <= date.today():
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise LoginAttention('birthdate-required') from None
+    deadline = time.monotonic() + 180
+    next_update = 0
+    unchanged = 0
+    previous = None
+    for _ in range(150):
+        if time.monotonic() >= deadline:
+            break
+        if time.monotonic() >= next_update:
+            status('signing-in')
+            next_update = time.monotonic() + 20
+        items = nodes(device)
+        # This is the initial guest gate, not account signup or a profile edit.
+        if not (find(items, {'when’s your birthdate?', "when's your birthdate?"}) and
+                find(items, {'get more great features? sign up'}) and
+                any(node.get('text', '').startswith('To use TikTok, you need to enter your birthdate.') for node in items)):
+            break
+        field, secret = form_fields(items)
+        if not field or secret:
+            break
+        try:
+            current = datetime.strptime(field.get('text', ''), '%B %d, %Y').date()
+        except ValueError:
+            if field.get('text') != 'Birthday':
+                break
+            current = None
+        if current == target:
+            button = find(items, {'continue'}, button=True)
+            if button:
+                tap(device, button)
+                time.sleep(2)
+                return
+            break
+        unchanged = unchanged + 1 if current == previous else 0
+        if unchanged >= 3:
+            break
+        previous = current
+        # Touching a wheel initializes the otherwise blank date field.
+        part, direction = 'year', 1
+        if current is not None:
+            for part in ('year', 'month', 'day'):
+                actual, expected = getattr(current, part), getattr(target, part)
+                if actual != expected:
+                    direction = 1 if actual > expected else -1
+                    break
+        wheel = find(items, {part + ' picker'})
+        if not wheel or not wheel.get('class', '').endswith('.SeekBar'):
+            break
+        left, top, right, bottom = map(int, re.findall(r'\d+', wheel['bounds']))
+        x, y, step = (left + right) // 2, (top + bottom) // 2, (bottom - top) // 3
+        device.adb('shell', 'input', 'swipe', str(x), str(y), str(x), str(y + direction * step), '500')
+        time.sleep(.4)
+    raise LoginAttention('birthdate-required')
+
+
 def sign_in(device, credential, status):
     username, password = credential["username"], credential["password"]
     progress = time.monotonic()
@@ -144,6 +213,7 @@ def sign_in(device, credential, status):
     selected_email = False
     next_profile_attempt = 0
     left_signup_birthday = False
+    birthday_submitted = False
     while time.monotonic() - progress < 110:
         if time.monotonic() >= next_check:
             status("signing-in")
@@ -157,7 +227,14 @@ def sign_in(device, credential, status):
             return handle
         if rejected(items):
             raise LoginAttention("login-rejected")
+        if agreement_required(items):
+            raise LoginAttention('agreement-required')
         birthday = find(items, {"when’s your birthdate?", "when's your birthdate?", "when's your birthday?"})
+        if birthday and credential.get('birthdate') and not birthday_submitted:
+            enter_birthdate(device, credential['birthdate'], status)
+            birthday_submitted = True
+            progress = time.monotonic()
+            continue
         if not identity_sent.exists() and not password_sent.exists() and not left_signup_birthday and birthday:
             # Existing-account login must not enter the new-account birthday flow.
             left_signup_birthday = True

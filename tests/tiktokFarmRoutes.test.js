@@ -6,6 +6,17 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 const Run = require("../models/TikTokFarmRun");
 const Schedule = require("../models/TikTokFarmSchedule");
 const { createRouter } = require("../routes/tiktokFarmRoutes");
+const { parseCredential, validBirthdate } = require("../routes/tiktokFarmOnboarding");
+
+test("birthdates must be exact calendar dates and remain optional", () => {
+  const login = { username: "fixture", password: "fixture-password" };
+  for (const value of [null, "", "2001-02-29", "2004-2-03", "1899-12-31", "2999-01-01", "2004-13-01"])
+    assert.equal(validBirthdate(value), false);
+  assert.equal(validBirthdate("2004-02-29"), true);
+  assert.deepEqual(parseCredential(login), login);
+  assert.equal(parseCredential({...login,birthdate:"2001-02-29"}),null);
+  assert.deepEqual(parseCredential({...login,birthdate:"2004-02-29",mailboxPassword:"discard"}),{...login,birthdate:"2004-02-29"});
+});
 
 test("phone pauses retain a bounded lease and only pre-claim expiry permits retry", async (t) => {
   process.env.CRED_SECRET = "test-only credential encryption secret";
@@ -130,11 +141,12 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   const localJob = (await request("worker/setup/poll", {capacityAvailable:false,activeAccounts:[newSlot]}, "setup")).job;
   assert.equal(localJob.account, newSlot);
   assert.deepEqual(localJob.credential, login);
+  assert.equal((await request(setupPath + "/resume", {birthdate:"2004-02-29"}, "admin")).status,409);
   const progress = (job, state, reason) => request("worker/setup/update", {
     account: job.account, lease: job.lease, serial: "emulator-5570", state, reason,
     ...(state === "ready" && { handle: "@fixture.user" }),
   }, "setup");
-  assert.equal((await progress(localJob, "attention", "verification-required")).status, 200);
+  assert.equal((await progress(localJob, "attention", "agreement-required")).status, 200);
   assert.equal((await progress(localJob, "ready")).status, 409);
   const setupState = await request("state", undefined, "admin");
   const onboarding = setupState.accounts.find(({ account }) => account === newSlot).setup;
@@ -142,8 +154,15 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.deepEqual(onboarding.log.map(({ state }) => state), ["queued", "booting", "attention"]);
   assert(!JSON.stringify(setupState).includes(localJob.lease));
   assert(!JSON.stringify(setupState).includes(login.password));
-  assert.equal((await request(setupPath + "/resume", {}, "admin")).status, 202);
+  assert.equal((await request(setupPath + "/resume", {birthdate:"2001-02-29"}, "admin")).status,400);
+  assert.equal((await request(setupPath + "/resume", {birthdate:"2004-02-29"}, "worker")).status,401);
+  assert.equal((await request(setupPath + "/resume", {birthdate:"2004-02-29"}, "admin")).status, 202);
+  const withDate = await Schedule.findOne({account:newSlot}).select('+credentials').lean();
+  assert.match(withDate.credentials,/^enc:v1:/); assert(!withDate.credentials.includes('2004-02-29'));
+  assert(!JSON.stringify(await request('state',undefined,'admin')).includes('2004-02-29'));
   const resumedSetup = (await request("worker/setup/poll", {}, "setup")).job;
+  assert.deepEqual(resumedSetup.credential,{...login,birthdate:'2004-02-29'});
+  assert.equal(resumedSetup.credentialVersion,localJob.credentialVersion);
   assert.notEqual(resumedSetup.lease, localJob.lease);
   assert.equal((await progress(resumedSetup, "registering")).status, 200);
   assert.equal((await progress(resumedSetup, "ready")).status, 409);
@@ -159,6 +178,7 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal((await request("worker/setup/session", {...sessionBody, credentialVersion: "wrong"}, "setup")).status, 409);
   assert.equal((await request("worker/setup/session", {...sessionBody, packet: {...packet, account: "tiktok-06"}}, "setup")).status, 400);
   assert.equal((await request("worker/setup/session", sessionBody, "setup")).status, 200);
+  assert.equal((await request(setupPath+'/resume',{birthdate:'2004-02-29'},'admin')).status,409);
   assert.equal((await request("worker/setup/session", sessionBody, "setup")).status, 200);
   const savedSession = await Schedule.findOne({account: newSlot}).select("+sessionPacket").lean();
   assert.match(savedSession.sessionPacket, /^enc:v1:/); assert.equal(savedSession.enabled, false);
@@ -188,6 +208,7 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert(!privateState.includes("fixture-cookie")); assert(!privateState.includes(retryDelivery.digest));
   assert(!privateState.includes(retryDelivery.lease));
   assert.equal((await request("accounts/tiktok-06/setup", {credential:login}, "admin")).status, 202);
+  assert.equal((await request("accounts/tiktok-06/setup/resume",{birthdate:'2004-02-29'},"admin")).status,202);
   const duplicate = (await request("worker/setup/poll", {}, "setup")).job;
   assert.equal((await request("worker/setup/session", {...sessionBody,account:duplicate.account,lease:duplicate.lease,
     credentialVersion:duplicate.credentialVersion,packet:{...packet,account:duplicate.account}}, "setup")).status, 409);
