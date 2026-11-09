@@ -143,6 +143,7 @@ def sign_in(device, credential, status):
     entered_password = False
     selected_email = False
     next_profile_attempt = 0
+    left_signup_birthday = False
     while time.monotonic() - progress < 110:
         if time.monotonic() >= next_check:
             status("signing-in")
@@ -156,6 +157,13 @@ def sign_in(device, credential, status):
             return handle
         if rejected(items):
             raise LoginAttention("login-rejected")
+        if (not identity_sent.exists() and not password_sent.exists() and not left_signup_birthday and
+                find(items, {"when’s your birthdate?", "when's your birthdate?", "when's your birthday?"})):
+            # Existing-account login must not enter the new-account birthday flow.
+            left_signup_birthday = True
+            device.adb("shell", "input", "keyevent", "4")
+            time.sleep(2)
+            continue
         login, secret = form_fields(items)
         email_form = find(items, {"email / username", "email or username"}) and find(items, {"log in"})
         identity_field = login and (labels(login) & {"email or username", "email", "username"} or
@@ -194,7 +202,9 @@ def sign_in(device, credential, status):
                 tap(device, submit)
                 time.sleep(5)
                 continue
-        if button := find(items, {"use phone / email / username"}, button=True):
+        if button := find(items, {"already have an account? log in"}, button=True):
+            tap(device, button)
+        elif button := find(items, {"use phone / email / username"}, button=True):
             tap(device, button)
         elif (not selected_email and (not login or labels(login) & {"phone number"}) and
               (button := find(items, {"email / username", "email or username"}, button=True))):

@@ -49,6 +49,18 @@ class LoginTests(unittest.TestCase):
             self.assertEqual(result,'@fixture.account');tap.assert_called_once_with(device,footer)
             self.assertFalse((device.state/'password-attempted').exists())
 
+    def test_signup_birthday_returns_to_existing_login_before_shared_method_button(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory)
+            footer=node('Already have an account? Log in')
+            screens=[[node('When’s your birthdate?')],
+                     [node('Sign up for TikTok'),node('Use phone / email / username'),footer],
+                     [node('Edit profile'),node('@fixture.account')]]
+            with patch.object(login,'nodes',side_effect=screens),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
+                self.assertEqual(login.sign_in(device,{'username':'fixture.account','password':'fixture-pass'},Mock()),'@fixture.account')
+            device.adb.assert_called_once_with('shell','input','keyevent','4')
+            tap.assert_called_once_with(device,footer)
+
     def test_verification_stops_without_clicking_or_typing(self):
         with tempfile.TemporaryDirectory() as directory:
             device=Mock();device.state=Path(directory)
