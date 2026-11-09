@@ -162,6 +162,8 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal((await request("worker/setup/session", sessionBody, "setup")).status, 200);
   const savedSession = await Schedule.findOne({account: newSlot}).select("+sessionPacket").lean();
   assert.match(savedSession.sessionPacket, /^enc:v1:/); assert.equal(savedSession.enabled, false);
+  const cleanupRequest = {capacityAvailable:false,activeAccounts:[],cleanupCandidates:[{account:newSlot,credentialVersion:resumedSetup.credentialVersion}]};
+  assert.deepEqual((await request("worker/setup/poll",cleanupRequest,"setup")).cleanup,[]);
   assert.equal((await request("worker/enrollment/poll", {}, "setup")).status, 401);
   let delivery = (await request("worker/enrollment/poll", {}, "worker")).job;
   assert.deepEqual(delivery.packet, packet);
@@ -180,6 +182,8 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   assert.equal((await delivered(retryDelivery, true)).status, 200);
   assert.equal((await delivered(retryDelivery, true)).status, 200);
   assert.equal((await Schedule.findOne({account:newSlot}).select("+sessionPacket").lean()).sessionPacket, undefined);
+  assert.deepEqual((await request("worker/setup/poll",cleanupRequest,"setup")).cleanup,[newSlot]);
+  assert.deepEqual((await request("worker/setup/poll",{...cleanupRequest,cleanupCandidates:[{account:newSlot,credentialVersion:new Date(0).toISOString()}]},"setup")).cleanup,[]);
   const privateState = JSON.stringify(await request("state", undefined, "admin"));
   assert(!privateState.includes("fixture-cookie")); assert(!privateState.includes(retryDelivery.digest));
   assert(!privateState.includes(retryDelivery.lease));

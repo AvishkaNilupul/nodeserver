@@ -72,12 +72,19 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
   }));
 
   router.post(PREFIX + "/worker/setup/poll", authenticate, jsonOnly, wrap(async (req, res) => {
-    const { capacityAvailable = true, activeAccounts = [] } = req.body || {};
+    const { capacityAvailable = true, activeAccounts = [], cleanupCandidates = [] } = req.body || {};
     if (typeof capacityAvailable !== "boolean" || !Array.isArray(activeAccounts) || activeAccounts.length > 8 ||
-        !activeAccounts.every((account) => typeof account === "string" && SETUP_SLOT.test(account))) {
+        !activeAccounts.every((account) => typeof account === "string" && SETUP_SLOT.test(account)) ||
+        !Array.isArray(cleanupCandidates) || cleanupCandidates.length > 20 || !cleanupCandidates.every((item) =>
+          item && typeof item.account === "string" && SETUP_SLOT.test(item.account) &&
+          typeof item.credentialVersion === "string" && Number.isFinite(Date.parse(item.credentialVersion)))) {
       return res.status(400).json({ error: "Invalid setup capacity" });
     }
     seenAt = now();
+    const cleanup = cleanupCandidates.length ? (await Automation.find({ setupState: "ready", enabled: true,
+      sessionInstalledAt: { $type: "date" }, sessionPacket: { $exists: false },
+      $or: cleanupCandidates.map((item) => ({account:item.account,credentialsSavedAt:new Date(item.credentialVersion)})),
+    }).select("account -_id").lean()).map((item) => item.account) : [];
     const lease = randomUUID();
     const record = await Automation.findOneAndUpdate({
       setupTarget: "phone", enabled: false, setupState: { $in: ["queued", ...RUNNING] },
@@ -87,7 +94,7 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
       $set: { setupState: "booting", setupLease: lease, setupLeaseUntil: new Date(now() + SETUP_LEASE_MS) },
       $push: { setupLog: log("booting") },
     }, { sort: { credentialsSavedAt: 1 }, returnDocument: "after" }).select("+credentials").lean();
-    if (!record) return res.json({ job: null });
+    if (!record) return res.json({ job: null, cleanup });
     const clear = decrypt(record.credentials);
     const credential = clear && parseCredential(JSON.parse(clear));
     if (!credential) {
@@ -96,9 +103,9 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
         $unset: { setupLease: 1, setupLeaseUntil: 1 },
         $push: { setupLog: log("failed", "credentials-unavailable") },
       });
-      return res.json({ job: null });
+      return res.json({ job: null, cleanup });
     }
-    res.json({ job: { account: record.account, lease, credentialVersion: record.credentialsSavedAt?.toISOString(), credential, seedRoom: await discoveryRoom(record.account) } });
+    res.json({ job: { account: record.account, lease, credentialVersion: record.credentialsSavedAt?.toISOString(), credential, seedRoom: await discoveryRoom(record.account) }, cleanup });
   }));
 
   router.post(PREFIX + "/worker/setup/update", authenticate, jsonOnly, wrap(async (req, res) => {

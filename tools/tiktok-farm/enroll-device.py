@@ -55,6 +55,7 @@ class Device:
                 if not row:
                     pilot["create"](rows, self.name, "play")
                     row = rows[self.name]
+                    (self.state / 'temporary-device').touch(mode=0o600)
                 ramdisk = TRACE / "tiktok-01-trace-ramdisk.img"
                 if not ramdisk.is_file():
                     raise SetupError("sdk-assets")
@@ -119,3 +120,27 @@ class Device:
                 return
             time.sleep(1)
         raise SetupError('worker-error')
+
+    def cleanup(self):
+        """Release only this newly created, stopped setup device after phone ACK."""
+        if not (self.state / 'temporary-device').exists():
+            return False
+        pilot = self.pilot
+        with (ROOT / 'instances.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            rows = pilot['records']()
+            row = rows.get(self.name)
+            if row and pilot['is_active'](row):
+                return False
+            avds = pilot['AVDS'].resolve()
+            device = avds / (self.name + '.avd')
+            if device.is_symlink() or (device.exists() and device.resolve().parent != avds):
+                raise SetupError('worker-error')
+            if device.exists():
+                shutil.rmtree(device)
+            (avds / (self.name + '.ini')).unlink(missing_ok=True)
+            rows.pop(self.name, None)
+            pilot['save'](rows)
+        for name in ('temporary-device', 'handoff-pending.json', 'identity-attempted', 'password-attempted', 'login-version'):
+            (self.state / name).unlink(missing_ok=True)
+        return True

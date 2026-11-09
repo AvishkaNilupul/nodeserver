@@ -2,10 +2,12 @@
 """Complete new TikTok account setups on the local Mac."""
 import argparse
 import fcntl
+import json
 import os
 from pathlib import Path
 import runpy
 import re
+import shutil
 import subprocess
 import time
 
@@ -22,7 +24,22 @@ def capacity(max_running):
     active = [name for name, row in pilot['records']().items() if pilot['is_active'](row)]
     accounts = [name.removesuffix('-managed') for name in active
                 if re.fullmatch(r'tiktok-(0[3-9]|[1-9][0-9])-managed', name)]
-    return {'capacityAvailable': len(active) < max_running, 'activeAccounts': accounts[:8]}
+    return {'capacityAvailable': len(active) < max_running and shutil.disk_usage(RUNTIME).free >= 12 * 1024**3,
+            'activeAccounts': accounts[:8]}
+
+
+def cleanup_candidates():
+    result = []
+    for marker in sorted(RUNTIME.glob('tiktok-??/handoff-pending.json')):
+        if not (marker.parent / 'temporary-device').exists():
+            continue
+        try:
+            value = json.loads(marker.read_text())
+            if value.get('account') == marker.parent.name and re.fullmatch(r'tiktok-(0[3-9]|[1-9][0-9])', value['account']):
+                result.append(value)
+        except (OSError, ValueError, KeyError):
+            pass
+    return result[:20]
 
 
 def live_room(hint):
@@ -124,6 +141,9 @@ def setup(control, job, args):
         update("registering")
         control.post("setup/session", {"account": account, "lease": job["lease"], "handle": handle,
             "credentialVersion": job.get("credentialVersion"), "packet": packet})
+        if (device.state / 'temporary-device').exists():
+            marker = device.state / 'handoff-pending.json'
+            marker.write_text(json.dumps({'account': account, 'credentialVersion': job['credentialVersion']}))
         print(f"{account} transferred to phone", flush=True)
     except login_tools["LoginAttention"] as error:
         attention = error.reason == "verification-required"
@@ -156,7 +176,17 @@ def main():
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while True:
             try:
-                if job := control.post("setup/poll", capacity(args.max_running)).get("job"):
+                candidates = cleanup_candidates()
+                reply = control.post("setup/poll", {**capacity(args.max_running), 'cleanupCandidates': candidates})
+                allowed = {item['account'] for item in candidates}
+                for account in reply.get('cleanup', []):
+                    if account in allowed:
+                        try:
+                            if device_tools['Device'](account, args.max_running).cleanup():
+                                print(f'{account} temporary Android files released', flush=True)
+                        except (OSError, ValueError, device_tools['SetupError']):
+                            print(f'{account} temporary-file cleanup deferred', flush=True)
+                if job := reply.get("job"):
                     setup(control, job, args)
             except (OSError, ValueError, subprocess.SubprocessError, device_tools["SetupError"], worker_tools["LeaseLost"]):
                 print("Setup control unavailable", flush=True)
