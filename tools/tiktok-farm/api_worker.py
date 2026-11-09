@@ -70,7 +70,8 @@ def build_entry(seed, seed_room, seed_anchor, job):
     sub = {'room_id': job['room'], 'room_id_str': job['room'],
            'anchor_id': job['anchor'], 'anchor_id_str': job['anchor']}
     updated = urlencode([(key, sub.get(key, job['room'] if value == seed_room else
-                         job['anchor'] if value == seed_anchor else value)) for key, value in fields]).encode()
+                         job['anchor'] if seed_anchor not in ('', '0') and value == seed_anchor else value))
+                         for key, value in fields]).encode()
     payload = gzip.compress(updated, mtime=0) if compressed else updated
     result = []
     for key, value in headers:

@@ -49,6 +49,19 @@ class ApiWorkerTests(unittest.TestCase):
         self.assertFalse(entry_matches(raw, '1111111111111111111'))
         self.assertFalse(entry_matches(b'<html>challenge</html>', self.job['room']))
 
+    def test_unknown_seed_anchor_preserves_unrelated_zero_flags(self):
+        original = b'room_id=1111111111111111111&anchor_id=0&is_ad=0&is_fresh=0&ecommerce_use_async_load=0&need_trim_pull_stream=0'
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                seed = (self.read[0], [(':method','POST'),(':path','/webcast/room/enter/')],
+                        gzip.compress(original) if compressed else original)
+                _, _, result = build_entry(seed,'1111111111111111111','0',self.job)
+                fields = parse_qs((gzip.decompress(result) if compressed else result).decode())
+                self.assertEqual(fields['anchor_id'],[self.job['anchor']])
+                self.assertEqual(fields['room_id'],[self.job['room']])
+                for name in ['is_ad','is_fresh','ecommerce_use_async_load','need_trim_pull_stream']:
+                    self.assertEqual(fields[name],['0'])
+
     def worker(self, state, claim):
         worker = object.__new__(Worker)
         worker.state, worker.stopping = Path(state), threading.Event()
