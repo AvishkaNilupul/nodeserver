@@ -123,6 +123,9 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   const duplicate = (await request("worker/setup/poll", {}, "setup")).job;
   assert.equal((await request("worker/setup/session", {...sessionBody,account:duplicate.account,lease:duplicate.lease,
     credentialVersion:duplicate.credentialVersion,packet:{...packet,account:duplicate.account}}, "setup")).status, 409);
+  const duplicateState = await Schedule.findOne({account:duplicate.account}).lean();
+  assert.equal(duplicateState.setupState,"attention"); assert.equal(duplicateState.setupReason,"duplicate-account");
+  assert.equal((await request("worker/setup/poll",{},"setup")).job,null);
   await Schedule.deleteOne({account:duplicate.account});
   const readyAccount = (await request("state", undefined, "admin")).accounts.find(({ account }) => account === newSlot);
   assert(readyAccount.automation.enabled);

@@ -135,9 +135,16 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
     }
     if (record.credentialsSavedAt?.toISOString() !== credentialVersion || online(account) || await Model.exists({ account }))
       return res.status(409).json({ error: "Account changed during setup" });
+    const duplicate = async () => {
+      await Automation.updateOne({ account, setupLease: lease, enabled: false }, {
+        $set: { setupState: "attention", setupReason: "duplicate-account" },
+        $unset: { setupLease: 1, setupLeaseUntil: 1 }, $push: { setupLog: log("attention", "duplicate-account") },
+      });
+      return res.status(409).json({ error: "This TikTok account is already enrolled" });
+    };
     if (await Automation.exists({ account: { $ne: account }, $or: [
       { setupIdentity: handle.toLowerCase() }, { setupHandle: new RegExp("^" + handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i") } ] }))
-      return res.status(409).json({ error: "This TikTok account is already enrolled" });
+      return duplicate();
     try {
       const changed = await Automation.updateOne({ account, setupLease: lease, enabled: false,
         credentialsSavedAt: record.credentialsSavedAt, setupLeaseUntil: { $gt: new Date(now()) } }, {
@@ -146,7 +153,7 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
         $unset: { setupLease: 1, setupLeaseUntil: 1, setupReason: 1 }, $push: { setupLog: log("transferring") },
       });
       if (!changed.matchedCount) return res.status(409).json({ error: "Setup lease unavailable" });
-    } catch (error) { if (error.code !== 11000) throw error; return res.status(409).json({ error: "Account already enrolled" }); }
+    } catch (error) { if (error.code !== 11000) throw error; return duplicate(); }
     res.json({ ok: true });
   }));
 
