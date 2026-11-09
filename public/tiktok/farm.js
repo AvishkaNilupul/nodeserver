@@ -194,7 +194,7 @@
           resume.onclick = () => {
             if (birthdate && !birthdate.reportValidity()) return;
             action('resume-' + worker.account, '/accounts/' + worker.account + '/setup/resume',
-              birthdate?.value ? { birthdate: birthdate.value } : {});
+              birthdate?.value ? { credential: { birthdate: birthdate.value } } : {});
           };
           detail.append(resume);
         }

@@ -68,7 +68,7 @@ function mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now
   router.post(PREFIX + "/accounts/:account/setup/resume", ...admin, wrap(async (req, res) => {
     const { account } = req.params;
     if (!SETUP_SLOT.test(account)) return res.status(400).json({ error: "Invalid setup slot" });
-    const birthdate = req.body?.birthdate;
+    const birthdate = req.body?.credential?.birthdate;
     if (birthdate !== undefined && !validBirthdate(birthdate))
       return res.status(400).json({ error: "Enter a valid birthdate as YYYY-MM-DD" });
     const pending = await Automation.findOne({ account }).select("+sessionPacket +credentials").lean();
