@@ -133,7 +133,7 @@ class LoginTests(unittest.TestCase):
     def test_optional_interests_are_skipped_before_profile_verification(self):
         with tempfile.TemporaryDirectory() as directory:
             device=Mock();device.state=Path(directory)
-            skip=node('Skip');profile=node('Profile')
+            skip=node('Skip',kind='android.widget.TextView',clickable='false');profile=node('Profile')
             screens=[[node('Choose what you like'),skip,node('Next')],
                      [profile],[node('Edit profile'),node('@fixture.account')]]
             with patch.object(login,'nodes',side_effect=screens),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
