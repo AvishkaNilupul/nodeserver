@@ -165,9 +165,36 @@ class ApiWorkerTests(unittest.TestCase):
                 visited.append(state.name)
                 barrier.wait()
                 stopping.set()
-            with patch('api_worker.account_loop', side_effect=run):
+            with patch('api_worker.account_loop', side_effect=run), patch('api_worker.enrollment_loop', side_effect=lambda root, stop, lock: stop.wait()):
                 run_fleet(root, stop)
             self.assertEqual(sorted(visited), ['tiktok-01', 'tiktok-02', 'tiktok-03', 'tiktok-04'])
+
+    def test_newly_activated_slot_joins_without_restarting_existing_threads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root/'tiktok-01').mkdir()
+            pending=root/'tiktok-05';pending.mkdir();(pending/'enrollment.json').write_text('{}')
+            stop=threading.Event();visited=[]
+            def worker(state, stopping, lock):
+                visited.append(state.name)
+                if state.name=='tiktok-05':stopping.set()
+                else:stopping.wait(12)
+            def enroll(root, stopping, lock):
+                while 'tiktok-01' not in visited and not stopping.wait(.01):pass
+                self.assertNotIn('tiktok-05',visited)
+                (pending/'activated.json').write_text('{}')
+            with patch('api_worker.account_loop',side_effect=worker), patch('api_worker.enrollment_loop',side_effect=enroll):
+                run_fleet(root,stop)
+            self.assertEqual(visited,['tiktok-01','tiktok-05'])
+
+    def test_singapore_native_socket_reaches_the_connection_transport(self):
+        from native_socket import NativeSocketProbe
+        handshake={'host':'webcast-frontier16-normal-alisg.tiktokv.com',
+                   'path':'/webcast/im/ws_proxy/?fixture=1','headers':[], 'frames':[]}
+        probe=NativeSocketProbe(handshake,'123')
+        with patch('native_socket.requests.Session',side_effect=OSError('fixture stop before network')) as transport:
+            probe.work()
+        transport.assert_called_once()
+        self.assertNotEqual(probe.info.get('error'),'Native socket origin did not match')
 
     def test_wrong_slot_packet_never_starts_a_worker(self):
         with tempfile.TemporaryDirectory() as directory:

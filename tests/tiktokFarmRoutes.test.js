@@ -82,7 +82,48 @@ test("isolates TikTok runs, encrypted codes, and event discovery across accounts
   const resumedSetup = (await request("worker/setup/poll", {}, "setup")).job;
   assert.notEqual(resumedSetup.lease, localJob.lease);
   assert.equal((await progress(resumedSetup, "registering")).status, 200);
-  assert.equal((await progress(resumedSetup, "ready")).status, 200);
+  assert.equal((await progress(resumedSetup, "ready")).status, 409);
+  const packet = { account: newSlot, seedRoom: "123", seedAnchor: "456",
+    seed: { host: "webcast16-normal-no1a.tiktokv.eu", headers: [[":authority", "webcast16-normal-no1a.tiktokv.eu"],
+      [":method", "POST"], [":path", "/webcast/room/enter/?aid=1233"], ["cookie", "fixture-cookie"], ["x-tt-token", "fixture-token"]],
+      body: Buffer.from("room_id=123&anchor_id=456").toString("base64") },
+    wire: [{ host: "webcast-frontier.tiktokv.eu", path: "/webcast/im/ws_proxy/?aid=1233", headers: [["cookie", "fixture-cookie"]],
+      frames: [Buffer.from("fixture-im_enter_room").toString("base64")] }] };
+  const sessionBody = { account: newSlot, lease: resumedSetup.lease, credentialVersion: resumedSetup.credentialVersion,
+    handle: "@fixture.user", packet };
+  assert.equal((await request("worker/setup/session", sessionBody, "worker")).status, 401);
+  assert.equal((await request("worker/setup/session", {...sessionBody, credentialVersion: "wrong"}, "setup")).status, 409);
+  assert.equal((await request("worker/setup/session", {...sessionBody, packet: {...packet, account: "tiktok-06"}}, "setup")).status, 400);
+  assert.equal((await request("worker/setup/session", sessionBody, "setup")).status, 200);
+  assert.equal((await request("worker/setup/session", sessionBody, "setup")).status, 200);
+  const savedSession = await Schedule.findOne({account: newSlot}).select("+sessionPacket").lean();
+  assert.match(savedSession.sessionPacket, /^enc:v1:/); assert.equal(savedSession.enabled, false);
+  assert.equal((await request("worker/enrollment/poll", {}, "setup")).status, 401);
+  let delivery = (await request("worker/enrollment/poll", {}, "worker")).job;
+  assert.deepEqual(delivery.packet, packet);
+  assert.equal((await request("worker/enrollment/poll", {}, "worker")).job, null);
+  const delivered = (j, ok) => request("worker/enrollment/update", {account:j.account,lease:j.lease,digest:j.digest,ok}, "worker");
+  assert.equal((await delivered({...delivery, digest: "0".repeat(64)}, true)).status, 409);
+  assert.equal((await delivered(delivery, false)).status, 200);
+  assert.equal((await Schedule.findOne({account: newSlot}).lean()).enabled, false);
+  assert.equal((await request(setupPath + "/resume", {}, "admin")).state, "transferring");
+  delivery = (await request("worker/enrollment/poll", {}, "worker")).job;
+  clock += 6*60_000+1;
+  assert.equal((await delivered(delivery, true)).status, 409);
+  const retryDelivery = (await request("worker/enrollment/poll", {}, "worker")).job;
+  assert.notEqual(retryDelivery.lease, delivery.lease);
+  assert.equal(retryDelivery.digest, delivery.digest);
+  assert.equal((await delivered(retryDelivery, true)).status, 200);
+  assert.equal((await delivered(retryDelivery, true)).status, 200);
+  assert.equal((await Schedule.findOne({account:newSlot}).select("+sessionPacket").lean()).sessionPacket, undefined);
+  const privateState = JSON.stringify(await request("state", undefined, "admin"));
+  assert(!privateState.includes("fixture-cookie")); assert(!privateState.includes(retryDelivery.digest));
+  assert(!privateState.includes(retryDelivery.lease));
+  assert.equal((await request("accounts/tiktok-06/setup", {credential:login}, "admin")).status, 202);
+  const duplicate = (await request("worker/setup/poll", {}, "setup")).job;
+  assert.equal((await request("worker/setup/session", {...sessionBody,account:duplicate.account,lease:duplicate.lease,
+    credentialVersion:duplicate.credentialVersion,packet:{...packet,account:duplicate.account}}, "setup")).status, 409);
+  await Schedule.deleteOne({account:duplicate.account});
   const readyAccount = (await request("state", undefined, "admin")).accounts.find(({ account }) => account === newSlot);
   assert(readyAccount.automation.enabled);
   assert.equal(readyAccount.setup.state, "ready");

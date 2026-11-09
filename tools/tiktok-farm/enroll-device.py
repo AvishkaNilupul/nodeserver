@@ -101,3 +101,17 @@ class Device:
             self.adb("shell", root + " su -c 'nohup /data/local/tmp/tiktok-frida >/dev/null 2>&1 </dev/null &'")
         if not self.adb("shell", "pidof tiktok-frida || true").stdout.strip():
             raise SetupError("trace-permission")
+
+    def stop(self):
+        if not hasattr(self, 'serial'):
+            return
+        devices = subprocess.run([ADB, 'devices'], capture_output=True, timeout=8, check=True)
+        if self.serial.encode() not in devices.stdout:
+            return
+        self.adb('emu', 'kill', check=False)
+        for _ in range(30):
+            result = subprocess.run([ADB, 'devices'], capture_output=True, timeout=8, check=True)
+            if self.serial.encode() not in result.stdout:
+                return
+            time.sleep(1)
+        raise SetupError('worker-error')

@@ -163,7 +163,7 @@ class NativeSocketProbe:
     def work(self):
         row=self.handshake
         hostname=row["host"]
-        if (not hostname.startswith("webcast-frontier") or not hostname.endswith((".tiktokv.us",".tiktokv.eu"))
+        if (not hostname.startswith("webcast-frontier") or not hostname.endswith((".tiktokv.com",".tiktokv.us",".tiktokv.eu"))
                 or urlsplit(row["path"]).path!="/webcast/im/ws_proxy/"):
             self.info["error"]="Native socket origin did not match"
             return

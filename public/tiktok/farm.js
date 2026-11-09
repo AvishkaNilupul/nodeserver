@@ -161,18 +161,24 @@
       const stats = make('div', 'stats-line'); for (const [value, label] of [[worker.statistics?.codes || 0, 'Codes stored'], [worker.statistics?.review || 0, 'Need review']]) { const item = make('div'); item.append(make('strong', '', value), make('small', '', label)); stats.append(item); } card.append(stats);
       card.append(make('small', '', 'Last event check · ' + date(worker.catalog?.updatedAt || worker.schedule?.lastScanAt)), make('small', '', 'Last contact · ' + date(worker.lastSeen)), make('small', '', nextCheck(worker)));
       const last = worker.schedule?.lastResult || worker.automation?.lastResult; if (last) card.append(make('p', '', last));
-      card.append(make('small', '', worker.credentialsSavedAt ? 'Login saved securely' : 'API session enrolled; login not saved in this vault'));
+      card.append(make('small', '', worker.credentialsSavedAt ? 'Login saved securely' : worker.online ? 'API session enrolled; login not saved in this vault' : 'Login not saved in this vault'));
       const login = make('button', '', worker.credentialsSavedAt ? 'View saved login' : 'Save login');
       login.onclick = async () => {
         if (!worker.credentialsSavedAt) { const form = $('#credentialsForm'); $('#loginEditor').open = true; form.elements.account.value = worker.account; form.elements.username.focus(); return; }
         login.disabled = true;
         try { const result = await api('/accounts/' + worker.account + '/credentials'); set('#loginUsername', result.username); set('#loginPassword', result.password); $('#loginDialog').showModal(); } catch (failure) { error(failure.message); } finally { login.disabled = false; }
       }; card.append(login);
-      if (worker.setup && worker.setup.state !== 'ready' && !worker.online) { const detail = make('details', 'advanced'); detail.append(make('summary', '', 'One-time setup: ' + worker.setup.state), make('p', '', worker.setup.reason ? worker.setup.reason.replaceAll('-', ' ') : 'Setup worker is required to continue.')); if (['attention', 'failed'].includes(worker.setup.state)) { const resume = make('button', '', 'Resume setup'); resume.disabled = !data.setupOnline; resume.onclick = () => action('resume-' + worker.account, '/accounts/' + worker.account + '/setup/resume', {}); detail.append(resume); } card.append(detail); }
+      if (worker.setup && worker.setup.state !== 'ready' && !worker.online) { const detail = make('details', 'advanced'); detail.open = ['attention', 'failed'].includes(worker.setup.state); detail.append(make('summary', '', 'Account setup: ' + worker.setup.state.replaceAll('-', ' ')), make('p', '', worker.setup.reason === 'verification-required' ? 'Complete verification in the Android window on the Mac, then choose Resume setup.' : worker.setup.reason === 'phone-check-failed' ? 'The phone could not verify this session. Resume retries the handoff.' : worker.setup.reason ? worker.setup.reason.replaceAll('-', ' ') : 'Login → session capture → phone verification → automatic farming.')); if (['attention', 'failed'].includes(worker.setup.state)) { const resume = make('button', '', 'Resume setup'); resume.disabled = worker.setup.reason !== 'phone-check-failed' && !data.setupOnline; resume.onclick = () => action('resume-' + worker.account, '/accounts/' + worker.account + '/setup/resume', {}); detail.append(resume); } card.append(detail); }
       box.append(card);
     }
     set('#automationHelp', 'Checks every ' + data.autoScanMinutes + ' minutes while idle, even with this page closed.');
-    set('#setupWorkerStatus', data.setupOnline ? 'Mac setup worker connected. One-time setup is available.' : 'Mac setup worker is off. Existing phone accounts continue farming normally.');
+    const form = $('#credentialsForm');
+    if (!form.elements.account.value && !form.elements.username.value) {
+      const occupied = new Set(data.accounts.map(a => a.account));
+      const next = Array.from({ length: 97 }, (_, n) => 'tiktok-' + String(n + 3).padStart(2, '0')).find(slot => !occupied.has(slot));
+      if (next) form.elements.account.value = next;
+    }
+    set('#setupWorkerStatus', data.setupOnline ? 'Setup is online. New accounts will be added to the phone farm.' : 'Setup is offline. Start it on the Mac to add accounts; existing phone accounts continue farming.');
   }
 
   function renderEvents() {
@@ -299,10 +305,10 @@
   for (const [id, enabled] of [['enableAutomation', true], ['pauseAutomation', false]]) $('#' + id).onclick = () => action(id, '/automation', { accounts: selected().filter((a) => enabled ? a.online && a.canScan && !a.automation : a.automation).map((a) => a.account), enabled });
   $('#start').onsubmit = (event) => { event.preventDefault(); action('manual', '/start', { ...Object.fromEntries(new FormData(event.currentTarget)), accounts: available().map((a) => a.account) }); };
   $('#credentialsForm').onsubmit = async (event) => {
-    event.preventDefault(); const form = event.currentTarget, button = event.submitter || form.querySelector('button'), setup = button.value === 'setup';
+    event.preventDefault(); const form = event.currentTarget, button = event.submitter || $('#setupButton'), setup = button.value === 'setup';
     if (setup && !data.setupOnline) return error('The Mac setup worker is offline. Saving a login does not require it.');
     const { account, username, password } = Object.fromEntries(new FormData(form)); if (pending.has('credentials')) return; pending.add('credentials'); button.disabled = true;
-    try { await api('/accounts/' + encodeURIComponent(account) + (setup ? '/setup' : '/credentials'), { credential: { username, password } }); form.reset(); report(setup ? 'One-time setup queued for ' + account : 'Login saved securely for ' + account + '. The active API session is unchanged.'); await refresh(); } catch (failure) { error(failure.message); } finally { pending.delete('credentials'); button.disabled = false; controls(); }
+    try { await api('/accounts/' + encodeURIComponent(account) + (setup ? '/setup' : '/credentials'), { credential: { username, password } }); form.reset(); report(setup ? 'Account setup queued for ' + account : 'Login saved securely for ' + account + '. The active API session is unchanged.'); await refresh(); } catch (failure) { error(failure.message); } finally { pending.delete('credentials'); button.disabled = false; controls(); }
   };
   function refresh() {
     if (refreshing) return refreshing;

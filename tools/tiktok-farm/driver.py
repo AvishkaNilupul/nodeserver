@@ -138,9 +138,10 @@ class Driver:
                 return None
         return self.trace["android_room"](entry)
 
-    def capture(self, serial, job, update):
+    def capture(self, serial, job, update, wire_capture=None):
         device = frida.get_device(serial, timeout=5)
         discovery = job.get("discovery") is True
+        session_capture = wire_capture is not None
 
         def shell(command, **options):
             return subprocess.run([ADB, "-s", serial, "shell", command], timeout=12,
@@ -206,7 +207,8 @@ class Driver:
             open_room(job["room"])
             fallback_room = job.get("fallbackRoom") if discovery else None
             switch_at = time.monotonic() + 35
-            deadline = time.monotonic() + 75
+            deadline = time.monotonic() + 90
+            collect_until = time.monotonic() + 20
             renew = time.monotonic() + 15
             while time.monotonic() < deadline:
                 if fallback_room and time.monotonic() >= switch_at:
@@ -219,6 +221,10 @@ class Driver:
                     event, data = events.get(timeout=1)
                 except queue.Empty:
                     continue
+                if session_capture:
+                    wire_capture.feed(event, data)
+                    if "entry" in matched and wire_capture.ready() and time.monotonic() >= collect_until:
+                        return None, matched["entry"]
                 host = event["host"]
                 if event["direction"] != "out" or not self.trace["origin_allowed"](host):
                     continue
@@ -234,13 +240,13 @@ class Driver:
                             route, fields = self.trace["clean_route"](headers)
                             if not self.trace["origin_allowed"](fields.get(":authority")):
                                 continue
-                            if (discovery and fields[":authority"].startswith("webcast") and route.startswith("/webcast/")
+                            if (discovery and not session_capture and fields[":authority"].startswith("webcast") and route.startswith("/webcast/")
                                     and fields.get(":method") == "GET" and {"cookie", "x-tt-token"} <= fields.keys()):
                                 return (host, headers, b""), None
                             if route in (DETAIL, POLL):
                                 observations["reward_reads"] += 1
                                 ids = self.trace["public_query"](fields)
-                                if (ids.get("drops_id") == job["campaign"] and ids.get("room_id") == job["room"]
+                                if (ids.get("drops_id") == job.get("campaign") and ids.get("room_id") == job["room"]
                                         and "anchor_id" in ids and {"cookie", "x-tt-token"} <= fields.keys()):
                                     matched["read"] = (host, headers, b"")
                             if route == ENTER and not ended:
@@ -260,7 +266,7 @@ class Driver:
                                 room = self.entry_room(entry)
                                 if room and (room == job["room"] or discovery and room == job.get("fallbackRoom")):
                                     matched["entry"] = entry
-                    if "entry" in matched and (job.get("campaign") is None or "read" in matched):
+                    if not session_capture and "entry" in matched and (job.get("campaign") is None or "read" in matched):
                         return matched.get("read"), matched["entry"]
                 except (ValueError, IndexError, HPACKError):
                     failed.add(key)

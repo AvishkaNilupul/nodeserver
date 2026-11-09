@@ -112,7 +112,7 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
     const latest = await Model.findOne({ state: "completed" }).sort({ updatedAt: -1 }).select("room").lean();
     return latest && ID.test(latest.room) ? latest.room : process.env.TIKTOK_CATALOG_SEED_ROOM || "7704940109955353374";
   }
-  const setupOnline = mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online, discoveryRoom });
+  const setupOnline = mountOnboarding(router, { Automation, Model, admin, jsonOnly, wrap, now, setupKey, online, discoveryRoom, authenticate });
   farmShop.mount(router, { Model, authenticate, jsonOnly, wrap, admin, now });
 
   router.get("/admin/tiktok-farm", ...admin, (_req, res) => {
@@ -178,6 +178,10 @@ function createRouter({ Model = Run, Automation = Schedule, workerKey = () => pr
       return res.status(400).json({ error: "Enter a valid account slot, username, and password" });
     }
     await Automation.init();
+    const setup = await Automation.findOne({ account }).select("setupTarget setupState +sessionPacket").lean();
+    if (setup?.setupTarget === "phone" && (setup.sessionPacket ||
+        ["booting", "installing", "signing-in", "verifying", "capturing", "registering", "transferring", "phone-check"].includes(setup.setupState)))
+      return res.status(409).json({ error: "Wait for the current account setup before changing its login" });
     const credentials = encrypt(JSON.stringify(credential));
     await Automation.updateOne({ account }, {
       $set: { credentials, credentialsSavedAt: new Date(now()) },

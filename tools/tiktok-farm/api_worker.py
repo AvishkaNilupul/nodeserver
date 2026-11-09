@@ -360,35 +360,76 @@ def account_loop(state, stopping, startup_lock):
                 stopping.wait(30)
 
 
+def enrollment_loop(root, stopping, startup_lock):
+    from api_enrollment import run as enroll
+    while not stopping.is_set():
+        template = None
+        for state in sorted(root.iterdir()):
+            if not state.is_dir() or not re.fullmatch(r'tiktok-[0-9]{2}', state.name):
+                continue
+            try:
+                with startup_lock:
+                    template = load_config(state)
+                if template.get('account') == state.name and template.get('server') and template.get('workerKey'):
+                    break
+            except Exception:
+                template = None
+        if not template:
+            stopping.wait(30)
+            continue
+
+        def verify(packet, state):
+            worker = Worker(packet, state, stopping)
+            worker.catalog()
+
+        try:
+            enroll(root, stopping, template, Control(template['server'], template['workerKey']), verify)
+        except Exception:
+            # Enrollment must never take existing account workers down.
+            logging.warning('Enrollment service unavailable')
+            stopping.wait(30)
+
+
 def run_fleet(root, stopping):
     global PROCESS_SLOTS
     prepare_state(root)
     states = sorted(path for path in root.iterdir()
-                    if path.is_dir() and re.fullmatch(r'tiktok-[0-9]{2}', path.name))
-    PROCESS_SLOTS = len(states)
+                    if path.is_dir() and re.fullmatch(r"tiktok-[0-9]{2}", path.name))
     if not states:
-        raise ValueError('No enrolled accounts')
+        raise ValueError("No enrolled accounts")
+    PROCESS_SLOTS = len(states)
     with (root / 'fleet.lock').open('a') as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         startup_lock = threading.Lock()
-        threads = [threading.Thread(target=account_loop, args=(state, stopping, startup_lock),
-                                    name=state.name) for state in states]
-        for thread in threads:
-            thread.start()
+        enrollment = threading.Thread(target=enrollment_loop,
+            args=(root, stopping, startup_lock), name='enrollment')
+        enrollment.start()
+        threads = {}
         try:
             while not stopping.is_set():
-                value = {'pid': os.getpid(), 'accounts': [thread.name for thread in threads if thread.is_alive()],
+                for state in sorted(root.iterdir()):
+                    if not state.is_dir() or not re.fullmatch(r'tiktok-[0-9]{2}', state.name):
+                        continue
+                    if (state / 'enrollment.json').exists() and not (state / 'activated.json').exists():
+                        continue
+                    if state.name not in threads:
+                        thread = threading.Thread(target=account_loop, args=(state, stopping, startup_lock), name=state.name)
+                        threads[state.name] = thread
+                        PROCESS_SLOTS = len(threads)
+                        thread.start()
+                PROCESS_SLOTS = len(threads)
+                value = {'pid': os.getpid(), 'accounts': [name for name, thread in threads.items() if thread.is_alive()],
                          'updatedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                          'maxRssKiB': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
                 temporary = root / 'status.tmp'
                 temporary.write_text(json.dumps(value))
                 temporary.replace(root / 'status.json')
-                if not any(thread.is_alive() for thread in threads):
-                    raise RuntimeError('All account workers exited')
+                if not stopping.is_set() and threads and not any(thread.is_alive() for thread in threads.values()):
+                    raise RuntimeError("All account workers exited")
                 stopping.wait(6)
         finally:
             stopping.set()
-            for thread in threads:
+            for thread in [*threads.values(), enrollment]:
                 thread.join()
 
 
