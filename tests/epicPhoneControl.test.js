@@ -71,3 +71,28 @@ test('home shortcut shows count before automatic start; checkout return never st
   const paused=await boot('/phone','paused');assert.equal(paused.intervals.filter(x=>x.ms===1000).length,1);assert.equal(paused.elements.get('start').textContent,'Continue claims');
   const returned=await boot('/connect');assert.equal(returned.intervals.filter(x=>x.ms===1000).length,1);assert.equal(returned.calls.some(x=>x.endsWith('/start')),false);
 });
+test('phone relay preserves server rate-limit retry time', async t => {
+  const app=express();
+  mountPhonePanel(app,{token:secret,serverUrl:'https://example.invalid',visible(){},
+    request:async()=>({status:429,headers:{get:()=> '123'},json:async()=>({success:false,message:'Slow down'})})});
+  const base=await serve(t,app),r=await fetch(base+'/phone/control/status',{headers:{Authorization:authorization}});
+  assert.equal(r.status,429);assert.equal(r.headers.get('retry-after'),'123');assert.equal((await r.json()).retryAfterSeconds,123);
+});
+test('dashboard waits out a status rate limit while local visibility beats continue', async()=>{
+  const fs=require('node:fs'),vm=require('node:vm');
+  const html=fs.readFileSync(require.resolve('../extension/epic-claim-helper-android/phone/phone-panel.html'),'utf8');
+  const elements=new Map(),intervals=[];let now=1000,statusCalls=0,beats=0;
+  const el=id=>{if(!elements.has(id))elements.set(id,{style:{},replaceChildren(){}});return elements.get(id)};
+  const context={URLSearchParams,AbortSignal,Date:class extends Date{static now(){return now}},
+    location:{pathname:'/connect',search:''},history:{replaceState(){}},
+    document:{visibilityState:'visible',getElementById:el,addEventListener(){}},clearInterval(){},
+    setInterval(fn,ms){intervals.push({fn,ms})},fetch:async url=>{
+      if(url.endsWith('/visible')){beats++;return {ok:true,json:async()=>({success:true})}}
+      statusCalls++;return {ok:false,status:429,json:async()=>({success:false,message:'Slow down',retryAfterSeconds:120})};
+    }};
+  vm.runInNewContext(html.match(/<script>([\s\S]*)<\/script>/)[1],context);await new Promise(setImmediate);
+  assert.equal(statusCalls,1);assert.equal(el('connection').textContent,'Status delayed');
+  const poll=intervals.find(x=>x.ms===30000).fn,beat=intervals.find(x=>x.ms===5000).fn;
+  now+=30000;poll();await beat();assert.equal(statusCalls,1);assert.ok(beats>=2);
+  now+=90001;poll();await new Promise(setImmediate);assert.equal(statusCalls,2);
+});

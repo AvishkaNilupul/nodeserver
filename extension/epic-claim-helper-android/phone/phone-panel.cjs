@@ -37,6 +37,11 @@ function mountPhonePanel(app, {token, serverUrl, visible, request = fetch}) {
         signal: AbortSignal.timeout(45000), redirect: 'error',
       });
       const data = await reply.json();
+      if (reply.status === 429) {
+        const seconds = Number(reply.headers?.get('retry-after'));
+        data.retryAfterSeconds = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 60;
+        res.set('Retry-After', String(data.retryAfterSeconds));
+      }
       res.status(reply.status).json(data);
     } catch { res.status(503).json({success: false, message: 'Server connection unavailable. Check the phone internet and try again.'}); }
   });
