@@ -20,3 +20,17 @@ test('Android keeps assignment through security check and submits the same verif
 test('unresolved security check eventually pauses instead of submitting or hanging forever',async()=>{
  const f=await fixture();await f.tick();f.timeout();await new Promise(setImmediate);assert.equal(f.results[0].status,'needs_captcha');assert.equal(f.clicks(),0);
 });
+test('Android answers a leased job immediately if its visible tab cannot open', async()=>{
+ const background=fs.readFileSync(path.join(root,'extension/epic-claim-helper-android/dist/epic-claim-background.js'),'utf8');
+ const responses=[],removed=[],intervals=[];
+ const context={Date,URL,AbortSignal,setInterval(fn,ms){intervals.push({fn,ms})},setTimeout(){},
+  ext:{storage:{local:{async get(){return {'epicclaim.connection':{origin:'http://127.0.0.1:8123',token:'test',isolateSessions:true}}}},
+   session:{async get(){return {}},async remove(k){removed.push(k)}}},
+   browsingData:{async removeCookies(){}},tabs:{async create(){throw Error('No visible tab')},onUpdated:{addListener(){}}},
+   alarms:{create(){},onAlarm:{addListener(){}}},runtime:{onMessage:{addListener(){}}}},
+  fetch:async(url,opts)=>{if(url.endsWith('/extension/result'))responses.push(JSON.parse(opts.body));return {ok:true,json:async()=>({job:{id:'job',lease:'lease'}})}}};
+ vm.runInNewContext(background,context);await new Promise(setImmediate);
+ assert.equal(responses.length,1);assert.equal(responses[0].status,'error');assert.equal(responses[0].id,'job');
+ assert.match(responses[0].error,/visible claim tab/);assert.deepEqual(removed,['epicclaim.job']);
+ assert.equal(intervals[0].ms,5000);
+});

@@ -67,3 +67,10 @@ file alongside `phone-panel.cjs` and `phone-panel.html` during installation.
 Low battery or OS policy can refuse a wake lock; keep the phone powered and
 Firefox in front. A five-second background poll reduces job pickup latency;
 the server's checkout spacing and rate-limit cooldowns remain unchanged.
+
+Phone helper 1.2.1.5 also selects the tab from its recent, top-frame visibility
+heartbeat. Firefox Nightly shortcut tabs can report `active:false` and make
+`tabs.query({currentWindow:true})` throw despite being on screen. Never create
+a replacement tab in that case: it can lose desktop mode. A missing/stale
+heartbeat refuses tab setup, and a setup failure now returns an error to the
+bridge immediately instead of silently waiting for the lease timeout.

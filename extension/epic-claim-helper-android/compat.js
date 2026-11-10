@@ -32,6 +32,8 @@
     },
   };
   globalThis.ext = ext;
+  const VISIBLE_TAB = 'epicclaim.android.visibleTab';
+  const helperPage = url => /^http:\/\/127\.0\.0\.1:(8123|8125)\/|^https:\/\/([\w-]+\.)?epicgames\.com\//.test(url || '');
   // Background page only: run each claim in the helper tab already on screen
   // instead of a new tab. Epic's phone layout has no account name, so the
   // checkout's account check can never pass there. Firefox's desktop mode
@@ -40,13 +42,17 @@
   // So the claim reuses the active pairing-page or Epic tab, and when the helper
   // would close that tab, it goes back to the pairing page instead.
   if (api.tabs) {
-    const helperPage = url => /^http:\/\/127\.0\.0\.1:\d+\/|^https:\/\/([\w-]+\.)?epicgames\.com\//.test(url || '');
     // Kept in session storage: Firefox may unload this background page mid-claim.
     const REUSED = 'epicclaim.android.reusedTab';
     ext.tabs = {
       async create(props) {
-        const [tab] = await api.tabs.query({ active: true, currentWindow: true });
-        if (!tab || !helperPage(tab.url)) return api.tabs.create(props);
+        // Android shortcut tabs can be visible while currentWindow throws and
+        // every tab has active:false. Use the actual visible content-script
+        // sender; never fall back to a new, non-desktop checkout tab.
+        const { [VISIBLE_TAB]: seen } = await api.storage.session.get(VISIBLE_TAB);
+        if (!seen || Date.now() - seen.at > 20000) throw Error('Open the Epic Claims tab on the phone');
+        const tab = await api.tabs.get(seen.id);
+        if (!helperPage(tab.url)) throw Error('Open the Epic Claims tab on the phone');
         await api.storage.session.set({ [REUSED]: tab.id });
         return api.tabs.update(tab.id, { url: props.url, active: true });
       },
@@ -67,8 +73,13 @@
   // listener ignores it.
   if (ext.tabs) {
     let lastBeat = 0;
-    ext.runtime.onMessage.addListener(msg => {
-      if (msg?.type !== 'phone-visible' || Date.now() - lastBeat < 4000) return;
+    ext.runtime.onMessage.addListener((msg, sender) => {
+      if (msg?.type !== 'phone-visible' || !sender.tab || sender.frameId !== 0 ||
+          !helperPage(sender.url || sender.tab.url)) return;
+      // Record the sender even when bridge traffic is throttled; navigation
+      // may have switched the visible tab since the previous heartbeat.
+      api.storage.session.set({ [VISIBLE_TAB]: { id: sender.tab.id, at: Date.now() } }).catch(() => {});
+      if (Date.now() - lastBeat < 4000) return;
       lastBeat = Date.now();
       ext.storage.local.get('epicclaim.connection').then(({ 'epicclaim.connection': c }) => {
         if (!c) return;

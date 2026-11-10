@@ -17,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const ANDROID_REV = 4;
+const ANDROID_REV = 5;
 const here = __dirname;
 const src = path.resolve(process.argv[2] || path.join(here, '..', 'epic-claim-helper'));
 const dist = path.join(here, 'dist');
@@ -33,7 +33,23 @@ for (const file of scripts) {
   let out = code.replace(/\bchrome\.(?=[a-z])/g, 'ext.');
   // Firefox's background page can poll promptly while the phone is awake.
   // The shared in-flight guard still guarantees one poll/job at a time.
-  if (file === manifest.background.service_worker) out += '\nsetInterval(pollBrowserClaims, 5000);\n';
+  if (file === manifest.background.service_worker) {
+    out += '\nsetInterval(pollBrowserClaims, 5000);\n';
+    // Once a lease is accepted, setup errors must answer it instead of
+    // leaving the bridge waiting for three minutes with no assigned tab.
+    const silentCatch = '}catch{}finally{claimPolling=false;}';
+    if (!out.includes(silentCatch)) throw Error('Android poll error patch no longer matches source');
+    out = out.replace('if(claimPolling)return;claimPolling=true;',
+      'if(claimPolling)return;claimPolling=true;let acceptedJob,connection;');
+    out = out.replace('const c=data[CLAIM_STATE];', 'const c=data[CLAIM_STATE];connection=c;');
+    out = out.replace('if(!job)return;', 'if(!job)return;acceptedJob=job;');
+    out = out.replace(silentCatch, `}catch{
+      if(acceptedJob&&connection){
+        await claimFetch(connection,'/extension/result',{id:acceptedJob.id,lease:acceptedJob.lease,status:'error',error:'Phone could not open the visible claim tab; reopen Epic Claims and continue'}).catch(()=>{});
+        await ext.storage.session.remove(CLAIM_JOB).catch(()=>{});
+      }
+    }finally{claimPolling=false;}`);
+  }
   // Keep the assigned job alive while the person completes a visible check.
   // Ending it immediately loses the context needed to click the free checkout.
   if (file === 'epic-claim-checkout.js') {
