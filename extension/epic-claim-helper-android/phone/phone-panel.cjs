@@ -24,6 +24,7 @@ function mountPhonePanel(app, {token, serverUrl, visible, request = fetch}) {
     const html = fs.readFileSync(path.join(__dirname, 'phone-panel.html'), 'utf8');
     res.type('html').send(html.replace('__PHONE_CONTROL_TOKEN__', key));
   });
+  app.get('/phone/awake.js', (_req, res) => res.sendFile(path.join(__dirname, 'phone-awake.js')));
   app.post('/phone/control/visible', auth, (_req, res) => { visible(); res.json({success: true}); });
   for (const [method, local, remote] of [
     ['get', '/phone/control/status', 'claims'],

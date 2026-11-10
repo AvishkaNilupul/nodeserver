@@ -17,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const ANDROID_REV = 3;
+const ANDROID_REV = 4;
 const here = __dirname;
 const src = path.resolve(process.argv[2] || path.join(here, '..', 'epic-claim-helper'));
 const dist = path.join(here, 'dist');
@@ -31,6 +31,9 @@ for (const cs of manifest.content_scripts) cs.js.forEach(f => scripts.add(f));
 for (const file of scripts) {
   const code = fs.readFileSync(path.join(src, file), 'utf8');
   let out = code.replace(/\bchrome\.(?=[a-z])/g, 'ext.');
+  // Firefox's background page can poll promptly while the phone is awake.
+  // The shared in-flight guard still guarantees one poll/job at a time.
+  if (file === manifest.background.service_worker) out += '\nsetInterval(pollBrowserClaims, 5000);\n';
   // Keep the assigned job alive while the person completes a visible check.
   // Ending it immediately loses the context needed to click the free checkout.
   if (file === 'epic-claim-checkout.js') {
@@ -44,6 +47,7 @@ for (const file of scripts) {
   fs.writeFileSync(path.join(dist, file), out);
 }
 for (const file of ['compat.js', 'phone-visible.js']) fs.copyFileSync(path.join(here, file), path.join(dist, file));
+fs.copyFileSync(path.join(here, 'phone/phone-awake.js'), path.join(dist, 'phone-awake.js'));
 
 manifest.name += ' (Android)';
 manifest.version += '.' + ANDROID_REV;
@@ -54,7 +58,7 @@ manifest.host_permissions = [...new Set([...manifest.host_permissions, 'https://
 for (const cs of manifest.content_scripts) if (cs.world !== 'MAIN') cs.js = ['compat.js', ...cs.js];
 manifest.content_scripts.push({
   matches: ['http://127.0.0.1/*', 'https://*.epicgames.com/*'],
-  js: ['compat.js', 'phone-visible.js'],
+  js: ['compat.js', 'phone-awake.js', 'phone-visible.js'],
   run_at: 'document_idle',
 });
 manifest.browser_specific_settings = {

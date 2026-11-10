@@ -6,7 +6,7 @@
 <section class="card"><div id="count">—</div><div class="caption" id="caption">Checking remaining claims</div><ul id="games"></ul></section>
 <section class="card"><div id="message" role="status">Keep Firefox open while claims run.</div><progress id="progress" value="0" max="1"></progress><p id="error" role="alert"></p><button id="start" disabled>Checking…</button><button id="stop" class="secondary">Stop after this claim</button><button id="refresh" class="secondary">Refresh count</button></section>
 <footer>Keep this phone unlocked with Firefox on screen. If Epic shows a security check, complete it, then return here and tap Continue. <a href="/pair">Reconnect helper</a></footer>
-</main><script>
+</main><script src="/phone/awake.js"></script><script>
 (()=>{'use strict';const key='__PHONE_CONTROL_TOKEN__',el=id=>document.getElementById(id);let latest,starting=false,timer,auto=location.pathname==='/phone'||new URLSearchParams(location.search).get('launch')==='1',countdown=false;
 history.replaceState(null,'','/phone');
 async function api(route,method='GET'){const r=await fetch('/phone/control/'+route,{method,headers:{Authorization:'Bearer '+key},signal:AbortSignal.timeout(50000)});const d=await r.json();if(!r.ok||!d.success)throw Error(d.message||'Phone connection unavailable');return d}

@@ -58,3 +58,12 @@ checkout budget during a visible security check. Completing the check lets
 it continue the same verified free checkout. An unresolved check still pauses
 at the deadline. The panel labels a running queue explicitly, shows a live
 spacing countdown and never automatically restarts a paused batch.
+
+Phone helper 1.2.1.4 requests a screen wake lock on visible helper and Epic
+pages, including checkout waits, and reacquires it after a visibility change
+or an OS release. Navigation and hidden pages release their locks. The phone
+panel also serves the same `phone-awake.js` from its directory, so copy that
+file alongside `phone-panel.cjs` and `phone-panel.html` during installation.
+Low battery or OS policy can refuse a wake lock; keep the phone powered and
+Firefox in front. A five-second background poll reduces job pickup latency;
+the server's checkout spacing and rate-limit cooldowns remain unchanged.
