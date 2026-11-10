@@ -12,6 +12,16 @@ def node(text,kind='android.widget.Button',**extra):
     return {'text':text,'class':kind,'bounds':'[0,0][100,50]','enabled':'true','clickable':'true',**extra}
 
 class LoginTests(unittest.TestCase):
+    def test_optional_gender_prompt_uses_skip_without_selecting_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device=Mock();device.state=Path(directory)
+            skip=node('Skip',kind='android.widget.TextView',clickable='false')
+            screens=[[node('Tell us more about yourself'),node('Prefer not to say'),skip],
+                     [node('Edit profile'),node('@fixture')]]
+            with patch.object(login,'nodes',side_effect=screens),patch.object(login,'tap') as tap,patch.object(login.time,'sleep'):
+                self.assertEqual(login.sign_in(device,{'username':'fixture','password':'fixture-password'},Mock()),'@fixture')
+            tap.assert_called_once_with(device,skip)
+
     def test_offscreen_phone_field_does_not_hide_active_email_field(self):
         hidden=node('Phone number',kind='android.widget.EditText',bounds='[0,537][-60,577]')
         active=node('',kind='android.widget.EditText',bounds='[60,537][660,577]')

@@ -1,4 +1,5 @@
 const rateLimit = require("express-rate-limit");
+const { createHash, timingSafeEqual } = require("node:crypto");
 
 // Shared rate limiters. Each one is keyed by client IP (Express resolves this
 // from the configured `trust proxy` setting). Responses are JSON so API
@@ -21,7 +22,7 @@ function jsonLimiter({ windowMs, limit, message, skip }) {
 // calls) never trips it; it only catches a single IP flooding the server.
 // Socket.IO is skipped because its polling transport makes many background
 // requests and would otherwise get throttled, breaking live chat.
-const globalLimiter = jsonLimiter({
+const anonymousLimiter = jsonLimiter({
   windowMs: 15 * 60 * 1000,
   limit: 1000,
   message: "Too many requests. Please slow down and try again later.",
@@ -33,6 +34,30 @@ const globalLimiter = jsonLimiter({
   skip: (req) =>
     req.path.startsWith("/socket.io") || !!(req.session && req.session.admin),
 });
+
+// A shared phone polls once per account. Keep its authenticated control traffic
+// in a separate, bounded bucket so adding accounts cannot lock out the farm or
+// anonymous visitors on the same network. Route authentication still runs.
+const tiktokWorkerLimiter = jsonLimiter({
+  windowMs: 60 * 1000,
+  limit: 600,
+  message: "Too many TikTok worker requests. Please slow down.",
+});
+const digest = (value) => createHash("sha256").update(value).digest();
+function isTikTokWorker(req) {
+  if (req.method !== "POST") return false;
+  let key;
+  if (/^\/api\/tiktok-farm\/worker\/setup\/(poll|update|session)\/?$/.test(req.path)) {
+    key = process.env.TIKTOK_SETUP_KEY;
+  } else if (/^\/api\/tiktok-farm\/worker\/(poll|catalog|update|stock|enrollment\/(poll|update))\/?$/.test(req.path)) {
+    key = process.env.TIKTOK_WORKER_KEY;
+  }
+  return typeof key === "string" && key.length >= 32 &&
+    timingSafeEqual(digest(req.get("authorization") || ""), digest("Bearer " + key));
+}
+function globalLimiter(req, res, next) {
+  return (isTikTokWorker(req) ? tiktokWorkerLimiter : anonymousLimiter)(req, res, next);
+}
 
 // Admin login: slow brute-force of passwords.
 const loginLimiter = jsonLimiter({

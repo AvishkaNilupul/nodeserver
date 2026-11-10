@@ -265,7 +265,9 @@ def sign_in(device, credential, status):
             continue
         # Fresh devices may show optional feed interests after a successful login.
         # Scope Skip to this screen; never dismiss an unknown verification prompt.
-        if find(items, {"choose what you like"}) and (button := find(items, {"skip"})):
+        if (find(items, {"choose what you like"}) or
+                (find(items, {"tell us more about yourself"}) and
+                 find(items, {"prefer not to say"}))) and (button := find(items, {"skip"})):
             tap(device, button)
             time.sleep(2)
             continue
