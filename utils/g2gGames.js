@@ -14,20 +14,11 @@
 // filter on G2G_ITEMS_SERVICE, match by brand label — when a new game needs a
 // G2G listing.
 //
-// WHY A MISS RETURNS null AND NEVER THE NEAREST BRAND
-// brand_id decides which game's page the offer shows up on, so nothing here is
-// approximated. (An earlier draft of this comment called the account's nine
-// Rainbow Six Siege bundles under "Tom Clancy's Rainbow Six Mobile" a mistake.
-// They are not: probing the live catalog on 2026-09-08 showed Siege has NO
-// creatable Game Items product — `keyword_relation/search` returns nothing for
-// lgc_game_24713 — so Mobile was the only shelf available. It is in
-// NOT_LISTABLE below for that reason. Do not "fix" those offers.) A game either matches a brand exactly, or it matches a
-// hand-checked alias, or brandForGame returns null and the auto-lister skips
-// that game on G2G. Games whose nearest brand is a DIFFERENT title are absent
-// on purpose: Escape from Tarkov: Arena, Halo: The Master Chief Collection,
-// Halo: Campaign Evolved, World of Tanks: HEAT / Console, Mir Tankov,
-// Mir Korabley, Tom Clancy's The Division: Resurgence, ARKNIGHTS: ENDFIELD,
-// Tanks Blitz, SMITE 2, PUBG: BATTLEGROUNDS.
+// Unmapped games remain unavailable. Rainbow Six Siege has an explicit
+// owner-selected exception (2026-11-11): route its Twitch-drop offers to
+// Rainbow Six Mobile > Twitch Drops. Siege itself has no creatable Game Items
+// product. Keep Siege in buyer-facing titles and descriptions; the destination
+// category does not change the rewards' game. Never infer other cross-game routes.
 
 // The value lives in utils/marketplaces.js next to the rest of the G2G
 // connector; re-exported here so the two can never drift.
@@ -110,9 +101,9 @@ const GAME_BRANDS = {
     marketingTitle: "The First Descendant",
   },
   "Rainbow Six Siege": {
-    seoTerm: "tom-clancys-rainbow-six-siege-item",
-    brandId: "lgc_game_24713",
-    marketingTitle: "Tom Clancys Rainbow Six Siege",
+    seoTerm: "tom-clancy-s-rainbow-six-mobile-items",
+    brandId: "lgc_game_30876",
+    marketingTitle: "Tom Clancy's Rainbow Six Mobile Items",
   },
   "Tom Clancy's The Division 2": {
     seoTerm: "the-division-2-item",
@@ -552,11 +543,9 @@ Object.freeze(GAME_ALIASES);
 // categories.json is a browsing catalog and lists more than a seller may
 // actually use, so this cannot be derived from it.
 //
-// Two of these are worth knowing about specifically. **Rainbow Six Siege is
-// not listable under Game Items**, which is why the account's Siege bundle sits
-// under "Rainbow Six Mobile" — that was the only option, not a mistake.
-// **Overwatch** is likewise unavailable, though it is a no-claim game and its
-// bundles are refused before this point anyway.
+// Siege's original brand remains unavailable; its explicit mapping above uses
+// the verified Mobile shelf. Overwatch and the other unavailable brands still
+// return null.
 const NOT_LISTABLE = new Set([
   "lgc_game_21555", // Overwatch
   "lgc_game_24713", // Rainbow Six Siege
