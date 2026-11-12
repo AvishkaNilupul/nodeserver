@@ -1,5 +1,5 @@
 "use strict";
-const { parseReward, eligibility, labelOf, imageUrl, PROFILES } = require("../tiktokRewards");
+const { parseReward, eligibility, labelOf, buyerLabelOf, imageUrl, PROFILES } = require("../tiktokRewards");
 const PREFIX = "tiktok:";
 const loginId = (account) => PREFIX + account;
 const itemKey = (id) => "run-" + id;
@@ -26,7 +26,7 @@ async function rows(deps) {
       campaignTitle: "", campaignEndAt: new Date(r.campaignEndAt), groupKey,
       // Native task IDs keep equally named rewards from switching slots when
       // different accounts earn them in a different order.
-      explicitSlotKey: `${groupKey}:task-${r.task}`, nameRaw: labelOf(r), name: labelOf(r), image: imageUrl(r.image),
+      explicitSlotKey: `${groupKey}:task-${r.task}`, nameRaw: labelOf(r), name: buyerLabelOf(r), image: imageUrl(r.image),
       earnedAt: run.createdAt, useBy: new Date(r.useBy), codeEnc: run.code, source: "tiktok" });
   }
   return out;

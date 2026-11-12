@@ -65,6 +65,10 @@ const DEFAULTS = deepFreeze({
     "930002": { sell: true, marketGame: "Happy Clinic", displayName: "Happy Clinic" },
     "930003": { sell: true, marketGame: "World of Tanks", displayName: "World of Tanks (EU)" },
     "930004": { sell: true, marketGame: "Wolvesville", displayName: "Wolvesville" },
+    "930005": { sell: true, marketGame: "PUBG Mobile", displayName: "PUBG Mobile" },
+    "930006": { sell: true, marketGame: "Delta Force", displayName: "Delta Force Mobile" },
+    "930007": { sell: true, marketGame: "Delta Force", displayName: "Delta Force (PC)" },
+    "930008": { sell: true, marketGame: "OneState", displayName: "OneState (US)" },
     // gameNo -> { sell, marketGame, displayName }; unknown games do not sell
     "12": { sell: true, marketGame: "Overwatch", displayName: "Overwatch 2" },
     "200": { sell: true, marketGame: "Delta Force", displayName: "Delta Force" },

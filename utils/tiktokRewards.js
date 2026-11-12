@@ -7,6 +7,10 @@ const PROFILES = Object.freeze({
   "7277023276584526852": { gameNo: "930002", name: "Happy Clinic", host: "store.nordcurrent.com", type: 1 },
   "7277642444328522756": { gameNo: "930003", name: "World of Tanks", host: "worldoftanks.eu", type: 1 },
   "7279025357352522244": { gameNo: "930004", name: "Wolvesville", host: "vouchers.wolvesville.com", type: 1 },
+  "7223211460934503169": { gameNo: "930005", name: "PUBG MOBILE", host: "www.pubgmobile.com", path: "/en/event/redeemcode/", type: 1 },
+  "7276730075688531204": { gameNo: "930006", name: "Delta Force Mobile", host: "www.playdeltaforce.com", path: "/en/cdkredeem.html", type: 1 },
+  "7276547073576525572": { gameNo: "930007", name: "Delta Force", host: "www.playdeltaforce.com", path: "/en/cdkredeem.html", type: 1 },
+  "7278453307944521732": { gameNo: "930008", name: "OneState", host: "onestate.com", path: "/promocode", type: 1, rewardName: /^\$10k State Bucks US$/ },
 });
 const date = (v) => Number.isSafeInteger(v) && v >= 946684800000 && v < 4102444800000;
 const text = (v, max) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x08\x0b-\x1f]/.test(v);
@@ -45,10 +49,19 @@ function eligibility(reward) {
   if (!profile || profile.name !== reward.gameName) return "New game: redemption guide needs review";
   if (reward.redeemType !== profile.type) return "Redemption method needs review";
   if (profile.host && (!reward.redeemUrl || new URL(reward.redeemUrl).hostname !== profile.host)) return "Redemption region or website needs review";
+  if (profile.path && new URL(reward.redeemUrl).pathname !== profile.path) return "Redemption region or website needs review";
+  if (profile.rewardName && !profile.rewardName.test(reward.name)) return "Reward region needs review";
   if (profile.type === 2 && !/Pear-Pal.*Other.*Redeem Code/i.test(reward.instructions)) return "Redemption instructions need review";
   return "";
 }
 function labelOf(reward) {
   return (Array.isArray(reward?.items) ? reward.items : []).map((i) => `${i.count}x ${i.name}`).join(" + ");
 }
-module.exports = { parseReward, eligibility, labelOf, imageUrl, PROFILES };
+// Only this verified cosmetic gets a descriptive buyer label. Preserve its
+// native name separately; never strip platform words from arbitrary rewards.
+function buyerLabelOf(reward) {
+  if (reward?.gameId === "7279025357352522244" && reward.items?.length === 1 &&
+      reward.items[0].name === "TikTok Hair" && reward.items[0].count === 1) return "1x Hair Cosmetic";
+  return labelOf(reward);
+}
+module.exports = { parseReward, eligibility, labelOf, buyerLabelOf, imageUrl, PROFILES };

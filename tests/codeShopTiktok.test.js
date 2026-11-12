@@ -184,3 +184,70 @@ test("Sales exposes draft validation problems without code fields", async (t) =>
   const out = await r.json(); assert.ok(out.products[0].problems.includes("label 1 is empty"));
   assert.ok(!JSON.stringify(out).includes("SYNTHETIC-"));
 });
+
+test("new game profiles keep PC/mobile stock separate and produce guarded redemption guides", async () => {
+  const profiles = [
+    ["7223211460934503169", "PUBG MOBILE", "https://www.pubgmobile.com/en/event/redeemcode/", "Theme Token X 10", "930005"],
+    ["7276730075688531204", "Delta Force Mobile", "https://www.playdeltaforce.com/en/cdkredeem.html", "SG552 - Purr Baby", "930006"],
+    ["7276547073576525572", "Delta Force", "https://www.playdeltaforce.com/en/cdkredeem.html", "SG552 - Purr Baby", "930007"],
+    ["7278453307944521732", "OneState", "https://onestate.com/promocode", "$10k State Bucks US", "930008"],
+  ];
+  const { eligibility } = require("../utils/tiktokRewards");
+  for (const [i, [gameId, gameName, redeemUrl, name, gameNo]] of profiles.entries()) {
+    const r = reward({ gameId, gameName, redeemUrl, redeemType: 1, name, items: [{ name, count: 1 }] });
+    assert.equal(eligibility(r), "");
+    assert.ok(eligibility({ ...r, redeemUrl: "https://example.com/redeem" }));
+    assert.ok(eligibility({ ...r, redeemUrl: new URL("/different-region", redeemUrl).href }));
+    assert.ok(eligibility({ ...r, redeemType: 2 }));
+    assert.ok(eligibility({ ...r, verifiedAt: undefined }));
+    await seed(`tiktok-0${i + 1}`, { reward: r });
+    assert.match(guideFor(gameNo, cfg).deliveryHelp, /https:\/\//);
+  }
+  assert.ok(eligibility(reward({ gameId: "7278453307944521732", gameName: "OneState", redeemUrl: "https://onestate.com/promocode", redeemType: 1, name: "$10k State Bucks EU" })));
+  assert.equal((await createIngest(deps()).run()).added, 4);
+  const stock = await Stock.find({}).lean();
+  assert.equal(new Set(stock.map(x => x.gameNo)).size, 4);
+  assert.equal(new Set(stock.map(x => x.slotKey)).size, 4);
+  await createPlanner(deps()).run();
+  const products = await models.CodeProduct.find({}).lean();
+  assert.equal(products.length, 4);
+  for (const p of products) {
+    assert.deepEqual(p.markets, ["eldorado"]);
+    assert.equal(checkBuyerText(p.texts, cfg).length, 0);
+    assert.match(p.texts.description, /REDEEM BY 24 November 2026/);
+    assert.ok(p.texts.description.length <= 2000);
+    const row = stock.find(x => x.gameNo === p.gameNo);
+    const active = { ...p, status: "active", offer: new mongoose.Types.ObjectId() };
+    await models.CodeProduct.updateOne({ _id: p._id }, { $set: { status: active.status, offer: active.offer } });
+    const built = await createUnits(deps()).build(active, [[row._id]]);
+    assert.equal(built.built, 1);
+    const unit = await models.SuppliedAccount.findById(built.unitIds[0]);
+    assert.ok(secret.decrypt(unit.password).endsWith(`SYNTHETIC-${row.loginId.slice(7)}-200`));
+  }
+  assert.match(products.find(p => p.gameNo === "930006").texts.title, /Mobile/);
+  assert.match(products.find(p => p.gameNo === "930007").texts.title, /PC/);
+  assert.match(products.find(p => p.gameNo === "930008").texts.description, /US server/);
+});
+
+test("verified hair cosmetic gets a descriptive label without weakening source guards", async () => {
+  const { buyerLabelOf } = require("../utils/tiktokRewards");
+  const r = reward({ gameId: "7279025357352522244", gameName: "Wolvesville", redeemType: 1,
+    redeemUrl: "https://vouchers.wolvesville.com/", name: "TikTok Hair - November 2026", items: [{ name: "TikTok Hair", count: 1 }] });
+  assert.equal(buyerLabelOf(r), "1x Hair Cosmetic");
+  assert.equal(buyerLabelOf({ ...r, gameId: "999" }), "1x TikTok Hair");
+  assert.equal(buyerLabelOf({ ...r, items: [{ name: "TikTok Hat", count: 1 }] }), "1x TikTok Hat");
+  await seed("tiktok-01", { reward: r });
+  await createIngest(deps()).run();
+  const row = await Stock.findOne({}).lean();
+  assert.equal(row.nameRaw, "1x TikTok Hair");
+  assert.equal(row.name, "1x Hair Cosmetic");
+  await createPlanner(deps()).run();
+  let p = await models.CodeProduct.findOne({}).lean();
+  assert.equal(p.slots[0].label, "1x Hair Cosmetic");
+  assert.equal(checkBuyerText(p.texts, cfg).length, 0);
+  await models.CodeProduct.updateOne({ _id: p._id }, { $set: { "slots.0.label": "" } });
+  await createPlanner(deps()).run();
+  p = await models.CodeProduct.findById(p._id).lean();
+  assert.equal(p.slots[0].label, "1x Hair Cosmetic", "existing draft repairs itself");
+  assert.ok(checkBuyerText({ ...p.texts, title: "TikTok Hair" }, cfg).length > 0);
+});
