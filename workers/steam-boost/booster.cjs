@@ -158,6 +158,9 @@ class AccountBooster extends EventEmitter {
         renewRefreshTokens: true,
         dataDirectory: this.dataDirectory,
         httpProxy,
+        // Residential HTTP exits need a web-compatible route. Auto can select
+        // native Steam ports that never establish a usable proxy connection.
+        webCompatibilityMode: !!httpProxy,
       });
       this._bind(this.client);
       const token = await this.tokens.get(this.account.id);
