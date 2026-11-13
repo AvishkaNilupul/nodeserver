@@ -17,9 +17,10 @@ function createApi({ base = process.env.BOOST_API_URL, token = process.env.STEAM
 }
 
 class Worker {
-  constructor({ api, makeBooster = o => new AccountBooster(o), proxy = verifiedCountryProxy, now = Date.now, sleep = ms => delay(ms), blindMs = 180000, loginGapMs = 20000 } = {}) {
+  constructor({ api, makeBooster = o => new AccountBooster(o), proxy = verifiedCountryProxy, now = Date.now, sleep = ms => delay(ms), blindMs = 180000, loginGapMs = 20000, log = () => {} } = {}) {
     this.api = api; this.makeBooster = makeBooster; this.proxy = proxy; this.now = now; this.sleep = sleep;
     this.blindMs = blindMs; this.loginGapMs = loginGapMs;
+    this.log = log;
     this.sessions = new Map(); this.lastAssignments = now(); this.lastLogin = 0; this.running = true;
   }
   async startOne(a) {
@@ -49,6 +50,12 @@ class Worker {
     booster.on('failed', () => { row.failed = true; });
     // Time the first full window from actual play, after proxy/login/license work.
     booster.on('state', state => {
+      // Account IDs and states only; never log credentials, Guard or proxy details.
+      this.log(`[steam-boost] account=${a.id} state=${state}`);
+      if (['connecting', 'reconnecting', 'retrying'].includes(state)) {
+        row.nextSettle = null; row.resumeAt = 0;
+        booster.resume(); // discard any interrupted settlement pause
+      }
       if (state === 'playing' && row.nextSettle === null) row.nextSettle = this.now() + 20 * 60000;
     });
     this.sessions.set(a.id, row);
@@ -106,7 +113,7 @@ class Worker {
 }
 
 async function main() {
-  const worker = new Worker({ api: createApi() });
+  const worker = new Worker({ api: createApi(), log: line => console.log(line) });
   const quit = async () => { await worker.stop(); process.exit(0); };
   process.on('SIGTERM', quit); process.on('SIGINT', quit);
   while (worker.running) {

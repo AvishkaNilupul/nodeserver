@@ -22,6 +22,8 @@ const FATAL = new Map([
 const TOKEN_REJECTED = new Set([EResult.AccessDenied, EResult.Revoked, EResult.Expired, EResult.InvalidSignature]);
 const MAX_GAMES = 32; // Steam's limit for one session
 const PLAYTIME_EVERY_MS = 30 * 60 * 1000;
+const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // includes the four-minute Guard mail wait
+const RECOVERY_TIMEOUT_MS = 2 * 60 * 1000;
 
 function cleanGames(games) {
   const list = [...new Set((games || []).map(Number))].filter(n => Number.isInteger(n) && n > 0);
@@ -72,6 +74,7 @@ class AccountBooster extends EventEmitter {
     this._epoch = 0; // invalidate asynchronous work when a session ends
     this._retryTimer = null;
     this._playtimeTimer = null;
+    this._progressTimer = null;
   }
 
   status() {
@@ -107,20 +110,11 @@ class AccountBooster extends EventEmitter {
   }
 
   async stop() {
-    this._epoch++;
-    this.ready = false;
     this.running = false;
     this.timers.clearTimeout(this._retryTimer);
-    this.timers.clearInterval(this._playtimeTimer);
-    if (this.client) {
-      if (this.steamID) {
-        this._applyPlaying([]);
-        this.client.logOff();
-      } else {
-        this.client.logOff(); // also cancels a login in progress
-      }
-    }
-    this.steamID = null;
+    if (this.client && this.steamID) this._applyPlaying([]);
+    this._markStopped();
+    this._discardClient();
     this._setState('stopped');
   }
 
@@ -142,76 +136,84 @@ class AccountBooster extends EventEmitter {
 
   async _connect() {
     if (!this.running) return;
-    const epoch = ++this._epoch;
+    this._markStopped();
+    this._discardClient();
+    const epoch = this._epoch;
+    this.blocked = false;
+    this._watchProgress(LOGIN_TIMEOUT_MS, 'Steam login timed out');
     this._setState('connecting');
     let httpProxy = null;
     try {
       if (this.proxy) {
         const exit = await this.proxy(this.account.country);
+        if (!this.running || epoch !== this._epoch) return;
         httpProxy = exit.url;
         this.exit = exit.location;
       }
-    } catch (e) {
-      return this._retryLater(e.message);
-    }
-    if (!this.running || epoch !== this._epoch) return;
-    if (!this.client) {
+      if (!this.running || epoch !== this._epoch) return;
+      // A fresh client also replaces steam-user's transport, reconnect timers and
+      // cached login state. Updating httpProxy on the old client is insufficient.
       this.client = this.createClient({
-        autoRelogin: true, // short Steam outages: steam-user reconnects by itself
+        autoRelogin: true, // short outages recover in place, bounded by our watchdog
         renewRefreshTokens: true,
         dataDirectory: this.dataDirectory,
         httpProxy,
       });
       this._bind(this.client);
-    } else {
-      this.client.setOption('httpProxy', httpProxy);
+      const token = await this.tokens.get(this.account.id);
+      if (!this.running || epoch !== this._epoch) return;
+      this.usedToken = !!token;
+      this.loginStartedAt = new Date().toISOString();
+      this.client.logOn(token
+        ? { refreshToken: token }
+        : { accountName: this.account.username, password: this.account.password });
+    } catch (e) {
+      if (this.running && epoch === this._epoch) this._retryLater(e.message);
     }
-    const token = await this.tokens.get(this.account.id);
-    if (!this.running || epoch !== this._epoch) return;
-    this.usedToken = !!token;
-    this.loginStartedAt = new Date().toISOString();
-    this.client.logOn(token
-      ? { refreshToken: token }
-      : { accountName: this.account.username, password: this.account.password });
   }
 
   _bind(client) {
+    // Retired clients can deliver delayed events. They must not change the new
+    // session, save old tokens, or resume games after an assignment was removed.
+    const on = (event, fn) => client.on(event, (...args) => {
+      if (this.running && this.client === client) return fn(...args);
+      if (event === 'loggedOn') client.logOff();
+    });
     if (this.debug) {
       // steam-user's own trace, minus anything that could carry a secret.
-      client.on('debug', m => {
+      on('debug', m => {
         const line = String(m);
         if (!/password|token|code|guard|secret|cookie/i.test(line)) this.debug(line.slice(0, 200));
       });
     }
-    client.on('steamGuard', (domain, callback) => this._steamGuard(domain, callback));
-    client.on('refreshToken', token => {
+    on('steamGuard', (domain, callback) => this._steamGuard(domain, callback));
+    on('refreshToken', token => {
       Promise.resolve(this.tokens.set(this.account.id, token)).catch(e => this.log('saving token failed: ' + e.message));
     });
-    client.on('loggedOn', () => {
-      if (!this.running) { client.logOff(); return; }
+    on('loggedOn', () => {
       this.steamID = client.steamID ? client.steamID.getSteamID64() : null;
-      this.failures = 0;
-      this.lastError = null;
+      this._watchProgress(RECOVERY_TIMEOUT_MS, 'Steam library setup timed out');
       this._setState('online', this.steamID);
       const epoch = this._epoch;
       this._afterLogin().catch(e => {
         if (!this.running || epoch !== this._epoch) return;
-        this._markStopped();
-        client.logOff();
         this._retryLater('after-login step failed: ' + e.message);
       });
     });
-    client.on('playingState', (blocked, playingApp) => {
+    on('playingState', (blocked, playingApp) => {
       this.blocked = blocked;
       if (blocked) this.log(`someone else is playing ${playingApp} on this account`);
       this._play();
     });
-    client.on('disconnected', (eresult, msg) => {
-      // steam-user logs back in by itself after these (autoRelogin)
+    on('disconnected', (eresult, msg) => {
+      // Give steam-user a short recovery window, then replace the entire
+      // connection and obtain a fresh verified-country residential session.
+      if (this.state === 'reconnecting') return; // repeated notices cannot extend the deadline
       this._markStopped();
-      if (this.running) this._setState('reconnecting', msg || String(eresult));
+      this._watchProgress(RECOVERY_TIMEOUT_MS, 'Steam reconnect timed out');
+      this._setState('reconnecting', msg || String(eresult));
     });
-    client.on('error', err => this._onError(err));
+    on('error', err => this._onError(err));
   }
 
   async _steamGuard(domain, callback) {
@@ -230,7 +232,6 @@ class AccountBooster extends EventEmitter {
       callback(hit.code);
     } catch (e) {
       if (!this.running || epoch !== this._epoch) return;
-      this.client.logOff();
       this._retryLater(e.message);
     }
   }
@@ -245,6 +246,9 @@ class AccountBooster extends EventEmitter {
     await this.refreshPlaytime();
     if (!this.running || epoch !== this._epoch) return;
     this.ready = true;
+    this.failures = 0;
+    this.lastError = null;
+    this.timers.clearTimeout(this._progressTimer);
     if (granted.length) this._applyPlaying([]); // restart the session so it covers the new licenses
     this._play();
     this.timers.clearInterval(this._playtimeTimer);
@@ -316,7 +320,22 @@ class AccountBooster extends EventEmitter {
     this.playing = [];
     this.playingSince = null;
     this.steamID = null;
+    this.timers.clearTimeout(this._progressTimer);
     this.timers.clearInterval(this._playtimeTimer);
+  }
+
+  _watchProgress(ms, reason) {
+    this.timers.clearTimeout(this._progressTimer);
+    const epoch = this._epoch;
+    this._progressTimer = this.timers.setTimeout(() => {
+      if (this.running && epoch === this._epoch) this._retryLater(reason);
+    }, ms);
+  }
+
+  _discardClient() {
+    const client = this.client;
+    this.client = null; // fence events before logOff can emit disconnected
+    try { client?.logOff(); } catch { /* transport already gone */ }
   }
 
   _onError(err) {
@@ -325,7 +344,11 @@ class AccountBooster extends EventEmitter {
     const code = err.eresult;
     if (this.usedToken && TOKEN_REJECTED.has(code)) {
       // Fall back to the password once; a fresh token is saved on success.
-      Promise.resolve(this.tokens.clear(this.account.id)).catch(() => {}).then(() => this._retryLater('saved login expired', 1000));
+      const epoch = this._epoch;
+      this._discardClient();
+      Promise.resolve(this.tokens.clear(this.account.id)).catch(() => {}).then(() => {
+        if (this.running && epoch === this._epoch) this._retryLater('saved login expired', 1000);
+      });
       return;
     }
     if (FATAL.has(code)) return this._fail(FATAL.get(code));
@@ -338,6 +361,8 @@ class AccountBooster extends EventEmitter {
 
   _retryLater(reason, delayMs) {
     if (!this.running) return;
+    this._markStopped();
+    this._discardClient();
     this.failures += 1;
     this.lastError = reason;
     const wait = delayMs || Math.min(30 * 1000 * 2 ** (this.failures - 1), 15 * 60 * 1000);
@@ -349,13 +374,12 @@ class AccountBooster extends EventEmitter {
   }
 
   _fail(reason) {
-    this._epoch++;
-    this.ready = false;
+    this._markStopped();
     this.lastError = reason;
     this.running = false;
     this.timers.clearTimeout(this._retryTimer);
     this.timers.clearInterval(this._playtimeTimer);
-    try { this.client?.logOff(); } catch { /* already gone */ }
+    this._discardClient();
     this._setState('failed', reason);
     this.emit('failed', reason);
   }

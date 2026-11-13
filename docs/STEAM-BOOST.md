@@ -75,6 +75,15 @@ on sale are never pulled back.
 The worker starts at most one new login every 20 s, gives way when someone plays the account
 elsewhere, keeps saved logins on prod, and never prints passwords, codes or tokens.
 
+Recovery (2026-11-13): initial proxy/login/Guard work has a five-minute deadline. After a
+disconnect, steam-user has two minutes to reconnect; library setup also has a two-minute
+deadline. A stalled attempt is logged off and retried with a new client and a fresh verified
+country proxy session. Retries retain exponential backoff and Steam's longer throttle/other-login
+cooldowns. Stopping an assignment cancels recovery, and late replies from retired clients are
+ignored. Reconnection starts a new 20-minute settlement window. Container logs include account
+IDs and state transitions only. Check actual playing state and Steam-recorded minutes, not just
+the worker heartbeat, when assessing health.
+
 ## Completed pipeline — 2026-11-03
 
 The worker runner, panel, logout acknowledgement and Eldorado per-game shelf are implemented in `codex/steam-eldorado-pipeline`. `docs/STEAM-PIPELINE.md` defines the transitions. The initial default is Apex + CS2; other catalog games are selectable.

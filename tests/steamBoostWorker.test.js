@@ -49,3 +49,22 @@ test('first verification window starts after login and leaves twenty uninterrupt
   clock += 60000; await worker.report(); assert.equal(b.paused, true);
   clock += 90000; await worker.report(); assert.equal(b.paused, false);
 });
+
+test('reconnect discards an interrupted settlement and starts a full new window', async () => {
+  let clock = 1000000;
+  class Playing extends Fake {
+    login() { this.steamID = 's'; this.ready = true; this.emit('state', 'playing'); }
+    pause() { this.paused = true; }
+    resume() { this.paused = false; }
+    async refreshPlaytime() { return {}; }
+    disconnect() { this.steamID = null; this.ready = false; this.emit('state', 'reconnecting'); }
+  }
+  const worker = new Worker({ now: () => clock, makeBooster: o => new Playing(o), api: async () => ({}) });
+  await worker.startOne({ id: 'a', gen: 1, games: [730] });
+  const row = worker.sessions.get('a'), b = row.booster; b.login();
+  clock += 20 * 60000; await worker.report(); assert.equal(b.paused, true);
+  b.disconnect(); assert.equal(row.resumeAt, 0); assert.equal(row.nextSettle, null); assert.equal(b.paused, false);
+  clock += 5 * 60000; b.login();
+  clock += 19 * 60000; await worker.report(); assert.equal(b.paused, false);
+  clock += 60000; await worker.report(); assert.equal(b.paused, true);
+});
