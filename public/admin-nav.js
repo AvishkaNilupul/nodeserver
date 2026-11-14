@@ -291,13 +291,43 @@
           icon: ICONS.steamAccounts,
           superOnly: true,
         },
+        {
+          href: "/valorant-accounts.html",
+          label: "Valorant accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/rivals-accounts.html",
+          label: "Rivals accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/outlook/",
+          label: "Outlook inboxes",
+          icon: ICONS.epicAccounts,
+          superOnly: true,
+        },
       ],
     },
     {
       key: "soop",
-      label: "SOOP",
+      label: "Reward farms",
       icon: ICONS.soop,
       items: [
+        {
+          href: "/admin/discord-farm",
+          label: "Discord Farm",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
+        {
+          href: "/admin/tiktok-farm",
+          label: "TikTok Farm",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
         {
           href: "/soop.html",
           label: "SOOP farm",

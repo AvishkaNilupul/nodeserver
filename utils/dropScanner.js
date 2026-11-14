@@ -36,7 +36,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const SaleSignal = require("../models/SaleSignal");
 const botHosts = require("./botHosts");
-const { fetchInventory, itemKeyFor } = require("./twitchInventory");
+const { fetchInventory, itemKeyFor, isPendingDrop } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 const accountState = require("./twitchAccountState");
 const suspendedAccounts = require("./suspendedAccounts");
@@ -562,6 +562,27 @@ async function scanAccount(acc, worker) {
   );
   if (twitchId) acc.twitchId = twitchId;
   if (login && !acc.login) acc.login = login;
+  // An account sold WHOLE for its unclaimed drops (utils/autofarmStock — its
+  // bot record carries the "unclaimed-sale:…" tag) belongs to its buyer, and so
+  // does every drop it shows from now on: the ones its bot claimed in the hours
+  // before the sale that no scan had logged yet, and whatever the buyer claims
+  // later. Logged as free stock they would put a sold login back on the shelf
+  // of every claimed-bundle seller (they pick by drop, never by account). So
+  // whatever this scan just logged, or left unsold, is stamped sold with it.
+  if (acc.soldAt && /^unclaimed-sale(:|$)/.test(String(acc.soldToUsername || ""))) {
+    await DropLog.updateMany(
+      { account: acc._id, soldAt: null },
+      {
+        $set: {
+          soldAt: acc.soldAt,
+          soldToUsername: acc.soldToUsername,
+          soldSetId: String(acc.soldSetId || ""),
+        },
+      },
+    ).catch((e) =>
+      console.error("dropScanner: sold-account stamp failed for " + maskedLogin(acc) + ": " + e.message),
+    );
+  }
   // Once a game on this account is SOLD to a buyer or CONNECTED (buyer took
   // delivery), farming it again is wasted and could interfere with the buyer,
   // so remove just that game from the account's bot-config FavouriteGames
@@ -619,10 +640,11 @@ async function scanAccount(acc, worker) {
   // with requiredMinutes=0 so they land complete instantly. Counting those kept
   // finished no-claim bots looking permanently "working", so they never parked
   // (this is exactly why twitchbotx20 read as farming when it was done). A drop
-  // is pending only while it still needs watch time: required>0 and current<required.
-  const pending = (inProgress || []).filter(
-    (d) => !d.claimed && (d.required || 0) > 0 && (d.current || 0) < d.required,
-  );
+  // is pending only while it still needs watch time: required>0 and current<required
+  // — and only while its campaign is live: Twitch keeps ENDED campaigns in the
+  // inventory (status "EXPIRED"), and one half-watched drop of one kept a bot
+  // awake for days farming nothing (twitchInventory.isPendingDrop, 2026-10-25).
+  const pending = (inProgress || []).filter(isPendingDrop);
   acc.inProgressCount = pending.length;
   acc.inProgressGames = [
     ...new Set(pending.map((d) => d.game).filter(Boolean)),

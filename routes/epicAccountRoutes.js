@@ -5,7 +5,9 @@ const EpicAccount = require("../models/EpicAccount");
 const EpicFreebie = require("../models/EpicFreebie");
 const epic = require("../utils/epicClient");
 const epicClaimer = require("../utils/epicClaimer");
+const { accountAccessToken } = require("../utils/epicAccountToken");
 const epicAutoClaim = require("../utils/epicAutoClaim");
+const epicRegion = require("../utils/epicRegion");
 const settings = require("../utils/settings");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const crypto = require("crypto");
@@ -44,11 +46,20 @@ function publicLoginUrl(req) {
   return `${proto}://${host}/mail/`;
 }
 
-function publicAccount(a, liveFreebies) {
+// Latest auto-claim attempt for one giveaway, without order ids.
+function lastTry(a, offerId) {
+  const e = (a.autoClaimLog || []).find((x) => x && x.offerId === offerId);
+  return e ? { at: e.at, status: e.status, error: String(e.error || "").slice(0, 160) } : null;
+}
+
+function publicAccount(a, liveFreebies, blocked) {
   const owned = new Set(
     (a.library || []).map((g) => g.namespace).filter(Boolean),
   );
-  const missing = (liveFreebies || []).filter((f) => !owned.has(f.namespace));
+  const notOwned = (liveFreebies || []).filter((f) => live(f) && !owned.has(f.namespace));
+  const locks = new Map(notOwned.map((f) => [f.offerId, epicRegion.regionBlock(a, f, blocked)]));
+  const missing = notOwned.filter((f) => !locks.get(f.offerId));
+  const where = epicRegion.accountCountry(a);
   return {
     _id: a._id,
     accountId: a.accountId,
@@ -62,13 +73,26 @@ function publicAccount(a, liveFreebies) {
     libraryCount: a.libraryCount,
     libraryValueUsd: a.libraryValueUsd,
     sold: a.sold,
+    country: where.country,
+    countrySource: where.source,
     missingLive: missing.map((f) => ({
       offerId: f.offerId,
       title: f.title,
       namespace: f.namespace,
       originalPrice: f.originalPrice,
       endDate: f.endDate,
+      lastTry: lastTry(a, f.offerId),
     })),
+    // Live giveaways Epic won't sell in this account's country.
+    regionLocked: notOwned
+      .filter((f) => locks.get(f.offerId))
+      .map((f) => ({
+        offerId: f.offerId,
+        title: f.title,
+        originalPrice: f.originalPrice,
+        country: locks.get(f.offerId).country,
+        reason: locks.get(f.offerId).reason,
+      })),
     createdAt: a.createdAt,
   };
 }
@@ -78,11 +102,12 @@ router.get("/api/epic/accounts", requireSuperadmin, async (req, res) => {
   try {
     const [accounts, liveFreebies] = await Promise.all([
       EpicAccount.find({}).sort({ createdAt: 1 }).lean(),
-      EpicFreebie.find({ active: true, upcoming: false }).lean(),
+      EpicFreebie.find({ active: true }).lean(),
     ]);
+    const blocked = epicRegion.blockedCountries(accounts);
     res.json({
       success: true,
-      accounts: accounts.map((a) => publicAccount(a, liveFreebies)),
+      accounts: accounts.map((a) => publicAccount(a, liveFreebies, blocked)),
       redirectUrl: epic.REDIRECT_URL,
       status: epicClaimer.status(),
       autoClaim: epicAutoClaim.getStatus(),
@@ -196,46 +221,15 @@ router.post("/api/epic/accounts/sync", requireSuperadmin, async (req, res) => {
   }
 });
 
-// Fresh one-tap claim link for a specific account + offer (used by the tab's
-// "Claim" buttons; the link logs the browser into that account).
+// Retire launcher-backed browser links, including calls from stale phone pages.
+// Replacing a shared Epic web session can revoke the launcher refresh grant.
 router.post(
   "/api/epic/accounts/:id/claim-link",
   requireSuperadmin,
-  async (req, res) => {
-    try {
-      const acc = await EpicAccount.findById(req.params.id);
-      if (!acc) {
-        return res.status(404).json({ success: false, message: "Not found" });
-      }
-      const freebie = await EpicFreebie.findOne({
-        offerId: String(req.body.offerId || ""),
-      }).lean();
-      if (!freebie) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Unknown offer" });
-      }
-      const tok = await epic.refresh(decrypt(acc.refreshToken));
-      acc.refreshToken = encrypt(tok.refresh_token);
-      acc.refreshExpiresAt = tok.refresh_expires_at
-        ? new Date(tok.refresh_expires_at)
-        : null;
-      acc.status = "ok";
-      await acc.save();
-      const code = await epic.exchangeCode(tok.access_token);
-      res.json({
-        success: true,
-        url: epic.claimLink(code, freebie.namespace, freebie.offerId),
-        expiresInSeconds: 299,
-      });
-    } catch (err) {
-      console.error("epic claim link error:", err.message);
-      res.status(500).json({
-        success: false,
-        message: err.message || "Could not create claim link",
-      });
-    }
-  },
+  (_req, res) => res.status(409).json({
+    success: false,
+    message: "Reload the Epic accounts page. Claim now runs on the Mac with isolated sessions.",
+  }),
 );
 
 // ---- Auto-claim controls -------------------------------------------------
@@ -305,6 +299,74 @@ router.post(
   },
 );
 
+// Both manual entry points use the same verified claim and library refresh.
+async function claimAndSync(acc, freebie) {
+  if (!eligible(acc)) return {attempted: false, status: "skipped", error: "Account is sold or needs reconnection"};
+  if (!live(freebie)) return {attempted: false, status: "skipped", error: "Giveaway is not currently live"};
+  // Read fresh each time: a refusal earlier in a batch locks later accounts
+  // from the same country.
+  const blocked = await epicRegion.loadBlockedCountries(EpicAccount);
+  const accessToken = await accountAccessToken(acc);
+  const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true, blocked });
+  if (["claimed", "already_owned"].includes(result.status) && !result.tokenNeedsLogin) {
+    try {
+      const prices = new Map((await EpicFreebie.find({}).lean()).map(f => [
+        f.namespace, parseFloat(String(f.originalPrice || "").replace(/[^0-9.]/g, "")) || 0,
+      ]));
+      await epicClaimer.syncLibrary(acc, await accountAccessToken(acc), prices);
+      acc.lastCheckedAt = new Date();
+      await acc.save();
+    } catch { result.librarySyncPending = true; }
+  }
+  return result;
+}
+const {createClaimBatch, planClaims, eligible, live} = require("../utils/epicClaimBatch");
+let manualClaimRunning = false;
+async function planCurrentClaims() {
+    await require("../utils/epicWatcher").refreshIfStale({notify: false});
+    const [accounts, offers] = await Promise.all([
+      EpicAccount.find({sold: {$ne: true}, status: "ok"}).sort({createdAt: 1}).lean(),
+      EpicFreebie.find({active: true}).lean(),
+    ]);
+    return planClaims(accounts, offers, Date.now(), await epicRegion.loadBlockedCountries(EpicAccount));
+}
+const claimBatch = createClaimBatch({
+  plan: planCurrentClaims,
+  execute: async job => {
+    const acc = await EpicAccount.findById(job.accountId);
+    const offer = await EpicFreebie.findOne({offerId: job.offerId}).lean();
+    // Recheck immediately before each checkout: accounts can be sold while queued.
+    if (!eligible(acc) || !live(offer)) return {status: "skipped"};
+    if ((acc.library || []).some(game => game.namespace === offer.namespace)) return {status: "already_owned"};
+    return claimAndSync(acc, offer);
+  },
+});
+// A paired phone can only inspect and drive this same singleton queue.
+router.use(require("../utils/epicPhoneControl").createPhoneControl({
+  secret: process.env.EPIC_CLAIM_WORKER_TOKEN,
+  plan: planCurrentClaims, batch: claimBatch,
+  claimerStatus: () => epicAutoClaim.getStatus(),
+  workerReady: () => epicAutoClaim.workerReady(),
+  singleRunning: () => manualClaimRunning,
+}));
+router.get("/api/epic/claims/batch", requireSuperadmin, (_req, res) => {
+  res.json({success: true, batch: claimBatch.status()});
+});
+router.post("/api/epic/claims/batch", requireSuperadmin, async (_req, res) => {
+  if (manualClaimRunning) return res.status(409).json({success: false, message: "Wait for the current single claim to finish"});
+  // Every job would stop at once on Epic's 429 pause; say so instead.
+  const pausedUntil = !claimBatch.isActive() && epicAutoClaim.getStatus().rateLimitedUntil;
+  if (pausedUntil) {
+    return res.status(409).json({success: false, rateLimitedUntil: pausedUntil,
+      message: "Epic is limiting checkouts (HTTP 429), so claims are paused. They resume on their own after the pause."});
+  }
+  try { res.status(202).json({success: true, batch: await claimBatch.start()}); }
+  catch { res.status(500).json({success: false, message: "Could not prepare the claim batch"}); }
+});
+router.post("/api/epic/claims/batch/stop", requireSuperadmin, (_req, res) => {
+  res.json({success: true, batch: claimBatch.stop()});
+});
+
 // Manual one-off: try the direct-API auto-claim RIGHT NOW for one
 // (account, offer). Bypasses the enabled flag — this is the operator-driven
 // path from the Epic tab's "Auto-claim" button — but still respects the fact
@@ -313,6 +375,8 @@ router.post(
   "/api/epic/accounts/:id/auto-claim",
   requireSuperadmin,
   async (req, res) => {
+    if (claimBatch.isActive() || manualClaimRunning) return res.status(409).json({success: false, message: "Claims are already running"});
+    manualClaimRunning = true;
     try {
       const acc = await EpicAccount.findById(req.params.id);
       if (!acc) {
@@ -326,30 +390,7 @@ router.post(
           .status(404)
           .json({ success: false, message: "Unknown offer" });
       }
-      const tok = await epic.refresh(decrypt(acc.refreshToken));
-      acc.refreshToken = encrypt(tok.refresh_token);
-      acc.refreshExpiresAt = tok.refresh_expires_at
-        ? new Date(tok.refresh_expires_at)
-        : null;
-      acc.status = "ok";
-      await acc.save();
-      const cfg = settings.getEpicAutoClaim();
-      const solverKey = cfg.captchaKey ? decrypt(cfg.captchaKey) : "";
-      const captchaSolver = require("../utils/captchaSolver");
-      const result = await epic.autoClaimFreebie(
-        tok.access_token,
-        freebie.namespace,
-        freebie.offerId,
-        {
-          solveCaptcha: solverKey
-            ? () =>
-                captchaSolver.solveHCaptcha({
-                  provider: cfg.captchaProvider || "",
-                  apiKey: solverKey,
-                })
-            : null,
-        },
-      );
+      const result = await claimAndSync(acc, freebie);
       res.json({ success: true, result });
     } catch (err) {
       console.error("epic auto-claim error:", err.message);
@@ -357,7 +398,7 @@ router.post(
         success: false,
         message: err.message || "Auto-claim failed",
       });
-    }
+    } finally { manualClaimRunning = false; }
   },
 );
 

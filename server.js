@@ -1,4 +1,5 @@
 const express = require("express");
+const discordFarmRoutes = require("./routes/discordFarmRoutes");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
@@ -69,6 +70,8 @@ const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const steamAccountRoutes = require("./routes/steamAccountRoutes");
+const valorantAccountRoutes = require("./routes/valorantAccountRoutes");
+const rivalsAccountRoutes = require("./routes/rivalsAccountRoutes");
 const steamSalesRoutes = require("./routes/steamSalesRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
@@ -570,6 +573,13 @@ app.get("/steam-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "steam-accounts.html"));
 });
 
+app.get("/valorant-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "valorant-accounts.html"));
+});
+app.get("/rivals-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "rivals-accounts.html"));
+});
+
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
@@ -623,6 +633,7 @@ app.get("/marketplace.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "marketplace.html"));
 });
 app.use("/marketplace", requireAdmin, enforce2fa, marketplaceProxy);
+app.use("/outlook", require("./routes/outlookDashboardRoutes"));
 
 // =========================
 // Shop (in-app bundle store, all admins)
@@ -716,6 +727,12 @@ app.get("/chzzk.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "chzzk.html"));
 });
 
+// Discord code vault: canonical page and raw HTML share the same guards.
+app.get("/discord-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.redirect("/admin/discord-farm");
+});
+
+app.use(require("./routes/tiktokFarmRoutes"));
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -757,6 +774,14 @@ app.use(enforce2fa, resellerAdminRoutes);
 // a static token, not a session, so the session guard would otherwise 401 it.
 // Every route inside self-guards with requireApiToken.
 app.use(accountApiRoutes);
+// Paired-phone controls authenticate with their dedicated claim-only token.
+// Mount before blanket admin-session guards; the existing router owns one queue.
+app.use((req, res, next) => {
+  if (/^\/api\/epic\/phone(?:\/|$)/.test(req.path)) return epicAccountRoutes(req, res, next);
+  next();
+});
+// Operator-only Discord intake, quest claims and encrypted code collection.
+app.use(enforce2fa, discordFarmRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -821,6 +846,8 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, steamAccountRoutes);
+app.use(enforce2fa, valorantAccountRoutes);
+app.use(enforce2fa, rivalsAccountRoutes);
 app.use(enforce2fa, steamSalesRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
 // Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that
@@ -861,6 +888,11 @@ mongoose
       .catch(() => {});
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
+      // Initial Rivals category check stays in the process owning seller cookies.
+      // Only an imported ready hold without a saved check triggers this read.
+      rivalsAccountRoutes.refreshSellerAccess({ onlyMissing: true }).catch(() => {
+        console.error("[rivals] initial seller access check failed");
+      });
       // Catalog v2 boot sequence: restore the persisted public snapshot so
       // the storefront serves instantly, then rebuild it as before, then
       // start the pre-order sync loop. Every step logs its own failure and

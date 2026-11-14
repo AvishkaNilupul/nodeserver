@@ -8,6 +8,10 @@ const crypto = require("crypto");
 const hosts = require("./botHosts");
 const BotAccount = require("../models/BotAccount");
 const { logEvent } = require("./systemLog");
+const { withFileLock } = require("./fileLock");
+// The literal stands in should this file ever run beside a fileLock.js from
+// before the constant existed: it is the key the renter stacks already take.
+const PROVISION_LOCK = require("./fileLock").PROVISION_LOCK || "provision.lock";
 const {
   fillBotPasswordsFromPool,
   markDeployedPoolAccountsClaimed,
@@ -175,69 +179,18 @@ async function upsertBotAccounts(accounts, host, file) {
 // CREATE one bot on `host` holding `poolAccounts`, farming `game`.
 // Follows the manual flow's ordering exactly. Throws on failure (after
 // rolling back the config file if the compose edit failed).
+//
+// The slot number, the config file and the compose service are taken as ONE
+// step per host, under the lock the renter stacks' provisionEmptyConfig holds
+// (routes/botConfigRoutes.js): two bots created at the same moment — two farms
+// starting at once, or a farm and a rent-farm order — each read the same
+// directory listing, picked the same slot, and the second config and compose
+// edit replaced the first.
 async function createBot(host, poolAccounts, game, opts = {}) {
   const startRunning = opts.startRunning !== false;
-
-  const files = await hosts.readdir(host); // throws { unreachable } if host is down
-  const composeFile = await hosts.composeName(host);
-  if (!composeFile && host.runtime !== "native") {
-    throw new Error("No docker compose file found in " + host.dir);
-  }
-
-  const slot = findNextSlot(files);
-  if (await hosts.exists(host, slot.file)) {
-    throw new Error("Target config already exists: " + slot.file);
-  }
-
-  const templateName = pickDefaultTemplate(files);
-  if (!templateName)
-    throw new Error("No template config available to clone from");
-  let data;
-  try {
-    data = JSON.parse(await hosts.readFile(host, templateName));
-  } catch {
-    throw new Error("Template " + templateName + " is not readable/valid JSON");
-  }
-
-  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-    data.TwitchSettings = {};
-  }
-  const favouriteGames = [game].filter(Boolean);
-  const users = poolAccounts
-    .map((a) => poolAccountToUser(a, favouriteGames))
-    .filter(Boolean);
-  if (!users.length) throw new Error("No usable accounts (missing tokens)");
-  data.TwitchSettings.TwitchUsers = users;
-  // Auto-bots farm exactly one game: pin it so the container never wanders
-  // off to farm something we didn't budget accounts for.
-  data.TwitchSettings.OnlyFavouriteGames = true;
-  if (data.KickSettings && typeof data.KickSettings === "object") {
-    data.KickSettings.KickUsers = [];
-  }
-
-  await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
-  await upsertBotAccounts(users, host, slot.file);
-
-  try {
-    if (composeFile) {
-      const raw = await hosts.composeRead(host, composeFile);
-      const edited = addServiceToComposeText(raw, slot.container, slot.file);
-      if (!edited.exists)
-        await hosts.composeWrite(host, composeFile, edited.text);
-    }
-  } catch (e) {
-    // Roll back the config so a failed compose edit leaves no orphan behind.
-    try {
-      await hosts.rename(
-        host,
-        slot.file,
-        slot.file + ".rollback-" + Date.now(),
-      );
-    } catch {
-      /* ignore */
-    }
-    throw new Error("Failed to update compose file: " + e.message);
-  }
+  const { slot, data, users } = await withFileLock(host, PROVISION_LOCK, () =>
+    provisionBot(host, poolAccounts, game),
+  );
 
   let started = false;
   let startError = "";
@@ -281,6 +234,73 @@ async function createBot(host, poolAccounts, game, opts = {}) {
   };
 }
 
+// createBot's locked part. Only ever called under PROVISION_LOCK.
+async function provisionBot(host, poolAccounts, game) {
+  const files = await hosts.readdir(host); // throws { unreachable } if host is down
+  const composeFile = await hosts.composeName(host);
+  if (!composeFile && host.runtime !== "native") {
+    throw new Error("No docker compose file found in " + host.dir);
+  }
+
+  const slot = findNextSlot(files);
+  if (await hosts.exists(host, slot.file)) {
+    throw new Error("Target config already exists: " + slot.file);
+  }
+
+  const templateName = pickDefaultTemplate(files);
+  if (!templateName)
+    throw new Error("No template config available to clone from");
+  let data;
+  try {
+    data = JSON.parse(await hosts.readFile(host, templateName));
+  } catch {
+    throw new Error("Template " + templateName + " is not readable/valid JSON");
+  }
+
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  const favouriteGames = [game].filter(Boolean);
+  const users = poolAccounts
+    .map((a) => poolAccountToUser(a, favouriteGames))
+    .filter(Boolean);
+  if (!users.length) throw new Error("No usable accounts (missing tokens)");
+  data.TwitchSettings.TwitchUsers = users;
+  // Auto-bots farm exactly one game: pin it so the container never wanders
+  // off to farm something we didn't budget accounts for.
+  data.TwitchSettings.OnlyFavouriteGames = true;
+  if (data.KickSettings && typeof data.KickSettings === "object") {
+    data.KickSettings.KickUsers = [];
+  }
+
+  await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2), {
+    prev: null, // a new file: every account in it is being put there
+  });
+  await upsertBotAccounts(users, host, slot.file);
+
+  try {
+    if (composeFile) {
+      const raw = await hosts.composeRead(host, composeFile);
+      const edited = addServiceToComposeText(raw, slot.container, slot.file);
+      if (!edited.exists)
+        await hosts.composeWrite(host, composeFile, edited.text);
+    }
+  } catch (e) {
+    // Roll back the config so a failed compose edit leaves no orphan behind.
+    try {
+      await hosts.rename(
+        host,
+        slot.file,
+        slot.file + ".rollback-" + Date.now(),
+      );
+    } catch {
+      /* ignore */
+    }
+    throw new Error("Failed to update compose file: " + e.message);
+  }
+  return { slot, data, users };
+}
+
 // ADD accounts to an existing bot config (used when topping up a reused bot).
 //
 // An account already in this config is MERGED, not skipped: `game` is unioned
@@ -295,7 +315,57 @@ async function createBot(host, poolAccounts, game, opts = {}) {
 //
 // `logins` therefore reports everything that is now farming `game` here,
 // merged or fresh, so callers can treat all of it as placed.
+//
+// The read, the merge and the write are ONE step under the file's lock
+// (utils/fileLock). Without it, a second writer of the same config between
+// this read and this write — another farm placed at the same moment, the
+// single-home heal after a write elsewhere, a sale switching an account off —
+// was overwritten, or overwrote this (2026-10-09: 13 of a probe's 15 accounts
+// left switched off for 2.5 hours, the task still counting them as deployed).
 async function addAccountsToBot(host, file, poolAccounts, game) {
+  const { data, fresh, merged, changed } = await withFileLock(host, file, () =>
+    mergeAccountsIntoBot(host, file, poolAccounts, game),
+  );
+  if (changed) {
+    await upsertBotAccounts(
+      fresh.concat(merged.map((m) => m.user)),
+      host,
+      file,
+    );
+  }
+  if (fresh.length) {
+    logEvent({
+      category: "bots",
+      action: "accounts_added",
+      actor: "system",
+      host: host.id,
+      container: containerForFile(file),
+      game: game || "",
+      count: fresh.length,
+      detail: "added " + fresh.length + ", merged " + merged.length,
+      meta: {
+        file,
+        logins: fresh
+          .map((u) => u.Login)
+          .filter(Boolean)
+          .slice(0, 50),
+      },
+    });
+  }
+  return {
+    added: fresh.length,
+    merged: merged.length,
+    changed: !!changed,
+    data,
+    logins: fresh
+      .map((u) => u.Login)
+      .concat(merged.map((m) => m.login))
+      .filter(Boolean),
+  };
+}
+
+// addAccountsToBot's locked part. Only ever called under the file's lock.
+async function mergeAccountsIntoBot(host, file, poolAccounts, game) {
   const raw = await hosts.readFile(host, file);
   const data = JSON.parse(raw);
   if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
@@ -343,42 +413,11 @@ async function addAccountsToBot(host, file, poolAccounts, game) {
   const changed = fresh.length || merged.some((m) => m.touched);
   if (changed) {
     data.TwitchSettings.TwitchUsers = existing.concat(fresh);
-    await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-    await upsertBotAccounts(
-      fresh.concat(merged.map((m) => m.user)),
-      host,
-      file,
-    );
-  }
-  if (fresh.length) {
-    logEvent({
-      category: "bots",
-      action: "accounts_added",
-      actor: "system",
-      host: host.id,
-      container: containerForFile(file),
-      game: game || "",
-      count: fresh.length,
-      detail: "added " + fresh.length + ", merged " + merged.length,
-      meta: {
-        file,
-        logins: fresh
-          .map((u) => u.Login)
-          .filter(Boolean)
-          .slice(0, 50),
-      },
+    await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2), {
+      prev: raw,
     });
   }
-  return {
-    added: fresh.length,
-    merged: merged.length,
-    changed: !!changed,
-    data,
-    logins: fresh
-      .map((u) => u.Login)
-      .concat(merged.map((m) => m.login))
-      .filter(Boolean),
-  };
+  return { data, fresh, merged, changed };
 }
 
 // START / STOP a container (docker start/stop — compose service already exists).
@@ -402,21 +441,31 @@ async function deleteBot(host, file, container) {
   } catch (e) {
     steps.push("container rm failed: " + (e.message || e));
   }
+  // The compose file is one file for every bot on the host: its read->edit->
+  // write goes under the lock createBot adds a service under, or one of two
+  // edits made at the same moment is lost.
   try {
-    const composeFile = await hosts.composeName(host);
-    if (composeFile) {
-      const raw = await hosts.composeRead(host, composeFile);
-      const edited = removeServiceFromComposeText(raw, container);
-      if (edited.existed) {
-        await hosts.composeWrite(host, composeFile, edited.text);
-        steps.push("compose service removed");
+    await withFileLock(host, PROVISION_LOCK, async () => {
+      const composeFile = await hosts.composeName(host);
+      if (composeFile) {
+        const raw = await hosts.composeRead(host, composeFile);
+        const edited = removeServiceFromComposeText(raw, container);
+        if (edited.existed) {
+          await hosts.composeWrite(host, composeFile, edited.text);
+          steps.push("compose service removed");
+        }
       }
-    }
+    });
   } catch (e) {
     steps.push("compose edit failed: " + (e.message || e));
   }
+  // Under the config's own lock: an edit of this file that is mid-cycle
+  // finishes first, instead of writing the file back into existence under its
+  // old name once it has been renamed away.
   try {
-    await hosts.rename(host, file, file + ".done-" + Date.now());
+    await withFileLock(host, file, () =>
+      hosts.rename(host, file, file + ".done-" + Date.now()),
+    );
     steps.push("config renamed");
   } catch (e) {
     steps.push("config rename failed: " + (e.message || e));
