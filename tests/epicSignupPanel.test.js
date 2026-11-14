@@ -11,7 +11,7 @@ test('an unavailable server is explained before any Outlook reservation or exten
 test('recovery selects an older interrupted signup after a newer successful account',async()=>{
  for(const chosen of ['', 'older']){
   const nodes={};for(const id of ['signupStatus','signupStart','signupCancel','signupResume','signupRecover','signupProxy','signupAuto','signupSession'])nodes[id]={textContent:'',disabled:false,checked:true,value:id==='signupSession'?chosen:'',addEventListener(type,fn){this[type]=fn;}};
-  const listeners=new Set(),requests=[];const window={addEventListener:(t,fn)=>listeners.add(fn),removeEventListener:(t,fn)=>listeners.delete(fn),postMessage(msg){for(const fn of [...listeners])fn({source:window,origin:'http://127.0.0.1:4107',data:{type:msg.type+'-ack',ok:true,payload:msg.type==='epicgen-ping'?{version:'1.5.0'}:{}}});}};
+  const listeners=new Set(),requests=[];const window={addEventListener:(t,fn)=>listeners.add(fn),removeEventListener:(t,fn)=>listeners.delete(fn),postMessage(msg){for(const fn of [...listeners])fn({source:window,origin:'http://127.0.0.1:4107',data:{type:msg.type+'-ack',ok:true,payload:msg.type==='epicgen-ping'?{version:'1.5.1'}:{}}});}};
   vm.runInNewContext(fs.readFileSync(require.resolve('../public/epic-signup-panel.js'),'utf8'),{
    document:{getElementById:id=>nodes[id],querySelector:()=>null},window,setTimeout,clearTimeout,location:{origin:'http://127.0.0.1:4107'},fetch:async path=>{
     requests.push(path);const data=path.includes('/recent')?{success:true,sessions:[{sessionId:'newer',status:'verified'},{sessionId:'older',status:'failed'}]}:path.endsWith('/resume')?{success:true,session:{sessionId:'older',mailbox:{address:'older@outlook.com'}}}:{success:true};return{ok:true,json:async()=>data};
@@ -21,12 +21,12 @@ test('recovery selects an older interrupted signup after a newer successful acco
  }
 });
 
-function batchPanel({count='5',auto=true,failAllocate=false}={}) {
+function batchPanel({count='5',auto=true,failAllocate=false,failDrive=false}={}) {
  const nodes={},listeners=new Set(),timers=new Map(),calls=[],bodies=[];let nextTimer=0,sequence=0;
  for(const id of ['signupStatus','signupStart','signupCancel','signupResume','signupRecover','signupProxy','signupAuto','signupSampleContact','signupSession','signupBatchCount','signupBatchStart','signupBatchStop','signupBatchStatus'])nodes[id]={textContent:'',disabled:false,checked:id==='signupAuto'?auto:false,value:id==='signupBatchCount'?count:'',addEventListener(type,fn){this[type]=fn;}};
  const window={addEventListener:(t,fn)=>listeners.add(fn),removeEventListener:(t,fn)=>listeners.delete(fn),postMessage(msg){
-  calls.push(msg);const ok=!(failAllocate&&msg.type==='epicgen-allocate');
-  const payload=msg.type==='epicgen-ping'?{version:'1.5.0'}:msg.type==='epicgen-allocate'?{mailbox:{address:'test@example.com'}}:{};
+  calls.push(msg);const ok=!(failAllocate&&msg.type==='epicgen-allocate')&&!(failDrive&&msg.type==='epicgen-drive');
+  const payload=msg.type==='epicgen-ping'?{version:'1.5.1'}:msg.type==='epicgen-allocate'?{mailbox:{address:'test@example.com'}}:{};
   for(const fn of [...listeners])fn({source:window,origin:'http://local',data:{type:msg.type+'-ack',ok,error:'No inbox available',payload}});
  }};
  const relay=(kind,id='session-'+sequence,extra={})=>{for(const fn of [...listeners])fn({source:window,origin:'http://local',data:{type:'epicgen-relay',payload:{kind,sessionId:id,...extra}}});};
@@ -70,4 +70,31 @@ test('invalid counts and disabled automatic submission do not reserve inboxes',a
  for(const options of [{count:'0'},{count:'1.5'},{count:'51'},{count:'abc'},{auto:false}]){
   const h=batchPanel(options);await h.nodes.signupBatchStart.click();assert.equal(h.allocations(),0);assert.equal(h.nodes.signupBatchStart.disabled,false);
  }
+});
+
+test('same-tab retry restores panel tracking after failure without restarting a stopped batch',async()=>{
+ const h=batchPanel({count:'3'});await h.nodes.signupBatchStart.click();h.relay('failed',undefined,{error:'Connection failed'});
+ assert.match(h.nodes.signupBatchStatus.textContent,/Batch stopped/);
+ h.relay('status',undefined,{status:'wizard_open',message:'Retrying the same page'});
+ assert.equal(h.nodes.signupStart.disabled,true);assert.equal(h.nodes.signupStatus.textContent,'Retrying the same page');
+ h.relay('verified');assert.match(h.nodes.signupStatus.textContent,/saved locally/);
+ assert.equal(h.nodes.signupStart.disabled,false);assert.equal(h.allocations(),1);
+ h.relay('status',undefined,{status:'awaiting_otp'});assert.equal(h.nodes.signupStart.disabled,false);
+});
+
+test('a failed browser launch releases extension ownership without discarding the saved signup',async()=>{
+ const h=batchPanel({failDrive:true});await h.nodes.signupBatchStart.click();
+ assert.equal(h.bodies.length,1);assert.equal(h.allocations(),1);
+ assert.equal(h.calls.filter(c=>c.type==='epicgen-cancel').length,1);
+ assert.match(h.nodes.signupBatchStatus.textContent,/Batch stopped/);
+ assert.equal(h.nodes.signupStart.disabled,false);
+});
+
+test('an open signup prevents recovery before the original bearer can be rotated',async()=>{
+ const nodes={},requests=[],listeners=new Set();
+ for(const id of ['signupStatus','signupStart','signupCancel','signupResume','signupRecover','signupProxy','signupAuto','signupSession'])nodes[id]={textContent:'',checked:false,disabled:false,value:'',addEventListener(type,fn){this[type]=fn;}};
+ const window={addEventListener:(t,fn)=>listeners.add(fn),removeEventListener:(t,fn)=>listeners.delete(fn),postMessage(msg){for(const fn of [...listeners])fn({source:window,origin:'http://local',data:{type:msg.type+'-ack',ok:msg.type!=='epicgen-allocate',error:'A signup is already active',payload:{version:'1.5.1'}}});}};
+ vm.runInNewContext(fs.readFileSync(require.resolve('../public/epic-signup-panel.js'),'utf8'),{document:{getElementById:id=>nodes[id],querySelector:()=>null},window,location:{origin:'http://local'},setTimeout,clearTimeout,fetch:async route=>{requests.push(route);return{ok:true,json:async()=>({success:true,sessions:[{sessionId:'original',email:'same@example.com',status:'failed'}]})};}});
+ await nodes.signupRecover.click();assert.equal(requests.some(r=>r.endsWith('/resume')),false);
+ assert.match(nodes.signupStatus.textContent,/already active/);
 });

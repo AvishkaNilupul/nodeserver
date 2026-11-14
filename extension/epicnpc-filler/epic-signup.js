@@ -58,7 +58,7 @@
         var step=stepId();
         // Request a new email explicitly before consuming a newer OTP.
         if(step==='otp')await requestFreshOtp();
-        if(step==='details'||step==='login_password')location.reload();
+        if(step==='details'||step==='login_password'||/\/id\/api\/redirect/i.test(location.pathname||''))location.reload();
         else {host.textContent='Resuming the same signup…';await driveRegisterFlow(session);showRetry(session);}
       } catch(err) {banner('Retry paused: '+err.message,'err');showRetry(session);}
     });
@@ -424,6 +424,22 @@
     return /service is temporarily unavailable|too many requests|please try again later/i.test(text);
   }
 
+  function checkServiceError() {
+    if (/\/id\/(?:login|register)(?:\/|$)/i.test(location.pathname || '') &&
+        /failed to initialize captcha/i.test(renderedPageText())) throw new Error('captcha_initialization_failed');
+    if (serviceUnavailable()) throw new Error('Epic is temporarily unavailable. This signup is preserved; recover the same account later.');
+  }
+
+  async function retryInitialization() {
+    var result = await sw({type:'epicgen-retry-initialization',sessionId:sessionId});
+    if (!result.ok) throw new Error(result.error || 'Could not reload the security check. This signup is preserved.');
+    banner('Epic could not load its security check. Retrying the same signup (' + result.attempt + '/2)…', 'info');
+    await sleep(result.delayMs);
+    var current = await sw({type:'epicgen-session-request',sessionId:sessionId});
+    if (!current.ok || current.session?.sessionId !== sessionId) return;
+    location.reload();
+  }
+
   function continueAfterChallenge(state,visible) {
     if(typeof visible!=='boolean')visible=captchaVisible();
     if(visible){state.seen=true;state.clearedAt=0;return false;}
@@ -503,7 +519,7 @@
     var challengeState={seen:false,clearedAt:0,clicks:0};
     var reportedChallenge=false;
     while (Date.now() < waitState.deadline) {
-      if (serviceUnavailable()) throw new Error("Epic is temporarily unavailable. This signup is preserved; recover the same account later.");
+      checkServiceError();
       var s = stepId();
       if (s !== fromStep && s !== null) return s;
       if (challengeRejected()) return "challenge_rejected";
@@ -628,7 +644,7 @@
     while (true) {
       var s = stepId();
       if (s && s !== "details" && s !== "login_password") return {waitingMs:waitState.waitingMs};
-      if(serviceUnavailable())throw new Error("Epic is temporarily unavailable. This signup is preserved; recover the same account later.");
+      checkServiceError();
       if(challengeRejected())throw new Error("captcha_reload_required");
       var challenge = captchaVisible();
       continueAfterChallenge(challengeState, challenge);
@@ -676,7 +692,7 @@
       status: "awaiting_otp",
     });
     var scope=await sw({type:'epicgen-otp-state',sessionId:sessionId,phase:otpPhase()});
-    if(!scope.ready)await requestFreshOtp();
+    if(!scope.ready){banner('Email verification opened. Waiting for a fresh code request…','info');await requestFreshOtp();}
     banner("Waiting for the Epic code in Outlook…", "info");
     var resp;
     for (var attempt=0;attempt<3;attempt++) {
@@ -737,7 +753,7 @@
     await sleep(1500);
     await sw({ type: "epicgen-open-redirect", sessionId: sessionId });
     banner(
-      "Signup complete — token capture running in background. You can close this tab.",
+      "Epic account created — finishing the local save. Keep this private window open until it closes automatically.",
       "ok",
     );
   }
@@ -758,7 +774,7 @@
       }
       console.log("epicgen step ->", step);
       try {
-        if(serviceUnavailable())throw new Error("Epic is temporarily unavailable. This signup is preserved; recover the same account later.");
+        checkServiceError();
         if (step === "sms_required") {
           banner(
             "Epic asked for phone verification — aborting. Try again from a different IP later.",
@@ -806,6 +822,7 @@
           return;
         }
       } catch (err) {
+        if(err.message==='captcha_initialization_failed'){await retryInitialization();return;}
         if(err.message==='captcha_reload_required'){await retryChallenge();return;}
         if(err.message==='auth_context_reset_required'){await resetAuthContext();return;}
         banner("Step " + step + " failed: " + err.message, "err");
@@ -890,7 +907,7 @@
     if (resp.ok) {
       banner("Account saved locally. Cloud upload is queued automatically.", "ok");
     } else {
-      banner("Save failed: " + (resp.error || "unknown"), "err");
+      throw new Error('Save failed: ' + (resp.error || 'unknown') + '. The created account is preserved; retry this signup.');
     }
   }
 
@@ -907,6 +924,9 @@
         showRetry(s.session);
       }
     } catch (err) {
+      if (err.message === 'captcha_initialization_failed') {
+        try { await retryInitialization(); return; } catch (retryError) { err = retryError; }
+      }
       banner("Signup error: " + (err && err.message), "err");
       await sw({
         type: "epicgen-abort",

@@ -31,18 +31,20 @@ test('server accepts only recent local Outlook reservations', () => {
 
 function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now, otpResponse=null, cloudAuthority="cloud" } = {}) {
   const storage = {}; const calls = []; let listener; let auth; let removed; let nextTab = 10;
+  const errorListeners=[],completedListeners=[],tabs=new Map(),alarms=new Map();let alarmListener;
   const chrome = {
+    alarms: { create: async (name,data)=>alarms.set(name,data), clear: async name=>alarms.delete(name), onAlarm:{addListener:fn=>alarmListener=fn} },
     extension: { isAllowedIncognitoAccess: async () => incognitoAllowed },
     windows: { getAll: async () => existingPrivate ? [{id: 99, incognito: true}] : [], create: async data => {calls.push(['window',data]);return { id: 100, tabs: [{ id: nextTab++ }] };},
       remove: async id => calls.push(['close-window', id]), onRemoved: { addListener: fn => removed = fn } },
     proxy: { settings: { get: async () => ({ levelOfControl: 'controllable_by_this_extension' }), set: async data => calls.push(['proxy', data]) } },
-    webRequest: { onAuthRequired: { addListener: fn => auth = fn }, onCompleted: { addListener: () => {} }, onErrorOccurred: { addListener: () => {} } },
+    webRequest: { onAuthRequired: { addListener: fn => auth = fn }, onCompleted: { addListener: fn => completedListeners.push(fn) }, onErrorOccurred: { addListener: fn => errorListeners.push(fn) } },
     storage: { session: {
       get: async keys => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(k => [k, storage[k]])),
       set: async data => Object.assign(storage, structuredClone(data)),
       remove: async keys => (Array.isArray(keys) ? keys : [keys]).forEach(k => delete storage[k]),
     } },
-    tabs: { create: async data => { calls.push(['tab', data]); return { id: nextTab++ }; }, update: async (id, data) => calls.push(['update', id, data]), sendMessage: async () => {} },
+    tabs: { create: async data => { calls.push(['tab', data]); return { id: nextTab++ }; }, get:async id=>tabs.get(id)||{id,windowId:100}, update: async (id, data) => {calls.push(['update', id, data]);tabs.set(id,{id,windowId:100,...data});}, sendMessage: async (id,message) => calls.push(['relay',id,message]) },
     runtime: { onMessage: { addListener: fn => listener = fn } },
   };
   const fetch = async (url, init) => {
@@ -58,7 +60,7 @@ function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epicnpc-filler/background.js'), 'utf8'), { chrome, fetch, URL, AbortSignal, setTimeout, Date:class extends Date {constructor(...args){super(...(args.length?args:[now()]));}static now(){return now();}} });
   const send = (msg, id = 1, url = 'https://panel.test/epic-accounts.html') => new Promise(resolve => listener(msg, { tab: { id, url } }, resolve));
-  return { storage, calls, send, auth: d => new Promise(resolve => auth(d, resolve)), removed: id => removed(id) };
+  return { storage, calls, send, tabs, alarms, alarm:()=>alarmListener({name:'epicgen.connection-retry'}), error:async d=>{for(const fn of errorListeners)await fn(d);}, completed:async d=>{for(const fn of completedListeners)await fn(d);}, auth: d => new Promise(resolve => auth(d, resolve)), removed: id => removed(id) };
 }
 test('extension reserves Outlook once, binds tabs, polls locally, and saves without leaking mail secrets', async () => {
   const w = worker();
@@ -388,4 +390,48 @@ test('Epic refuses a legacy local pool before reserving any inbox', async()=>{
  const w=worker({cloudAuthority:'local'});const result=await w.send({type:'epicgen-allocate'});
  assert.equal(result.ok,false);assert.match(result.error,/cloud Outlook pool/);
  assert.equal(w.calls.some(c=>String(c[0]).includes('/pool/pick')),false);
+});
+
+async function recoveryWorker(options={}) {
+ const w=worker(options);await w.send({type:'epicgen-allocate',useProxy:true});
+ await w.send({type:'epicgen-drive',sessionId:'recovery',bearer:'test',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
+ return w;
+}
+const networkFailure={type:'main_frame',method:'GET',tabId:10,url:'https://store.epicgames.com/en-US/',error:'net::ERR_EMPTY_RESPONSE'};
+test('a failed GET page retries twice on the same connection, then stops with the inbox preserved',async()=>{
+ let now=1000;const w=await recoveryWorker({now:()=>now});w.tabs.set(10,{windowId:100,url:networkFailure.url});
+ for(let attempt=1;attempt<=2;attempt++){
+  await w.error(networkFailure);assert.equal(w.alarms.size,1);assert.equal(w.storage['epicgen.recovery'].pageRetries,attempt);
+  now+=30000;await w.alarm();assert.equal(w.calls.at(-1)[0],'update');assert.equal(w.calls.at(-1)[2].url,networkFailure.url);
+ }
+ await w.error(networkFailure);assert.equal(w.alarms.size,0);
+ assert.match(w.storage['epicgen.active'].failureReason,/after two retries/);
+ assert.equal(w.calls.filter(c=>String(c[0]).includes('/pool/pick')).length,1);
+ assert.equal(w.calls.filter(c=>c[0]==='proxy').length,1);
+ assert.equal(w.storage['epicgen.active'].sessionId,'recovery');
+ await w.error(networkFailure);assert.equal(w.alarms.size,0);
+});
+test('network recovery excludes POSTs, subresources, foreign tabs, cancelled requests and certificate errors',async()=>{
+ const w=await recoveryWorker();
+ for(const change of [{method:'POST'},{type:'xmlhttprequest'},{tabId:99},{url:'https://other.test/'},{error:'net::ERR_ABORTED'},{error:'net::ERR_CERT_AUTHORITY_INVALID'}])await w.error({...networkFailure,...change});
+ assert.equal(w.alarms.size,0);assert.equal(w.storage['epicgen.recovery'],undefined);
+});
+test('a completed page or manual navigation prevents a queued reload of a working form',async()=>{
+ let now=1000;const w=await recoveryWorker({now:()=>now});w.tabs.set(10,{windowId:100,url:networkFailure.url});
+ await w.error(networkFailure);await w.completed({...networkFailure,statusCode:200});assert.equal(w.alarms.size,0);
+ await w.error(networkFailure);w.tabs.set(10,{windowId:100,url:'https://www.epicgames.com/id/login/mfa'});
+ const before=w.calls.filter(c=>c[0]==='update').length;now+=30000;await w.alarm();
+ assert.equal(w.calls.filter(c=>c[0]==='update').length,before);
+});
+test('cancelled signup cannot be reopened by a late network alarm',async()=>{
+ let now=1000;const w=await recoveryWorker({now:()=>now});await w.error(networkFailure);
+ await w.send({type:'epicgen-cancel'});const before=w.calls.length;now+=30000;await w.alarm();
+ assert.equal(w.storage['epicgen.active'],undefined);assert.equal(w.alarms.size,0);assert.equal(w.calls.length,before);
+});
+test('security-check initialization retry budget survives page reload and is distinct from rejected challenges',async()=>{
+ const w=await recoveryWorker();const request=()=>w.send({type:'epicgen-retry-initialization',sessionId:'recovery'},10,'https://www.epicgames.com/id/register');
+ assert.equal((await request()).attempt,1);assert.equal((await request()).attempt,2);
+ assert.match((await request()).error,/after two retries/);
+ assert.equal(w.storage['epicgen.active'].challengeReloads,undefined);
+ assert.equal(w.calls.filter(c=>String(c[0]).includes('/pool/pick')).length,1);
 });

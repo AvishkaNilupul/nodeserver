@@ -2,6 +2,8 @@
 const MAIL = 'http://127.0.0.1:3999';
 const KEY = 'epicgen.active';
 const PENDING = 'epicgen.pending';
+const RECOVERY = 'epicgen.recovery';
+const RETRY_ALARM = 'epicgen.connection-retry';
 const isEpic = (url) => {
   try { const u = new URL(url); return u.protocol === 'https:' &&
     ['www.epicgames.com', 'epicgames.com', 'store.epicgames.com', 'accounts.epicgames.com'].includes(u.hostname); } catch { return false; }
@@ -29,6 +31,96 @@ async function finish(s, status, detail = '') {
   // Keep the reservation consumed on a failure: Epic may have accepted the email.
   await local('/api/pool/release', { email: s.identity.email, for: 'epic', status, detail });
 }
+
+// A Chrome network-error document cannot run our content script. Recover only
+// failed GET page loads, never registration POSTs, HTTP rejections or cert errors.
+const retryableNetworkErrors = new Set(['net::ERR_EMPTY_RESPONSE', 'net::ERR_CONNECTION_RESET',
+  'net::ERR_CONNECTION_CLOSED', 'net::ERR_CONNECTION_TIMED_OUT', 'net::ERR_TIMED_OUT',
+  'net::ERR_NAME_NOT_RESOLVED', 'net::ERR_INTERNET_DISCONNECTED',
+  'net::ERR_PROXY_CONNECTION_FAILED', 'net::ERR_TUNNEL_CONNECTION_FAILED']);
+let recoveryQueue = Promise.resolve();
+function recoveryTask(fn) {
+  const result = recoveryQueue.then(fn);
+  recoveryQueue = result.catch(() => {});
+  return result;
+}
+function pageUrl(value) { try { const u = new URL(value); u.hash = ''; return u.href; } catch { return ''; } }
+async function recoveryState(sessionId) {
+  const stored = (await chrome.storage.session.get(RECOVERY))[RECOVERY];
+  return stored?.sessionId === sessionId ? stored : { sessionId, pageRetries: 0, initRetries: 0, jobs: [] };
+}
+async function saveRecovery(state) {
+  await chrome.storage.session.set({ [RECOVERY]: state });
+  await chrome.alarms.clear(RETRY_ALARM);
+  if (state.jobs.length) await chrome.alarms.create(RETRY_ALARM, { when: Math.min(...state.jobs.map(j => j.at)) });
+}
+async function clearRecovery() {
+  await chrome.alarms.clear(RETRY_ALARM);
+  await chrome.storage.session.remove(RECOVERY);
+}
+async function stopForConnection(s, error) {
+  const current = (await chrome.storage.session.get(KEY))[KEY];
+  if (!current || current.sessionId !== s.sessionId) return;
+  current.failureReason = error;
+  await chrome.storage.session.set({ [KEY]: current });
+  await clearRecovery();
+  try { await server(current, `/api/epic/signup/${s.sessionId}/status`, { status: 'failed', lastError: error }); } catch {}
+  try { await finish(current, 'fail', error); } catch {}
+  await relay(current, { kind: 'failed', error });
+}
+async function pageLoadFailed(details) {
+  if (details.type !== 'main_frame' || details.method !== 'GET' || !isEpic(details.url) || !retryableNetworkErrors.has(details.error)) return;
+  const s = (await chrome.storage.session.get(KEY))[KEY];
+  if (!s || s.failureReason || !s.tabs.includes(details.tabId)) return;
+  const state = await recoveryState(s.sessionId);
+  if (state.jobs.some(j => j.tabId === details.tabId)) return;
+  if (state.pageRetries >= 2) {
+    return stopForConnection(s, `Epic page connection failed after two retries (${details.error.replace('net::', '')}). The same signup is preserved. ${s.otpDelivered ? 'Use Recover created account to finish saving it.' : 'Use Resume latest signup to continue.'}`);
+  }
+  state.pageRetries++;
+  state.jobs.push({ tabId: details.tabId, url: details.url, at: Date.now() + state.pageRetries * 10000 });
+  await saveRecovery(state);
+  const message = `Epic page connection interrupted. Retrying the same page (${state.pageRetries}/2); the account and inbox are preserved.`;
+  try { await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: 'wizard_open', lastError: '' }); } catch {}
+  await relay(s, { kind: 'status', status: 'wizard_open', message });
+}
+async function retryPageLoads() {
+  const s = (await chrome.storage.session.get(KEY))[KEY];
+  if (!s || s.failureReason) return clearRecovery();
+  const state = await recoveryState(s.sessionId);
+  const due = state.jobs.filter(j => j.at <= Date.now());
+  state.jobs = state.jobs.filter(j => j.at > Date.now());
+  await saveRecovery(state);
+  for (const job of due) {
+    const current = (await chrome.storage.session.get(KEY))[KEY];
+    if (!current || current.sessionId !== s.sessionId || current.failureReason || !current.tabs.includes(job.tabId)) continue;
+    try {
+      const tab = await chrome.tabs.get(job.tabId);
+      // A manual navigation or a successful reload cancels the queued retry.
+      if (tab.windowId !== current.windowId || pageUrl(tab.pendingUrl || tab.url) !== pageUrl(job.url)) continue;
+      await chrome.tabs.update(job.tabId, { url: job.url });
+    } catch {}
+  }
+}
+async function pageLoadCompleted(details) {
+  if (details.type !== 'main_frame') return;
+  const s = (await chrome.storage.session.get(KEY))[KEY];
+  if (!s || !s.tabs.includes(details.tabId)) return;
+  const state = await recoveryState(s.sessionId);
+  if (!state.jobs.some(j => j.tabId === details.tabId)) return;
+  state.jobs = state.jobs.filter(j => j.tabId !== details.tabId);
+  await saveRecovery(state);
+}
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === RETRY_ALARM) return recoveryTask(retryPageLoads);
+});
+// Alarms may disappear across a browser restart; stale jobs never apply to a
+// different signup because their session and assigned window are checked again.
+recoveryTask(async () => {
+  const s = (await chrome.storage.session.get(KEY))[KEY];
+  if (s && !s.failureReason) await saveRecovery(await recoveryState(s.sessionId));
+  else await clearRecovery();
+});
 let mutationBusy = false;
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   const mutation = ['epicgen-allocate', 'epicgen-drive', 'epicgen-cancel', 'epicgen-open-redirect'].includes(msg?.type);
@@ -37,7 +129,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   (async () => {
     if (!msg?.type?.startsWith('epicgen-')) return { ok: false };
     const panel = isPanel(sender.tab?.url);
-    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.5.0' };
+    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.5.1' };
     if (msg.type === 'epicgen-allocate') {
       if (!panel) throw new Error('Open the Epic Accounts panel first');
       const stored = await chrome.storage.session.get([KEY, PENDING]);
@@ -79,6 +171,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
         await local('/api/pool/release', { email: p.mailbox.address, for: 'epic', status: 'fail', detail: 'Cancelled before signup' });
       }
       await chrome.storage.session.remove([KEY, PENDING]);
+      await recoveryTask(clearRecovery);
       if (s?.windowId) await chrome.windows.remove(s.windowId).catch(() => {});
       return { ok: true };
     }
@@ -149,9 +242,20 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       // Explicit operator retry in the assigned tab; never reserve another inbox.
       s.challengeReloads = 0; s.failureReason = '';
       await chrome.storage.session.set({ [KEY]: s });
+      await recoveryTask(clearRecovery);
       await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: 'wizard_open', lastError: '' });
       await relay(s, { kind: 'status', status: 'wizard_open' });
       return { ok: true };
+    }
+    if (msg.type === 'epicgen-retry-initialization') {
+      return recoveryTask(async () => {
+        const state = await recoveryState(s.sessionId);
+        if (state.initRetries >= 2) throw Error('Epic could not load its security check after two retries. This signup is preserved; check the connection and resume it later.');
+        state.initRetries++;
+        await saveRecovery(state);
+        await relay(s, { kind: 'status', status: 'wizard_open', message: `Epic could not initialize its security check. Reloading the same signup (${state.initRetries}/2)…` });
+        return { ok: true, attempt: state.initRetries, delayMs: state.initRetries * 3000 };
+      });
     }
     if (msg.type === 'epicgen-retry-challenge') {
       if ((s.challengeReloads || 0) >= 2) throw new Error('Epic rejected the CAPTCHA response after two refreshes. Recover this signup later.');
@@ -191,6 +295,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       let warning = '';
       try { await finish(s, 'ok'); } catch (e) { warning = e.message; }
       await chrome.storage.session.remove(KEY);
+      await recoveryTask(clearRecovery);
       if (s.windowId) {
         try { await chrome.windows.remove(s.windowId); }
         catch { warning = warning || 'Account saved, but its private window could not close. Close it before the next signup.'; }
@@ -202,6 +307,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     if (msg.type === 'epicgen-abort') {
       s.failureReason = msg.reason || 'Signup stopped';
       await chrome.storage.session.set({ [KEY]: s });
+      await recoveryTask(clearRecovery);
       await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: 'failed', lastError: msg.reason || 'Signup stopped' });
       try { await finish(s, 'fail', msg.reason); } catch {}
       await relay(s, { kind: 'failed', error: msg.reason });
@@ -234,8 +340,11 @@ chrome.windows.onRemoved.addListener(async windowId => {
   try { await finish(s, 'fail', reason); } catch {}
   await relay(s, { kind: 'failed', error: reason });
   await chrome.storage.session.remove(KEY);
+  await recoveryTask(clearRecovery);
 });
 
 const clearAuthAttempt = d => authAttempts.delete(d.requestId);
 chrome.webRequest.onCompleted.addListener(clearAuthAttempt, { urls: ['<all_urls>'] });
 chrome.webRequest.onErrorOccurred.addListener(clearAuthAttempt, { urls: ['<all_urls>'] });
+chrome.webRequest.onCompleted.addListener(d => recoveryTask(() => pageLoadCompleted(d)), { urls: ['https://*.epicgames.com/*'] });
+chrome.webRequest.onErrorOccurred.addListener(d => recoveryTask(() => pageLoadFailed(d)), { urls: ['https://*.epicgames.com/*'] });

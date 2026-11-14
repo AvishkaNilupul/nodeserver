@@ -89,3 +89,13 @@ test('a stopped signup offers an explicit same-session retry without a new inbox
  context.api.showRetry({identity:{email:'same@outlook.com'}});assert.equal(button.textContent,'Retry this signup');
  await button.click();assert.equal(reloads,1);assert.equal(messages.length,1);assert.equal(messages[0].type,'epicgen-resume-current');assert.equal(messages[0].sessionId,'same-session');
 });
+
+test('initialization failure is classified separately from service outages and hidden templates',()=>{
+ const source=fs.readFileSync(require.resolve('../extension/epicnpc-filler/epic-signup.js'),'utf8');
+ const start=source.lastIndexOf('  (async function () {');const body={innerText:'Failed to initialize CAPTCHA. Please try again later or contact support.'};
+ const context={location:{hash:'',pathname:'/id/register'},document:{body}};
+ vm.runInNewContext(source.slice(0,start)+'globalThis.check=checkServiceError;})();',context);
+ assert.throws(()=>context.check(),/captcha_initialization_failed/);
+ body.innerText='Service is temporarily unavailable';assert.throws(()=>context.check(),/temporarily unavailable/);
+ body.innerText='Add your details';body.textContent='Failed to initialize CAPTCHA';assert.doesNotThrow(()=>context.check());
+});

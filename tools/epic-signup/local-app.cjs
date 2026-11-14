@@ -30,7 +30,7 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
   function response(s,token,login=false){return{sessionId:s.sessionId,bearer:token,identity:s.identity,redirectUrl:epic.REDIRECT_URL,login,automation:s.automation||{},mailbox:{address:s.identity.email,provider:'outlook-local',reservedAt:s.reservedAt}};}
   function metadata(a){return{_id:a._id,accountId:a.accountId,displayName:a.displayName,email:a.email,createdAt:a.createdAt,source:a.source||'local',hasPassword:!!a.password,profile:a.profile||{},status:a.status||'saved',cloud:a.cloud?{state:a.cloud.state,uploadedAt:a.cloud.uploadedAt,cloudId:a.cloud.cloudId,lastError:a.cloud.lastError}:null};}
   app.get('/health',(_req,res)=>res.json({ok:true,mode:'local',storage:'encrypted-local-vault'}));
-  app.get('/api/epic/signup/health',ui,(_req,res)=>res.json({success:true,provider:'outlook-local',mode:'local',extensionVersion:'1.5.0'}));
+  app.get('/api/epic/signup/health',ui,(_req,res)=>res.json({success:true,provider:'outlook-local',mode:'local',extensionVersion:'1.5.1'}));
   app.get('/api/local/status',ui,async(_req,res)=>{
     let mailReady=false,proxyReady=false;
     try{const {data}=await require('axios').get('http://127.0.0.1:3999/api/pool/capabilities',{timeout:3000,proxy:false});mailReady=data.authority==='cloud'&&data.exclusivePurposes?.includes('epic');proxyReady=mailReady&&data.proxyConfigured===true;}catch{}
@@ -48,16 +48,17 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
     try {
       const box=mailboxProvider.allocate(req.body.mailbox),identity={...identityFactory.build(),email:box.address};
       const token=crypto.randomBytes(32).toString('base64url'),s={sessionId:crypto.randomUUID(),bearerHash:digest(token),identity,generateSampleContact:req.body.generateSampleContact===true,creationLocation:cleanLocation(req.body.creationLocation),automation:{autoSubmit:req.body.automation?.autoSubmit===true,autoAcceptEula:req.body.automation?.autoAcceptEula===true},status:'identity_ready',reservedAt:box.providerMeta.reservedAt,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+86400000).toISOString()};
-      vault.data.sessions=vault.data.sessions.filter(s=>new Date(s.expiresAt)>new Date());vault.data.sessions.push(s);vault.save();res.json({success:true,session:response(s,token)});
+      // Bearer expiry must not delete an unfinished account's only credentials.
+      vault.data.sessions=vault.data.sessions.filter(s=>s.status!=='verified'||new Date(s.expiresAt)>new Date());vault.data.sessions.push(s);vault.save();res.json({success:true,session:response(s,token)});
     }catch{res.status(400).json({success:false,message:'Reserve a recent Outlook inbox through the extension first'});}
   });
   app.get('/api/epic/signup/recent',ui,(_req,res)=>res.json({success:true,sessions:[...vault.data.sessions].reverse().map(s=>({sessionId:s.sessionId,status:s.status,email:s.identity.email,displayName:s.identity.displayName,createdAt:s.createdAt,verifiedAt:s.verifiedAt,events:s.events||[],lastError:s.lastError||'',epicAccountId:s.epicAccountId}))}));
   app.post('/api/epic/signup/:sessionId/resume',ui,(req,res)=>{
     const s=vault.data.sessions.find(s=>s.sessionId===req.params.sessionId);
-    if(!s||new Date(s.expiresAt)<=new Date())return res.status(404).json({success:false,message:'Local signup expired or not found'});
+    if(!s)return res.status(404).json({success:false,message:'Local signup not found'});
     if(s.status==='verified')return res.status(409).json({success:false,message:'This account is already saved locally'});
     if(req.body.automation)s.automation={autoSubmit:req.body.automation.autoSubmit===true,autoAcceptEula:req.body.automation.autoAcceptEula===true};
-    const token=crypto.randomBytes(32).toString('base64url');s.bearerHash=digest(token);s.status='identity_ready';s.lastError='';s.reservedAt=new Date().toISOString();vault.save();res.json({success:true,session:response(s,token,req.body.mode==='login')});
+    const token=crypto.randomBytes(32).toString('base64url');s.bearerHash=digest(token);s.expiresAt=new Date(Date.now()+86400000).toISOString();s.status='identity_ready';s.lastError='';s.reservedAt=new Date().toISOString();vault.save();res.json({success:true,session:response(s,token,req.body.mode==='login')});
   });
   app.post('/api/epic/signup/:sessionId/status',bearer,(req,res)=>{
     const s=req.signup;if(s.status==='verified'||!['wizard_open','awaiting_confirmation','submitting','awaiting_captcha','awaiting_otp','awaiting_eula','sms_required','throttled','failed'].includes(req.body.status))return res.status(400).json({success:false,message:'Invalid signup transition'});

@@ -19,7 +19,7 @@ The installer replaces the old redirect service and starts
 node tools/epic-signup/local-app.cjs
 ```
 
-Keep the cloud mail SSH forwarder connected on 127.0.0.1:3999 and Marketplace Filler 1.5.0
+Keep the cloud mail SSH forwarder connected on 127.0.0.1:3999 and Marketplace Filler 1.5.1
 enabled in Chrome. Check extension verifies connectivity without reserving an
 inbox or opening Epic. Create Epic account reserves an exclusive cloud inbox and opens the
 signup wizard. The extension fills details and retrieves fresh Outlook OTPs;
@@ -112,6 +112,28 @@ capped at two. The retry button resets that challenge budget only when clicked.
 At an email-code step it requests a fresh email before retrying. Hidden page
 error templates are excluded from CAPTCHA, OTP, and authentication rejection
 checks. The extension still cannot guarantee Epic will accept a challenge.
+
+### Connection recovery (1.5.1)
+
+Failed GET page loads in the assigned private window retry twice on the same
+connection, with a delay and visible panel progress. Chrome alarms keep these
+retries alive when its extension worker sleeps. Successful loading, navigating
+away, cancellation, or saving cancels a queued retry. The worker never replays
+POST requests, ignores subresources and certificate errors, and does not change
+the proxy or reserve another inbox. Exhausted retries stop the batch with the
+original account preserved and an explicit recovery instruction.
+
+Epic's visible "Failed to initialize CAPTCHA" error has a separate two-reload
+budget. Actual challenge rejection, HTTP throttling, and service outages retain
+their existing stop/wait behavior. A retry in the Epic tab reconnects panel
+progress even after a previous failure; it does not restart a stopped batch.
+Keep the private window open until the local save finishes and closes it.
+
+Unfinished local signups survive the 24-hour bearer expiry. Resume renews the
+bearer through the authenticated local panel while retaining the original
+identity and inbox. Completed accounts still require a matching Epic profile
+before they can be saved. If registration finished before a connection failure,
+choose **Recover created account** instead of starting another registration.
 
 
 Every signup now uses a dedicated private window, including normal-connection
