@@ -42,7 +42,11 @@ const entry = (extra = {}) => ({
   ...extra,
 });
 const config = (users) => ({
-  TwitchSettings: { OnlyFavouriteGames: true, TwitchUsers: users },
+  TwitchSettings: {
+    OnlyFavouriteGames: true,
+    ClaimDrops: true,
+    TwitchUsers: users,
+  },
   FavouriteGames: ["Other"],
 });
 
@@ -184,10 +188,12 @@ function rig(options = {}) {
       assert.equal(opts.startRunning, false);
       calls.push(["create", host.id]);
       const file = "config_99.json";
-      files.set(
-        `${host.id}|${file}`,
-        config([entry({ FavouriteGames: [game], UniqueId: "unique" })]),
-      );
+      const template = config([
+        entry({ FavouriteGames: [game], UniqueId: "unique" }),
+      ]);
+      if (options.factoryClaimDrops !== undefined)
+        template.TwitchSettings.ClaimDrops = options.factoryClaimDrops;
+      files.set(`${host.id}|${file}`, template);
       states.set(`${host.id}|twitchbotx99`, "exited");
       return { host: host.id, file, container: "twitchbotx99" };
     },
@@ -324,6 +330,52 @@ test("moves only the held identity, reloads its former home before starting, and
     starts,
     "Unchanged farm does not restart",
   );
+});
+
+test("new and existing skin farms enable drop claims before their next start or reload", async () => {
+  for (const existing of [false, true]) {
+    const initial = config([
+      entry({ FavouriteGames: ["Rocket League"], UniqueId: "unique" }),
+    ]);
+    initial.FavouriteGames = ["Rocket League"];
+    initial.TwitchSettings.ClaimDrops = false;
+    let observedStart = false;
+    const r = rig({
+      factoryClaimDrops: false,
+      ...(existing
+        ? {
+            files: { "local|config_99.json": initial },
+            states: [["local|twitchbotx99", "running"]],
+            skin: {
+              farm: {
+                host: "local",
+                configFile: "config_99.json",
+                container: "twitchbotx99",
+                status: "farming",
+              },
+            },
+          }
+        : {}),
+      onStart: async (_row, action) => {
+        assert.equal(action, existing ? "restart" : "start");
+        assert.equal(
+          r.files.get("local|config_99.json").TwitchSettings.ClaimDrops,
+          true,
+          "The persisted config must claim rewards before the bot reads it",
+        );
+        observedStart = true;
+      },
+    });
+    assert.equal((await r.controller.reconcileFarm(r.row)).ok, true);
+    assert.equal(observedStart, true);
+    observedStart = false;
+    assert.equal((await r.controller.reconcileFarm(r.row)).ok, true);
+    assert.equal(
+      observedStart,
+      false,
+      "A settled claim setting does not restart again",
+    );
+  }
 });
 
 test("failed old-home reload blocks start and remains durable after the entry is disabled", async () => {

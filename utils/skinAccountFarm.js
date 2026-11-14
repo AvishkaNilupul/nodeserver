@@ -662,6 +662,7 @@ function createController(overrides = {}) {
         throw new Error("Another account entered the saved skin farm");
       cfg.TwitchSettings = cfg.TwitchSettings || {};
       cfg.TwitchSettings.OnlyFavouriteGames = true;
+      cfg.TwitchSettings.ClaimDrops = true;
       cfg.FavouriteGames = [skin.gameName];
       cfg.TwitchSettings.TwitchUsers = [
         {
