@@ -180,4 +180,4 @@ account; **Cancel signup** cancels it and clears the remaining queue. Keep the
 generator page and Chrome open: refreshing or closing the page drops the queue,
 so it never silently starts more accounts after reopening.
 
-The extension requires the pool to identify itself as the cloud authority before any inbox allocation. The loopback connection is only a private SSH transport; never start a local mail-dashboard writer. Residential proxy configuration is supplied by the cloud pool, including the current provider credentials. The proxy checkbox defaults on.
+The extension requires the pool to identify itself as the cloud authority before any inbox allocation. The loopback connection is only a private SSH transport; never start a local mail-dashboard writer. Residential proxy configuration is supplied by the cloud pool, including the current provider credentials. The proxy checkbox defaults off: use this Mac’s normal connection for Epic. Enable the optional cloud proxy when its location is needed; connection recovery never changes that choice silently.
