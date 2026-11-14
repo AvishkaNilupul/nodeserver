@@ -30,7 +30,7 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
   function response(s,token,login=false){return{sessionId:s.sessionId,bearer:token,identity:s.identity,redirectUrl:epic.REDIRECT_URL,login,automation:s.automation||{},mailbox:{address:s.identity.email,provider:'outlook-local',reservedAt:s.reservedAt}};}
   function metadata(a){return{_id:a._id,accountId:a.accountId,displayName:a.displayName,email:a.email,createdAt:a.createdAt,source:a.source||'local',hasPassword:!!a.password,profile:a.profile||{},status:a.status||'saved',cloud:a.cloud?{state:a.cloud.state,uploadedAt:a.cloud.uploadedAt,cloudId:a.cloud.cloudId,lastError:a.cloud.lastError}:null};}
   app.get('/health',(_req,res)=>res.json({ok:true,mode:'local',storage:'encrypted-local-vault'}));
-  app.get('/api/epic/signup/health',ui,(_req,res)=>res.json({success:true,provider:'outlook-local',mode:'local',extensionVersion:'1.5.1'}));
+  app.get('/api/epic/signup/health',ui,(_req,res)=>res.json({success:true,provider:'outlook-local',mode:'local',extensionVersion:'1.5.2'}));
   app.get('/api/local/status',ui,async(_req,res)=>{
     let mailReady=false,proxyReady=false;
     try{const {data}=await require('axios').get('http://127.0.0.1:3999/api/pool/capabilities',{timeout:3000,proxy:false});mailReady=data.authority==='cloud'&&data.exclusivePurposes?.includes('epic');proxyReady=mailReady&&data.proxyConfigured===true;}catch{}

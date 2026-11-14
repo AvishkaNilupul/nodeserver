@@ -440,6 +440,17 @@
     location.reload();
   }
 
+  async function waitForContinue(timeoutMs) {
+    var deadline = Date.now() + (timeoutMs || 90000);
+    while (Date.now() < deadline) {
+      checkServiceError();
+      if (challengeRejected()) throw new Error('captcha_reload_required');
+      if (clickContinueLike()) return;
+      await sleep(400);
+    }
+    throw new Error('Epic did not enable Continue within 90 seconds. The same signup is preserved; retry after checking the connection.');
+  }
+
   function continueAfterChallenge(state,visible) {
     if(typeof visible!=='boolean')visible=captchaVisible();
     if(visible){state.seen=true;state.clearedAt=0;return false;}
@@ -604,7 +615,7 @@
     if (loginMode) {
       banner("Signing into the saved Epic account…", "info");
       await beginOtpRequest();
-      await waitFor(clickContinueLike, 15000);
+      await waitForContinue();
       return;
     }
 
@@ -632,7 +643,7 @@
       await sw({type:'epicgen-status',sessionId:sessionId,status:'submitting'});
       banner('Submitting the completed registration…','info');
       await beginOtpRequest();
-      await waitFor(clickContinueLike,15000);
+      await waitForContinue();
     } else {
       await sw({type:'epicgen-status',sessionId:sessionId,status:'awaiting_confirmation'});
       banner('Details ready. Review the agreements and click Continue.','info');

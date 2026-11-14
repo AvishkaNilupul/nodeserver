@@ -19,7 +19,7 @@ The installer replaces the old redirect service and starts
 node tools/epic-signup/local-app.cjs
 ```
 
-Keep the cloud mail SSH forwarder connected on 127.0.0.1:3999 and Marketplace Filler 1.5.1
+Keep the cloud mail SSH forwarder connected on 127.0.0.1:3999 and Marketplace Filler 1.5.2
 enabled in Chrome. Check extension verifies connectivity without reserving an
 inbox or opening Epic. Create Epic account reserves an exclusive cloud inbox and opens the
 signup wizard. The extension fills details and retrieves fresh Outlook OTPs;
@@ -113,7 +113,7 @@ At an email-code step it requests a fresh email before retrying. Hidden page
 error templates are excluded from CAPTCHA, OTP, and authentication rejection
 checks. The extension still cannot guarantee Epic will accept a challenge.
 
-### Connection recovery (1.5.1)
+### Connection recovery (1.5.2)
 
 Failed GET page loads in the assigned private window retry twice on the same
 connection, with a delay and visible panel progress. Chrome alarms keep these
@@ -122,6 +122,14 @@ away, cancellation, or saving cancels a queued retry. The worker never replays
 POST requests, ignores subresources and certificate errors, and does not change
 the proxy or reserve another inbox. Exhausted retries stop the batch with the
 original account preserved and an explicit recovery instruction.
+
+A small early content script also checks for a genuinely blank page after 90
+seconds, before deferred application downloads can strand the normal helper.
+It retries only when the worker recorded a GET navigation for that same tab
+and URL. Visible forms, errors, and challenges do not count as blank pages.
+Registration waits up to 90 seconds for Continue to become enabled and surfaces
+initialization failures immediately instead of reporting a generic 15-second
+timeout.
 
 Epic's visible "Failed to initialize CAPTCHA" error has a separate two-reload
 budget. Actual challenge rejection, HTTP throttling, and service outages retain

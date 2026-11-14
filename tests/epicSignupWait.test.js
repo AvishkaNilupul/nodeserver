@@ -99,3 +99,23 @@ test('initialization failure is classified separately from service outages and h
  body.innerText='Service is temporarily unavailable';assert.throws(()=>context.check(),/temporarily unavailable/);
  body.innerText='Add your details';body.textContent='Failed to initialize CAPTCHA';assert.doesNotThrow(()=>context.check());
 });
+
+test('Continue waits through slow readiness and surfaces initialization failures instead of a generic timeout',async()=>{
+ const source=fs.readFileSync(require.resolve('../extension/epicnpc-filler/epic-signup.js'),'utf8');const start=source.lastIndexOf('  (async function () {');let time=0,clicks=0;
+ const body={innerText:''};const button={textContent:'Continue',offsetParent:{},get disabled(){return time<20000;},getAttribute:()=>null,click(){clicks++;}};
+ const context={location:{hash:'',pathname:'/id/register'},document:{body,getElementById:()=>button,querySelectorAll:()=>[button]},Date:{now:()=>time},setTimeout:fn=>{time+=400;fn();}};
+ vm.runInNewContext(source.slice(0,start)+'globalThis.api={waitForContinue};})();',context);
+ await context.api.waitForContinue();assert.equal(clicks,1);assert.ok(time>=20000);
+ body.innerText='Failed to initialize CAPTCHA. Please try again later.';
+ await assert.rejects(context.api.waitForContinue(),/captcha_initialization_failed/);assert.equal(clicks,1);
+});
+
+test('early load guard only reports blank pages and leaves visible forms, errors and challenges alone',()=>{
+ const source=fs.readFileSync(require.resolve('../extension/epicnpc-filler/epic-load-guard.js'),'utf8');
+ for(const scenario of ['blank','form','challenge','error','unassigned']){
+  let timer;const messages=[];const controls=['form','challenge'].includes(scenario)?[{getBoundingClientRect:()=>({width:300,height:200})}]:[];
+  const body={querySelectorAll:()=>controls,innerText:scenario==='error'?'Too many requests':'Waiting for Epic'};
+  vm.runInNewContext(source,{document:{body,getElementById:()=>({innerText:'Waiting for Epic'})},getComputedStyle:()=>({display:'block',visibility:'visible'}),setTimeout:fn=>{timer=fn;},chrome:{runtime:{sendMessage(msg,callback){messages.push(msg);callback?.({ok:scenario!=='unassigned',sessionId:'test'});}}}});
+  if(timer)timer();assert.equal(messages.some(m=>m.type==='epicgen-page-stalled'),scenario==='blank',scenario);
+ }
+});

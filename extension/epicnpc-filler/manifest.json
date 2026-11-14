@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Marketplace Filler (EpicNPC + G2G + Epic Signup)",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Marketplace form tools and Epic signup using the local Outlook pool, with an optional residential proxy in a dedicated private window.",
   "background": {
     "service_worker": "background.js"
@@ -31,6 +31,17 @@
     "http://*/*"
   ],
   "content_scripts": [
+    {
+      "matches": [
+        "https://www.epicgames.com/*",
+        "https://epicgames.com/*",
+        "https://store.epicgames.com/*",
+        "https://accounts.epicgames.com/*"
+      ],
+      "js": ["epic-load-guard.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
     {
       "matches": [
         "https://www.epicnpc.com/*",

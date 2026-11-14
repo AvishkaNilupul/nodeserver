@@ -31,14 +31,14 @@ test('server accepts only recent local Outlook reservations', () => {
 
 function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now, otpResponse=null, cloudAuthority="cloud" } = {}) {
   const storage = {}; const calls = []; let listener; let auth; let removed; let nextTab = 10;
-  const errorListeners=[],completedListeners=[],tabs=new Map(),alarms=new Map();let alarmListener;
+  const errorListeners=[],completedListeners=[],startedListeners=[],tabs=new Map(),alarms=new Map();let alarmListener;
   const chrome = {
     alarms: { create: async (name,data)=>alarms.set(name,data), clear: async name=>alarms.delete(name), onAlarm:{addListener:fn=>alarmListener=fn} },
     extension: { isAllowedIncognitoAccess: async () => incognitoAllowed },
     windows: { getAll: async () => existingPrivate ? [{id: 99, incognito: true}] : [], create: async data => {calls.push(['window',data]);return { id: 100, tabs: [{ id: nextTab++ }] };},
       remove: async id => calls.push(['close-window', id]), onRemoved: { addListener: fn => removed = fn } },
     proxy: { settings: { get: async () => ({ levelOfControl: 'controllable_by_this_extension' }), set: async data => calls.push(['proxy', data]) } },
-    webRequest: { onAuthRequired: { addListener: fn => auth = fn }, onCompleted: { addListener: fn => completedListeners.push(fn) }, onErrorOccurred: { addListener: fn => errorListeners.push(fn) } },
+    webRequest: { onAuthRequired: { addListener: fn => auth = fn }, onCompleted: { addListener: fn => completedListeners.push(fn) }, onErrorOccurred: { addListener: fn => errorListeners.push(fn) }, onBeforeRequest:{addListener:fn=>startedListeners.push(fn)} },
     storage: { session: {
       get: async keys => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(k => [k, storage[k]])),
       set: async data => Object.assign(storage, structuredClone(data)),
@@ -60,7 +60,7 @@ function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epicnpc-filler/background.js'), 'utf8'), { chrome, fetch, URL, AbortSignal, setTimeout, Date:class extends Date {constructor(...args){super(...(args.length?args:[now()]));}static now(){return now();}} });
   const send = (msg, id = 1, url = 'https://panel.test/epic-accounts.html') => new Promise(resolve => listener(msg, { tab: { id, url } }, resolve));
-  return { storage, calls, send, tabs, alarms, alarm:()=>alarmListener({name:'epicgen.connection-retry'}), error:async d=>{for(const fn of errorListeners)await fn(d);}, completed:async d=>{for(const fn of completedListeners)await fn(d);}, auth: d => new Promise(resolve => auth(d, resolve)), removed: id => removed(id) };
+  return { storage, calls, send, tabs, alarms, alarm:()=>alarmListener({name:'epicgen.connection-retry'}), started:async d=>{for(const fn of startedListeners)await fn(d);}, error:async d=>{for(const fn of errorListeners)await fn(d);}, completed:async d=>{for(const fn of completedListeners)await fn(d);}, auth: d => new Promise(resolve => auth(d, resolve)), removed: id => removed(id) };
 }
 test('extension reserves Outlook once, binds tabs, polls locally, and saves without leaking mail secrets', async () => {
   const w = worker();
@@ -434,4 +434,19 @@ test('security-check initialization retry budget survives page reload and is dis
  assert.match((await request()).error,/after two retries/);
  assert.equal(w.storage['epicgen.active'].challengeReloads,undefined);
  assert.equal(w.calls.filter(c=>String(c[0]).includes('/pool/pick')).length,1);
+});
+
+test('blank-page recovery requires a recorded GET navigation in the assigned tab',async()=>{
+ const w=await recoveryWorker();const stalled=()=>w.send({type:'epicgen-page-stalled',sessionId:'recovery'},10,networkFailure.url);
+ assert.equal((await stalled()).ok,false);assert.equal(w.alarms.size,0);
+ await w.started({...networkFailure,method:'POST'});assert.equal((await stalled()).ok,false);
+ await w.started(networkFailure);assert.equal((await stalled()).ok,true);assert.equal(w.alarms.size,1);
+ const watched=await w.send({type:'epicgen-page-watch'},10,networkFailure.url);assert.equal(watched.sessionId,'recovery');assert.equal(watched.identity,undefined);
+ await w.started({...networkFailure,url:'https://www.epicgames.com/id/login'});assert.equal(w.alarms.size,0);assert.equal((await stalled()).ok,false);
+});
+
+test('a helper that becomes ready during the retry delay cancels the stale blank-page reload',async()=>{
+ const w=await recoveryWorker();await w.started(networkFailure);
+ await w.send({type:'epicgen-page-stalled',sessionId:'recovery'},10,networkFailure.url);assert.equal(w.alarms.size,1);
+ await w.send({type:'epicgen-session-request',sessionId:'recovery'},10,networkFailure.url);assert.equal(w.alarms.size,0);
 });

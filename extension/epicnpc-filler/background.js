@@ -37,7 +37,7 @@ async function finish(s, status, detail = '') {
 const retryableNetworkErrors = new Set(['net::ERR_EMPTY_RESPONSE', 'net::ERR_CONNECTION_RESET',
   'net::ERR_CONNECTION_CLOSED', 'net::ERR_CONNECTION_TIMED_OUT', 'net::ERR_TIMED_OUT',
   'net::ERR_NAME_NOT_RESOLVED', 'net::ERR_INTERNET_DISCONNECTED',
-  'net::ERR_PROXY_CONNECTION_FAILED', 'net::ERR_TUNNEL_CONNECTION_FAILED']);
+  'net::ERR_PROXY_CONNECTION_FAILED', 'net::ERR_TUNNEL_CONNECTION_FAILED', 'PAGE_LOAD_STALLED']);
 let recoveryQueue = Promise.resolve();
 function recoveryTask(fn) {
   const result = recoveryQueue.then(fn);
@@ -111,6 +111,15 @@ async function pageLoadCompleted(details) {
   state.jobs = state.jobs.filter(j => j.tabId !== details.tabId);
   await saveRecovery(state);
 }
+async function pageLoadStarted(details) {
+  if (details.type !== 'main_frame' || !isEpic(details.url)) return;
+  const s = (await chrome.storage.session.get(KEY))[KEY];
+  if (!s || !s.tabs.includes(details.tabId)) return;
+  const state = await recoveryState(s.sessionId);
+  state.navigation = { ...state.navigation, [details.tabId]: { method: details.method, url: pageUrl(details.url) } };
+  state.jobs = state.jobs.filter(j => j.tabId !== details.tabId);
+  await saveRecovery(state);
+}
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === RETRY_ALARM) return recoveryTask(retryPageLoads);
 });
@@ -129,7 +138,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   (async () => {
     if (!msg?.type?.startsWith('epicgen-')) return { ok: false };
     const panel = isPanel(sender.tab?.url);
-    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.5.1' };
+    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.5.2' };
     if (msg.type === 'epicgen-allocate') {
       if (!panel) throw new Error('Open the Epic Accounts panel first');
       const stored = await chrome.storage.session.get([KEY, PENDING]);
@@ -204,8 +213,23 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     }
     const { [KEY]: s } = await chrome.storage.session.get(KEY);
     if (!s || !isEpic(sender.tab?.url) || !s.tabs.includes(sender.tab.id)) throw new Error('No signup assigned to this Epic tab');
-    if (msg.type !== 'epicgen-session-request' && msg.sessionId !== s.sessionId) throw new Error('Session mismatch');
-    if (msg.type === 'epicgen-session-request') return { ok: true, session: { sessionId: s.sessionId, identity: s.identity, login: s.login, automation:s.automation } };
+    if (!['epicgen-session-request', 'epicgen-page-watch'].includes(msg.type) && msg.sessionId !== s.sessionId) throw new Error('Session mismatch');
+    if (msg.type === 'epicgen-page-watch') return { ok: !s.failureReason, sessionId: s.sessionId };
+    if (msg.type === 'epicgen-page-stalled') {
+      return recoveryTask(async () => {
+        const state = await recoveryState(s.sessionId);
+        const nav = state.navigation?.[sender.tab.id];
+        if (!nav || nav.method !== 'GET' || nav.url !== pageUrl(sender.tab.url)) return { ok: false };
+        await pageLoadFailed({ type: 'main_frame', method: 'GET', tabId: sender.tab.id, url: sender.tab.url, error: 'PAGE_LOAD_STALLED' });
+        return { ok: true };
+      });
+    }
+    if (msg.type === 'epicgen-session-request') {
+      // The normal helper has loaded: do not let an earlier blank-page alarm
+      // reload a form that became ready during the retry delay.
+      await recoveryTask(() => pageLoadCompleted({ type: 'main_frame', tabId: sender.tab.id }));
+      return { ok: true, session: { sessionId: s.sessionId, identity: s.identity, login: s.login, automation:s.automation } };
+    }
     if (msg.type === 'epicgen-status') {
       await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: msg.status, ...msg.extra, creationLocation:s.proxy?.location || null });
       await relay(s, { kind: 'status', status: msg.status });
@@ -348,3 +372,4 @@ chrome.webRequest.onCompleted.addListener(clearAuthAttempt, { urls: ['<all_urls>
 chrome.webRequest.onErrorOccurred.addListener(clearAuthAttempt, { urls: ['<all_urls>'] });
 chrome.webRequest.onCompleted.addListener(d => recoveryTask(() => pageLoadCompleted(d)), { urls: ['https://*.epicgames.com/*'] });
 chrome.webRequest.onErrorOccurred.addListener(d => recoveryTask(() => pageLoadFailed(d)), { urls: ['https://*.epicgames.com/*'] });
+chrome.webRequest.onBeforeRequest.addListener(d => recoveryTask(() => pageLoadStarted(d)), { urls: ['https://*.epicgames.com/*'] });
