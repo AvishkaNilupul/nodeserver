@@ -286,6 +286,12 @@
           superOnly: true,
         },
         {
+          href: "/skin-accounts.html",
+          label: "Skin Accounts",
+          icon: ICONS.epicAccounts,
+          superOnly: true,
+        },
+        {
           href: "/steam-accounts.html",
           label: "Steam accounts",
           icon: ICONS.steamAccounts,

@@ -2,6 +2,7 @@ const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const EpicAccount = require("../models/EpicAccount");
+const SkinAccount = require("../models/SkinAccount");
 const EpicFreebie = require("../models/EpicFreebie");
 const epic = require("../utils/epicClient");
 const epicClaimer = require("../utils/epicClaimer");
@@ -17,6 +18,18 @@ const BuyerMailSession = require("../models/BuyerMailSession");
 const outlookProxy = require("../utils/outlookGraphReader");
 
 const router = express.Router();
+
+// Enrollment and every route that can hand over or free Epic stock share
+// the same lock. No gap between checking the ownership fence and writing.
+function stockAction(handler) {
+  return (req, res, next) => require("../utils/epicSales")._internals.withLock(() => handler(req, res, next)).catch(next);
+}
+
+async function skinHeld(accountId, res) {
+  if (!await SkinAccount.exists({ epicAccountId: accountId })) return false;
+  res.status(409).json({ success: false, message: "This account is permanently reserved by Skin Accounts. Manage the whole account there." });
+  return true;
+}
 
 // How long a buyer-mail session lives on the server. The design in
 // project_epic_store_el9in_scan_1028 is ~5-7 days; we pick 7 and let the
@@ -167,9 +180,10 @@ router.post("/api/epic/accounts", requireSuperadmin, async (req, res) => {
 });
 
 // Toggle sold / edit label.
-router.patch("/api/epic/accounts/:id", requireSuperadmin, async (req, res) => {
+router.patch("/api/epic/accounts/:id", requireSuperadmin, stockAction(async (req, res) => {
   try {
     const upd = {};
+    if (typeof req.body.sold === "boolean" && await skinHeld(req.params.id, res)) return;
     if (typeof req.body.sold === "boolean") upd.sold = req.body.sold;
     // An account on a live instant-delivery listing is sold BY Eldorado; a
     // hand-made "sold" here would leave it on sale there too.
@@ -197,17 +211,18 @@ router.patch("/api/epic/accounts/:id", requireSuperadmin, async (req, res) => {
     console.error("epic account update error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
-});
+}));
 
-router.delete("/api/epic/accounts/:id", requireSuperadmin, async (req, res) => {
+router.delete("/api/epic/accounts/:id", requireSuperadmin, stockAction(async (req, res) => {
   try {
+    if (await skinHeld(req.params.id, res)) return;
     await EpicAccount.findByIdAndDelete(req.params.id);
     res.json({ success: true });
   } catch (err) {
     console.error("epic account delete error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
   }
-});
+}));
 
 // Sync all accounts now (library refresh + claim pings).
 router.post("/api/epic/accounts/sync", requireSuperadmin, async (req, res) => {
@@ -417,8 +432,9 @@ router.post(
 router.post(
   "/api/epic/accounts/:id/buyer-session",
   requireSuperadmin,
-  async (req, res) => {
+  stockAction(async (req, res) => {
     try {
+      if (await skinHeld(req.params.id, res)) return;
       const acct = await EpicAccount.findById(req.params.id);
       if (!acct) {
         return res.status(404).json({ success: false, message: "Account not found" });
@@ -543,7 +559,7 @@ router.post(
         .status(500)
         .json({ success: false, message: err.message || "Mint failed" });
     }
-  },
+  }),
 );
 
 // List sessions for one account — purely for the admin UI, so operator can

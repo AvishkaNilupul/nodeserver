@@ -37,6 +37,7 @@ const bcrypt = require("bcrypt");
 const axios = require("axios");
 
 const EpicAccount = require("../models/EpicAccount");
+const SkinAccount = require("../models/SkinAccount");
 const EpicFreebie = require("../models/EpicFreebie");
 const EpicListing = require("../models/EpicListing");
 const EpicSale = require("../models/EpicSale");
@@ -282,7 +283,7 @@ function readinessOf(acc, ctx) {
 async function stockContext({ fresh = false, accountIds = null } = {}) {
   const cfg = await getConfig();
   const q = accountIds ? { _id: { $in: accountIds } } : {};
-  const [accounts, listings, freebies, buyerSessions] = await Promise.all([
+  const [accounts, listings, freebies, buyerSessions, skinAccounts] = await Promise.all([
     EpicAccount.find(q).sort({ createdAt: 1 }).lean(),
     // "draft"/"error" rows may already be on Eldorado: their units stay taken.
     EpicListing.find({ status: { $in: [...LIVE_LISTING, "draft", "error"] } }).lean(),
@@ -290,6 +291,7 @@ async function stockContext({ fresh = false, accountIds = null } = {}) {
     BuyerMailSession.find({ revokedAt: null, expiresAt: { $gt: new Date() }, stage: { $ne: "listed" } })
       .select("inboxAddress")
       .lean(),
+    SkinAccount.find(accountIds ? { epicAccountId: { $in: accountIds } } : {}).select("epicAccountId state").lean(),
   ]);
   const listingByAccount = new Map();
   for (const l of listings) {
@@ -307,6 +309,9 @@ async function stockContext({ fresh = false, accountIds = null } = {}) {
   for (const u of await paStockUnits()) {
     listingByAccount.set(String(u.epicAccountId), paListingRef(u));
   }
+  // The whole pair stays owned by Skin Accounts for its lifetime, including
+  // paused, quarantined and sold rows. It never returns to generic stock.
+  for (const skin of skinAccounts) listingByAccount.set(String(skin.epicAccountId), skinListingRef(skin));
   const checks = new Map();
   const toCheck = [];
   for (const a of accounts) {
@@ -885,6 +890,9 @@ async function loadListing(id) {
   if (!/^[a-f\d]{24}$/i.test(String(id || ""))) throw userError("Invalid listing id");
   const l = await EpicListing.findById(id);
   if (!l) throw userError("Listing not found", 404);
+  if (l.managedBy === "skin-account" || await SkinAccount.exists({ listingId: l._id })) {
+    throw userError("This whole account is managed in Skin Accounts. Change its listing there.", 409);
+  }
   return l;
 }
 
@@ -1169,6 +1177,13 @@ async function linkOffer(listingId, offerId) {
 // ---------------------------------------------------------------------------
 
 async function markUnitSold(unit, orderId, soldAt, cfg) {
+  // Record the lifetime sale and attempt to stop the paired farmer before
+  // mail activation. The skin service retains/retries a failed physical stop;
+  // a failed ownership write remains retryable through the normal sale sync.
+  const skinProduct = !!await SkinAccount.exists({ epicAccountId: unit.epicAccountId });
+  if (skinProduct) {
+    await require("./skinAccounts").markSkinSold(unit.epicAccountId, { soldAt, orderId });
+  }
   unit.state = "sold";
   unit.soldAt = soldAt;
   unit.orderId = orderId;
@@ -1181,7 +1196,9 @@ async function markUnitSold(unit, orderId, soldAt, cfg) {
         $set: {
           stage: "sold",
           soldAt,
-          expiresAt: new Date(soldAt.getTime() + cfg.sessionDays * DAY_MS),
+          // Skin listings explicitly promise 14 days, independently of the
+          // generic Epic product's configured buyer window.
+          expiresAt: new Date(soldAt.getTime() + (skinProduct ? 14 : cfg.sessionDays) * DAY_MS),
           orderRef: orderId,
           marketplace: "eldorado",
           passwordEnc: "",
@@ -1857,9 +1874,15 @@ function paListingRef(u) {
   return { id: "pa:" + (u.offerId || u._id), title: "PlayerAuctions Epic stock", status: u.state, market: "playerauctions" };
 }
 
+function skinListingRef(skin) {
+  return { id: "skin:" + skin._id, title: "Skin Accounts (permanent account reservation)", status: skin.state, market: "skin-account" };
+}
+
 async function listingForAccount(accountId) {
   const id = String(accountId || "");
   if (!/^[a-f\d]{24}$/i.test(id)) return null;
+  const skin = await SkinAccount.findOne({ epicAccountId: id }).select("state").lean();
+  if (skin) return skinListingRef(skin);
   const inPa = await paStockUnits({ epicAccountId: new (require("mongoose").Types.ObjectId)(id) });
   if (inPa.length) return paListingRef(inPa[0]);
   const inG2g = await g2gStockUnits({ epicAccountId: new (require("mongoose").Types.ObjectId)(id) });

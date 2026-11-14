@@ -35,6 +35,8 @@ const listedAccountSchema = new mongoose.Schema(
 const epicListingSchema = new mongoose.Schema(
   {
     market: { type: String, default: "eldorado", index: true },
+    // Specialized whole-account listings must never use generic stock rebuilds.
+    managedBy: { type: String, enum: ["", "skin-account"], default: "" },
     // Where on Eldorado the offer is filed: "epic" (Epic Games › Accounts) or
     // "rocket-league" (Rocket League › Accounts, PC — fresh accounts only).
     // Every edit of the offer must send the same section.

@@ -199,7 +199,7 @@ async function readNoclaimHomes() {
       const s = String((u && u.ClientSecret) || "").trim();
       if (!s) continue;
       const own = Array.isArray(u.FavouriteGames) && u.FavouriteGames.length ? u.FavouriteGames : games;
-      homes.set(s, { botId, login: String(u.Login || ""), game: String(own[0] || "") });
+      homes.set(s, { botId, login: String(u.Login || ""), twitchId: String(u.Id || u.TwitchId || ""), game: String(own[0] || "") });
     }
   }
   return homes;

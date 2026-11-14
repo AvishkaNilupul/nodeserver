@@ -69,6 +69,7 @@ const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
+const skinAccountRoutes = require("./routes/skinAccountRoutes");
 const steamAccountRoutes = require("./routes/steamAccountRoutes");
 const valorantAccountRoutes = require("./routes/valorantAccountRoutes");
 const rivalsAccountRoutes = require("./routes/rivalsAccountRoutes");
@@ -563,6 +564,9 @@ app.get("/banned-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
 });
 
 // Epic accounts manager (superadmin only) — stock accounts + auto-claim.
+app.get("/skin-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "skin-accounts.html"));
+});
 app.get("/epic-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "epic-accounts.html"));
 });
@@ -845,6 +849,7 @@ app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
+app.use("/api/skin-accounts", enforce2fa, skinAccountRoutes);
 app.use(enforce2fa, steamAccountRoutes);
 app.use(enforce2fa, valorantAccountRoutes);
 app.use(enforce2fa, rivalsAccountRoutes);
@@ -1087,6 +1092,7 @@ mongoose
     // buyers depend on it. Reads Eldorado only while a listing is live; off
     // from the Listings & sales tab. See utils/epicSales.js.
     require("./utils/epicSales").start();
+    require("./utils/skinAccounts").start();
     // Steam account sales (docs/STEAM-SALES.md): same sale sync for the Steam
     // region offers. Reads Eldorado only while a Steam listing is live.
     require("./utils/steamSales").start();

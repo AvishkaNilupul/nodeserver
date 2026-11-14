@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>try { if (localStorage.getItem("theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (_) {}</script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Skin Accounts · RedeemHub</title>
+    <link rel="stylesheet" href="/epic-page.css?v=20261101" />
+    <link rel="stylesheet" href="/skin-accounts.css?v=20261115" />
+    <link rel="stylesheet" href="/admin-nav.css" />
+    <script src="/admin-nav.js" defer></script>
+    <script src="/skin-accounts.js?v=20261115" defer></script>
+  </head>
+  <body>
+    <aside class="nav" aria-label="Admin navigation">
+      <div class="brand"><span class="mark" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="m12 2 10 6-10 6L2 8Z M2 8v8l10 6 10-6V8 M12 14v8" /></svg></span><b>RedeemHub<span>Admin console</span></b></div>
+      <nav class="links"><a href="/admin.html">Inbox</a><a href="/orders">Orders</a><a href="/inventory">Inventory</a><a href="/epic-accounts.html">Epic Accounts</a><a href="/skin-accounts.html" class="active" aria-current="page">Skin Accounts</a></nav>
+      <div class="me"><span class="av" id="meAvatar">—</span><div class="who"><b id="meName">Admin</b><span id="meRole">Superadmin</span></div><button class="themebtn" type="button" id="skin-theme" aria-label="Toggle dark mode">◐</button></div>
+    </aside>
+    <main class="ep-main sk-main" id="skin-app">
+      <header class="sk-page-head"><div><p class="sk-eyebrow">Account workshop</p><h1>Skin Accounts</h1><p class="muted">Build the collection. Keep the pair together. Sell the whole account.</p></div><div class="sk-actions"><button class="btn" type="button" data-action="refresh-all">Refresh</button><button class="btn btn-primary" type="button" data-action="add">Add account pair</button></div></header>
+      <div id="skin-notice" role="status" aria-live="polite" hidden></div>
+      <div id="skin-error" role="alert" hidden></div>
+      <section class="sk-summary" id="skin-summary" aria-label="Account summary"></section>
+      <div class="sk-worker" id="skin-worker">Loading account status…</div>
+      <div id="skin-content" class="sk-workspace">
+        <section class="ep-card sk-list-panel" aria-labelledby="skin-list-title">
+          <div class="sk-list-head"><h2 id="skin-list-title">Your accounts</h2><label class="sk-search"><span class="sr-only">Search accounts</span><input id="skin-search" type="search" placeholder="Find an account…" autocomplete="off" /></label><label><span class="sr-only">Filter accounts</span><select id="skin-filter"><option value="all">All accounts</option><option value="listed">On sale</option><option value="preparing">Preparing</option><option value="attention">Needs attention</option><option value="sold">Sold</option></select></label></div>
+          <div id="skin-list" class="sk-account-list" aria-live="polite"><p class="sk-empty">Loading your accounts…</p></div>
+        </section>
+        <section class="ep-card sk-detail" id="skin-detail" aria-label="Selected account"><div class="sk-empty">Choose an account to see its collection and listing.</div></section>
+      </div>
+      <p class="sk-footer">Rocket League · Epic + Twitch · <a href="/epic-accounts.html">Create new Epic accounts</a></p>
+    </main>
+    <dialog id="skin-dialog" class="sk-dialog" aria-labelledby="skin-dialog-title"><div id="skin-dialog-content"></div></dialog>
+  </body>
+</html>

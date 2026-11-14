@@ -43,6 +43,7 @@ const suspendedAccounts = require("./suspendedAccounts");
 const { logEvent } = require("./systemLog");
 const { sendTelegram } = require("./telegram");
 const { stopFarmingGame } = require("./farmControl");
+const skinAccountFarm = require("./skinAccountFarm");
 
 // Marketplace claim tags: a DropLog reserved with one of these is merely
 // LISTED for sale, not sold to a buyer yet. Any other soldToUsername value
@@ -306,7 +307,7 @@ async function claimNext() {
 // pool account's `accountModel` is "AvailableAccount" so it never gets
 // counted as deployed/sellable stock by the drops-archive aggregates, but it
 // still shows up there as a distinct, clearly-labelled "in pool" entry.
-async function upsertDrops(accountId, accountModel, login, drops) {
+async function upsertDrops(accountId, accountModel, login, drops, skinPolicy = null) {
   const now = new Date();
   // Snapshot prior connection states so we can detect drops flipping to
   // connected in THIS scan. A flip means someone linked the game account —
@@ -354,11 +355,12 @@ async function upsertDrops(accountId, accountModel, login, drops) {
     if (imageLocal) set.imageLocal = imageLocal;
     const r = await DropLog.updateOne(
       { account: accountId, benefitId: d.benefitId },
-      { $set: set, $setOnInsert: { firstSeenAt: now } },
+      { $set: set, $setOnInsert: { firstSeenAt: now, ...(skinPolicy?.holdFields || {}) } },
       { upsert: true },
     );
     // Connection flip: was known and not connected, now connected.
     if (
+      !skinPolicy?.suppressSaleSignal &&
       d.connected &&
       prior.has(d.benefitId) &&
       !prior.get(d.benefitId) &&
@@ -502,10 +504,26 @@ async function scanAccount(acc, worker) {
   const now = new Date();
   const prevStatus = acc.lastScanStatus;
   const prevSuspendedAt = acc.suspendedAt || null;
+  // Resolve ownership before inserting anything. If the registry cannot be
+  // read, no new reward may briefly enter ordinary marketplace stock.
+  let skinPolicy;
+  try {
+    skinPolicy = await skinAccountFarm.policyForAccount(acc);
+  } catch (error) {
+    // These tags identify this feature's existing whole-account holds even
+    // when its database lookup failed. Leave every unrelated account alone.
+    if (/^(skin-account:|owner:rl-epic-link-test:)/.test(String(acc.soldToUsername || ""))) {
+      await stopFarmingGame(acc, "Rocket League").catch(() => {});
+    }
+    throw error;
+  }
   let inv;
   try {
     inv = await fetchInventory(acc.clientSecret, { host });
   } catch (e) {
+    if (skinPolicy.enrolled) {
+      await skinAccountFarm.stopFarm(skinPolicy.skin, "Twitch inventory could not be verified").catch(() => {});
+    }
     if (e.transportFailed) throw e; // leave account untouched; worker backs off
     acc.lastScanAt = now;
     acc.lastScanStatus = e.code === "token_invalid" ? "token_invalid" : "error";
@@ -553,13 +571,44 @@ async function scanAccount(acc, worker) {
     return { ok: false, error: acc.lastScanError };
   }
 
+  // A sale may have arrived while Twitch was answering. Held new drops remain
+  // held in either state, but a former owner must not keep a farm exemption.
+  if (skinPolicy.enrolled) {
+    try {
+      const currentPolicy = await skinAccountFarm.policyForAccount(acc);
+      if (!currentPolicy.enrolled) throw new Error("The skin-account reservation disappeared during the scan");
+      skinPolicy = currentPolicy;
+    }
+    catch (error) {
+      await skinAccountFarm.stopFarm(skinPolicy.skin, "Ownership could not be rechecked").catch(() => {});
+      throw error;
+    }
+  }
   const { twitchId, login, drops, inProgress } = inv;
+  if (skinPolicy.enrolled && twitchId && String(twitchId) !== String(skinPolicy.skin.twitchId)) {
+    const error = "Twitch inventory identity does not match the reserved account";
+    await skinAccountFarm.stopFarm(skinPolicy.skin, error).catch(() => {});
+    acc.lastScanAt = now;
+    acc.lastScanStatus = "error";
+    acc.lastScanError = error;
+    await acc.save();
+    worker.errors++;
+    state.sessionErrors++;
+    state.lastError = error;
+    return { ok: false, error };
+  }
   const newDrops = await upsertDrops(
     acc._id,
     "BotAccount",
     login || acc.login || "",
     drops,
+    skinPolicy,
   );
+  if (skinPolicy.enrolled && !skinPolicy.allowed) {
+    await skinAccountFarm.stopFarm(skinPolicy.skin, skinPolicy.reason).catch((error) =>
+      console.error("dropScanner: skin-account stop needs retry: " + error.message),
+    );
+  }
   if (twitchId) acc.twitchId = twitchId;
   if (login && !acc.login) acc.login = login;
   // An account sold WHOLE for its unclaimed drops (utils/autofarmStock — its
@@ -616,6 +665,9 @@ async function scanAccount(acc, worker) {
     }
     const stopGames = [...new Set([...connectedGames, ...realSoldGames])];
     for (const game of stopGames) {
+      // A linked game is expected for an explicitly owned skin product. The
+      // exception expires with ownership/sale checks and covers one game only.
+      if (skinPolicy.allowed && String(game).trim().toLowerCase() === skinPolicy.allowedGame) continue;
       try {
         const r = await stopFarmingGame(acc, game);
         if (r.changed) {

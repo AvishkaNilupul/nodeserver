@@ -258,7 +258,7 @@ async function createAccountOffer(opts) {
   const dto = offerDto(opts);
   const r = await call("Eldorado account offer create", "POST", "/api/flexibleOffers/account", { data: dto });
   let id = offerIdOf(r);
-  if (!id) {
+  if (!id && opts.recoverByTitle !== false) {
     const mine = await myAccountOffers({ pageSize: 20, gameId: dto.augmentedGame.gameId }).catch(() => []);
     const hit = mine
       .filter((o) => String(o.offerTitle || "").trim() === dto.details.offerTitle)

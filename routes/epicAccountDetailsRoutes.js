@@ -1,17 +1,23 @@
 const express = require('express');
 const EpicAccount = require('../models/EpicAccount');
+const SkinAccount = require('../models/SkinAccount');
 const { requireSuperadmin } = require('../middleware/auth');
 const { encrypt, decrypt } = require('../utils/secretBox');
 const router = express.Router();
-const fields = { firstName: 80, lastName: 80, dateOfBirth: 10, country: 2, notes: 4000 };
+function stockAction(handler) {
+  return (req,res,next) => require('../utils/epicSales')._internals.withLock(() => handler(req,res,next)).catch(next);
+}
+const heldMessage = 'This account is reserved by Skin Accounts. Its delivery identity and profile cannot be changed here.';
+const {fields:profileFields,cleanProfile,creationProfile,sampleContact}=require('../utils/epicAccountLocation');
+const fields = { firstName:80,lastName:80,dateOfBirth:10,country:2,notes:4000,phone:80,address:500 };
 const allowed = new Set([...Object.keys(fields), 'label', 'email', 'password', 'totpSecret']);
 const projection = 'accountId displayName label email password totpSecret source accountDetails detailsUpdatedAt sold status libraryCount libraryValueUsd library createdAt';
 function profile(account) {
-  if (!account.accountDetails) return {};
+  if (!account.accountDetails) return cleanProfile({});
   const plain = decrypt(account.accountDetails);
   if (!plain) throw Error('Stored details unavailable');
   const value = JSON.parse(plain);
-  return Object.fromEntries(Object.keys(fields).map(k => [k, typeof value[k] === 'string' ? value[k] : '']));
+  return cleanProfile(value);
 }
 function view(account) {
   return { _id: account._id, accountId: account.accountId, displayName: account.displayName,
@@ -22,6 +28,38 @@ function view(account) {
     libraryValueUsd: account.libraryValueUsd || 0,
     games: (account.library || []).map(g => g.title).filter(Boolean), createdAt: account.createdAt };
 }
+router.post('/api/epic/accounts/details/backfill-location',requireSuperadmin,stockAction(async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try {
+    const skinIds=await SkinAccount.distinct('epicAccountId');
+    const accounts=await EpicAccount.find({_id:{$nin:skinIds}}).select('_id accountDetails').lean();
+    let changed=0,skipped=0;
+    for(const a of accounts){
+      const before=profile(a),after=creationProfile(before);
+      if(req.body?.generateSamples===true)Object.assign(after,sampleContact(after));
+      if(JSON.stringify(before)===JSON.stringify(after)){skipped++;continue;}
+      const match={_id:a._id,accountDetails:a.accountDetails===undefined?{$exists:false}:a.accountDetails};
+      const updated=await EpicAccount.findOneAndUpdate(match,{$set:{accountDetails:encrypt(JSON.stringify(after)),detailsUpdatedAt:new Date()}},{returnDocument:'after',runValidators:true}).select('_id').lean();
+      if(updated)changed++;else skipped++;
+    }
+    res.json({success:true,changed,skipped});
+  } catch {res.status(500).json({success:false,message:'Could not backfill account locations'});}
+}));
+router.post('/api/epic/accounts/:id/details/sample-contact',requireSuperadmin,validId,stockAction(async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try {
+    if(await SkinAccount.exists({epicAccountId:req.params.id}))return res.status(409).json({success:false,message:heldMessage});
+    const a=await EpicAccount.findById(req.params.id).select(projection).lean();
+    if(!a)return res.status(404).json({success:false,message:'Account not found'});
+    const before=profile(a);
+    if(before.phone||before.address)return res.status(409).json({success:false,message:'Contact details already exist; edit them manually.'});
+    if(!before.creationCountry&&!before.country)return res.status(400).json({success:false,message:'No recorded country is available for this account'});
+    const match={_id:a._id,accountDetails:a.accountDetails===undefined?{$exists:false}:a.accountDetails};
+    const updated=await EpicAccount.findOneAndUpdate(match,{$set:{accountDetails:encrypt(JSON.stringify(sampleContact(before))),detailsUpdatedAt:new Date()}},{returnDocument:'after',runValidators:true}).select(projection).lean();
+    if(!updated)return res.status(409).json({success:false,message:'Details changed. Refresh before generating.'});
+    res.json({success:true,account:view(updated)});
+  }catch{res.status(500).json({success:false,message:'Could not generate sample contact'});}
+}));
 router.use('/api/epic/accounts/:id/details', (req,res,next) => {
   res.set('Cache-Control', 'no-store'); res.set('Pragma', 'no-cache'); next();
 });
@@ -36,7 +74,7 @@ router.get('/api/epic/accounts/:id/details', requireSuperadmin, validId, async (
     res.json({success:true,account:view(a)});
   } catch { res.status(500).json({success:false,message:'Could not read account details'}); }
 });
-router.patch('/api/epic/accounts/:id/details', requireSuperadmin, validId, async (req,res) => {
+router.patch('/api/epic/accounts/:id/details', requireSuperadmin, validId, stockAction(async (req,res) => {
   try {
     const body = req.body;
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k=>!allowed.has(k))) {
@@ -61,8 +99,20 @@ router.patch('/api/epic/accounts/:id/details', requireSuperadmin, validId, async
     const a = await EpicAccount.findById(req.params.id).select(projection).lean();
     if (!a) return res.status(404).json({success:false,message:'Account not found'});
     const details = profile(a);
+    if (await SkinAccount.exists({epicAccountId:a._id})) {
+      const changed = Object.entries(clean).some(([key,value]) => {
+        if (key === 'label') return false;
+        if (key === 'password' || key === 'totpSecret') return value && value !== decrypt(a[key]);
+        if (key === 'email') return value.toLowerCase() !== String(decrypt(a.email) || '').toLowerCase();
+        return (key === 'country' ? value.toUpperCase() : value) !== (details[key] || '');
+      });
+      if (changed) return res.status(409).json({success:false,message:heldMessage});
+      if (Object.hasOwn(clean,'label')) await EpicAccount.updateOne({_id:a._id},{$set:{label:clean.label}});
+      return res.json({success:true,account:view({...a,label:Object.hasOwn(clean,'label')?clean.label:a.label})});
+    }
     const set = {detailsUpdatedAt:new Date()};
     for (const key of Object.keys(fields)) if (Object.hasOwn(clean,key)) details[key] = key==='country' ? clean[key].toUpperCase() : clean[key];
+    if((Object.hasOwn(clean,'phone')&&clean.phone!==profile(a).phone)||(Object.hasOwn(clean,'address')&&clean.address!==profile(a).address))details.contactSource='manual';
     set.accountDetails = encrypt(JSON.stringify(details));
     if (Object.hasOwn(clean,'label')) set.label = clean.label;
     if (Object.hasOwn(clean,'email')) set.email = encrypt(clean.email.toLowerCase());
@@ -73,7 +123,7 @@ router.patch('/api/epic/accounts/:id/details', requireSuperadmin, validId, async
     if (!updated) return res.status(409).json({success:false,message:'Details changed in another window. Refresh before saving.'});
     res.json({success:true,account:view(updated)});
   } catch { res.status(500).json({success:false,message:'Could not save account details'}); }
-});
+}));
 router.post('/api/epic/accounts/:id/details/reveal', requireSuperadmin, validId, async (req,res) => {
   try {
     const a = await EpicAccount.findById(req.params.id).select('email password totpSecret').lean();
