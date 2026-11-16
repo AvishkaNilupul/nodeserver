@@ -180,6 +180,8 @@ Import lines are `account|password|otherInfo|remark` or `code|otherInfo|remark`.
 
 Native automatic delivery requires `is_auto_deliver=1`, `outstock=1`, `is_agiso=0`, the exact storage category and a positive `buy_more` cutoff covering the verified listing maximum. `importReservedBatch` requires `maxPurchaseQuantity`; zero is not interpreted as unlimited. `deliveryReady` applies the same requirement before import and after readback. IDs reject arrays, objects, leading-zero strings and unsafe numeric values; large native IDs stay decimal strings.
 
+The live configuration endpoint additionally requires the sending limit to exceed the listing's minimum purchase quantity. `buildDeliveryFields` therefore sends `buy_more=maxPurchaseQuantity+1`, rejecting integer overflow. For a min/max-one canary, the sending limit is 2 while the listing still permits only one unit per purchase. `configureNativeDelivery` returns the unchanged `maxPurchaseQuantity` and the separate `sendingLimit`. This is distinct from the storage category's 200-character delivery-note limit. A settings rejection after import is reconciled through the same persisted preparation batch; it must not cause another inventory upload.
+
 ## Deployment and rollback
 
 Production is a deliberate mix of revisions. Fingerprint each existing target against its inspected production baseline; a branch name or repository HEAD does not prove parity. The shared changes are the current production `utils/noclaimStock.js`, `models/UnclaimedAccount.js` and `utils/marketClaimTags.js` plus the new dedicated modules and CLI. Do not replace unrelated production files with this branch's older versions.

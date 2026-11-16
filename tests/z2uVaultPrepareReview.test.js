@@ -10,6 +10,7 @@ const { SCALARS, ARRAYS } = require('../utils/z2u/offers');
 const { parseDocument } = require('../utils/z2u/runtime');
 const { openVaultLedger } = require('../utils/z2u/vaultLedger');
 const { prepareReservedBatch } = require('../utils/z2u/vaultPrepare');
+const { createVaultProtocol } = require('../utils/z2u/vaultProtocol');
 const run = promisify(execFile);
 
 function snapshot() {
@@ -77,6 +78,32 @@ test('acknowledged configuration with disabled readback never upgrades held stoc
   assert.notEqual(saved.units[0].status, 'stocked');
   assert.equal(f.state.imports, 1);
   assert.equal(f.state.configs, 1);
+});
+
+test('configuration-limit correction reuses the uploaded preparation batch without importing another unit', async t => {
+  const f = await fixture(t);
+  f.input.protocol.configureNativeDelivery = async () => { f.state.configs++; throw new Error('Synthetic sending-limit validation failure'); };
+  const first = await prepareReservedBatch(f.input);
+  assert.equal(first.verified, false);
+  assert.equal(f.state.imports, 1);
+  let fields;
+  const corrected = createVaultProtocol({
+    readPage: async () => { throw new Error('Unexpected page read'); },
+    mutate: async (_route, makeBody) => { f.state.configs++; fields = Object.fromEntries(makeBody()); return { acknowledged: true }; },
+    readJson: async () => fields,
+  });
+  f.input.protocol.configureNativeDelivery = corrected.configureNativeDelivery;
+  f.input.protocol.readOfferDelivery = async () => fields || native(false);
+  const resumed = await prepareReservedBatch(f.input);
+  assert.equal(resumed.verified, true);
+  assert.equal(resumed.status, 'stocked');
+  assert.equal(fields.buy_more, '2');
+  assert.equal(f.input.maxPurchaseQuantity, 1);
+  assert.equal(f.input.expectedSnapshot.fields.list_max_num, '1');
+  assert.equal(f.state.imports, 1);
+  const saved = await f.ledger.snapshot();
+  assert.equal(saved.units.length, 1);
+  assert.equal(saved.units[0].status, 'stocked');
 });
 
 test('unexpected activation during configuration is contained and cannot become stocked', async t => {

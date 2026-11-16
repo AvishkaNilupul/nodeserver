@@ -61,9 +61,12 @@ function buildImportFields({ storageId, kind, units, totalCostUsd = "0", priorit
 }
 
 function buildDeliveryFields({ offerId, storageId, maxPurchaseQuantity, note = "" }) {
-  if (!Number.isSafeInteger(maxPurchaseQuantity) || maxPurchaseQuantity < 1) throw new TypeError("A verified positive listing maximum is required");
+  if (!Number.isSafeInteger(maxPurchaseQuantity) || maxPurchaseQuantity < 1 || maxPurchaseQuantity >= Number.MAX_SAFE_INTEGER) throw new TypeError("A verified positive listing maximum with a safe sending limit is required");
+  // Live submitDeliver rejects a cutoff equal to the minimum purchase quantity.
+  // max+1 always exceeds the valid listing minimum while covering every allowed
+  // purchase. The listing maximum remains unchanged and still limits buyers.
   return { id: id(offerId, "offerId"), is_auto_deliver: "1", outstock: "1", is_agiso: "0",
-    storage_id: id(storageId, "storageId"), buy_more: String(maxPurchaseQuantity), note: text(note, "note", { empty: true }) };
+    storage_id: id(storageId, "storageId"), buy_more: String(maxPurchaseQuantity + 1), note: text(note, "note", { empty: true }) };
 }
 
 function verifyDeliverySettings(settings, wanted) {
@@ -307,6 +310,7 @@ function createVaultProtocol(client) {
         ambiguous: matches.flatMap((rows, index) => rows.length > 1 ? [index] : []) };
     },
     configureNativeDelivery: async options => {
+      const maxPurchaseQuantity = options.maxPurchaseQuantity;
       const fields = buildDeliveryFields(options);
       let writeError;
       try { await client.mutate(SELL + "submitDeliver", () => form(fields)); }
@@ -319,7 +323,7 @@ function createVaultProtocol(client) {
         throw writeError || new Z2uError("WRITE_UNCERTAIN", "Native delivery settings did not match readback", { uncertain: true });
       }
       return { verified: true, offerId: fields.id, storageId: fields.storage_id,
-        automaticDeliveryEnabled: true, deactivateWhenEmpty: true, maxPurchaseQuantity: Number(fields.buy_more) };
+        automaticDeliveryEnabled: true, deactivateWhenEmpty: true, maxPurchaseQuantity, sendingLimit: Number(fields.buy_more) };
     },
   };
   return Object.freeze(api);

@@ -99,11 +99,13 @@ test("configuration requires finite verified maximum and forces native automatic
   assert.throws(() => buildDeliveryFields({ offerId: "42", storageId: "43", maxPurchaseQuantity: 0 }));
   const calls = [];
   const fields = buildDeliveryFields({ offerId: "42", storageId: "43", maxPurchaseQuantity: 10 });
-  assert.deepEqual(fields, { id: "42", storage_id: "43", is_auto_deliver: "1", outstock: "1", is_agiso: "0", buy_more: "10", note: "" });
+  assert.deepEqual(fields, { id: "42", storage_id: "43", is_auto_deliver: "1", outstock: "1", is_agiso: "0", buy_more: "11", note: "" });
   const protocol = createVaultProtocol({ readPage() {}, readJson: async (path, body) => { calls.push({ path, body }); return { ...fields, id: 42, storage_id: 43 }; },
     mutate: async (path, makeBody) => { calls.push({ path, body: Object.fromEntries(makeBody()) }); throw new Z2uError("WRITE_UNCERTAIN", "throttle", { uncertain: true }); } });
   const result = await protocol.configureNativeDelivery({ offerId: 42, storageId: 43, maxPurchaseQuantity: 10 });
   assert.equal(result.verified, true);
+  assert.equal(result.maxPurchaseQuantity, 10);
+  assert.equal(result.sendingLimit, 11);
   assert.equal(calls.length, 2);
   assert.match(calls[0].path, /submitDeliver$/);
   assert.match(calls[1].path, /getProDetail$/);
