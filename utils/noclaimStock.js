@@ -44,6 +44,13 @@ function holdings() {
 function ual() {
   return require("./unclaimedAutoList");
 }
+// AUTO-FARM accounts sold for their unclaimed drops (utils/autofarmStock.js).
+// Required only when a candidate or a ledger says farm "autofarm", so with
+// that feature off this file never loads it.
+function autofarm() {
+  return require("./autofarmStock");
+}
+const AUTOFARM = "autofarm";
 
 // Ledger statuses an account may be taken from, and the ones that mean it is
 // already spoken for.
@@ -75,6 +82,7 @@ const MARKET_LABELS = {
   playerauctions: "PlayerAuctions",
   g2g: "G2G",
   zeusx: "ZeusX",
+  z2u: "Z2U",
 };
 
 const MODES = ["fed", "sold"];
@@ -89,6 +97,7 @@ const LEDGER_DEFAULTS = {
   poolAccountId: "",
   botId: "",
   container: "",
+  farm: "",
   drops: [],
   set: null,
   market: "",
@@ -106,6 +115,14 @@ const LEDGER_DEFAULTS = {
   manualAt: null,
   manualDeliveredAt: null,
   manualSpentAt: null,
+  farmPoolNote: "",
+  farmParkedAt: null,
+  farmParkStartedAt: null,
+  farmParkTriedAt: null,
+  farmGoneAt: null,
+  farmDownTriedAt: null,
+  farmLimboAt: null,
+  farmToldAt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -420,6 +437,8 @@ function candidateOf(h, led, required) {
     container: str(h.container),
     game: str(h.game),
     twitchId: str(h.twitchId),
+    // "" = a no-claim bot account; "autofarm" = utils/autofarmStock.
+    farm: str(h.farm),
     items,
     readAt: h.readAt || null,
     ledgerStatus: str(led && led.status),
@@ -429,9 +448,93 @@ function candidateOf(h, led, required) {
   };
 }
 
+// How far ahead a market's offers must already be covered (the expiry rules in
+// utils/noclaimHoldings). 0 when that module predates them.
+function advertiseLeadMs(market) {
+  const nh = holdings();
+  return typeof nh.advertiseLeadMs === "function" ? nh.advertiseLeadMs(market) : 0;
+}
+
+// When the copies of `required` (item key -> copies) this account would hand
+// over first leave it, counting its longest-lived copies of each item:
+//   a finite ms   every needed copy has a KNOWN leave time; this is the first
+//   Infinity      a needed copy's leave time is not known (no waves kept, a
+//                 campaign with no end date on record, expiry awareness off)
+//   0             it does not hold them
+// `h` is a NoclaimHolding row or a scan candidate ({ items, readAt }). An
+// auto-farm account is HELD for a vault unit, and kept in one, only on a
+// finite answer far enough out — "not known" is not "lasts".
+function coverGoneAt(h, base, required) {
+  const nh = holdings();
+  const exp = base && base.expiry;
+  const known = !!(exp && exp.on && typeof nh.waveGoneAt === "function");
+  const readMs = h && h.readAt ? new Date(h.readAt).getTime() : NaN;
+  const byKey = new Map();
+  for (const it of (h && Array.isArray(h.items) ? h.items : [])) {
+    const k = keyOfEntry(it);
+    if (!k) continue;
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(it);
+  }
+  let first = Infinity;
+  let unknown = false;
+  for (const [k, need] of required || []) {
+    const parts = [];
+    for (const it of byKey.get(k) || []) {
+      const total = Math.max(1, Math.floor(Number(it.qty)) || 1);
+      let left = total;
+      for (const w of Array.isArray(it.waves) ? it.waves : []) {
+        const n = Math.min(left, Math.max(1, Math.floor(Number(w && w.qty)) || 1));
+        if (n <= 0) continue;
+        left -= n;
+        const name = str(w && w.campaign).trim();
+        parts.push({ n, gone: known && name ? nh.waveGoneAt(base, it.game, name, readMs) : Infinity });
+      }
+      if (left > 0) parts.push({ n: left, gone: Infinity });
+    }
+    if (parts.reduce((s, p) => s + p.n, 0) < need) return 0;
+    parts.sort((a, b) => (b.gone === a.gone ? 0 : b.gone > a.gone ? 1 : -1));
+    let take = need;
+    for (const p of parts) {
+      if (take <= 0) break;
+      if (Number.isFinite(p.gone)) {
+        if (p.gone < first) first = p.gone;
+      } else {
+        unknown = true;
+      }
+      take -= Math.min(take, p.n);
+    }
+  }
+  return unknown ? Infinity : first;
+}
+
+// A claim's live copies ({ name, game, campaign, itemKey }, one entry each) as
+// holding items: per item its copies, grouped by the campaign they came from.
+function wavesOfDrops(drops) {
+  const byKey = new Map();
+  for (const d of drops || []) {
+    const k = keyOfEntry(d);
+    if (!k) continue;
+    if (!byKey.has(k)) byKey.set(k, { itemKey: k, name: str(d.name), game: str(d.game), qty: 0, waves: [] });
+    const it = byKey.get(k);
+    it.qty++;
+    const name = str(d.campaign).trim();
+    const w = it.waves.find((x) => x.campaign === name);
+    if (w) w.qty++;
+    else it.waves.push({ campaign: name, qty: 1 });
+  }
+  return [...byKey.values()];
+}
+
 // One pass over the snapshot for one set: every in-config holding that covers
 // the set, split into free+fresh, free-but-stale and committed.
-async function scanSet(set) {
+//
+// "Covers" is asked of the copies that will still be on the account `leadMs`
+// from now (0 = right now). A row read before a wave expired still lists the
+// wave's copies; counting them is how an offer stayed on sale for four hours
+// with nothing behind it (2026-10-10). The candidates keep their full items —
+// a claim's own live read decides what is really there.
+async function scanSet(set, { leadMs = 0 } = {}) {
   const out = {
     base: null,
     required: new Map(),
@@ -448,9 +551,12 @@ async function scanSet(set) {
   const base = await nh.snapshotBase();
   out.base = base || null;
   const norms = setGameNorms(set);
+  const at = Date.now() + Math.max(0, Number(leadMs) || 0);
+  const heldAt =
+    typeof nh.durableItems === "function" ? (h) => nh.durableItems(h, base, at) : (h) => h.items;
   for (const h of (base && base.holdings) || []) {
     if (!h || h.inConfig === false) continue;
-    if (!covers(heldCounts(h.items), out.required)) continue;
+    if (!covers(heldCounts(heldAt(h)), out.required)) continue;
     out.covering++;
     const led = ledgerOf(base, h.loginLower);
     if (freeForSet(h, base, norms)) {
@@ -467,13 +573,16 @@ async function scanSet(set) {
   return out;
 }
 
-function claimedAccount(ledgerId, cred, poolAccountId) {
+// `farm` ("" or "autofarm") rides along so a vault publish can hand an
+// auto-farm account's buyer the unclaimed-drops steps.
+function claimedAccount(ledgerId, cred, poolAccountId, farm) {
   return {
     ledgerId: ledgerId ? String(ledgerId) : "",
     login: str(cred && cred.login),
     password: str(cred && cred.password),
     email: str(cred && cred.email),
     poolAccountId: str(poolAccountId),
+    farm: str(farm),
   };
 }
 
@@ -491,6 +600,9 @@ async function liveCheck(c, pool, required) {
     botId: c.botId,
     container: c.container,
     poolAccountId: c.poolAccountId,
+    // Decides which finished drops count (inventoryForCandidate): on an
+    // auto-farm account, only the ones its claiming bot cannot claim.
+    farm: str(c.farm),
   };
   let inv;
   try {
@@ -509,6 +621,13 @@ async function liveCheck(c, pool, required) {
   const liveLogin = str(inv && inv.login).trim().toLowerCase();
   if (liveLogin && liveLogin !== c.loginLower) return { ok: false, why: "login changed" };
   if (!covers(heldCounts(sellable), required)) return { ok: false, why: "short of the set" };
+  // An auto-farm account answers to this very read too: a game connected or a
+  // drop claimed since the scanner last logged it is in Twitch's answer hours
+  // before it is in the database (utils/autofarmStock.liveBlockReason).
+  if (str(c.farm) === AUTOFARM) {
+    const why = autofarm().liveBlockReason(inv && inv.inv);
+    if (why) return { ok: false, why };
+  }
   return { ok: true, sellable };
 }
 
@@ -564,6 +683,26 @@ async function commitLedger(c, ctx) {
   for (const [k, v] of Object.entries(identity)) {
     if (str(v)) fields[k] = v;
   }
+  // An auto-farm account: its sale is cleaned up by utils/autofarmStock, never
+  // by spendAccount (see spendPending). Written only for those, so a no-claim
+  // claim writes exactly what it always did.
+  if (str(c.farm)) {
+    fields.farm = str(c.farm);
+    // A claim starts a new life here too: what a HELD unit's release puts back
+    // (the note the pool row carries right now), and no leftover from a row
+    // that was held, parked or flagged before.
+    fields.farmPoolNote = str(ctx.poolNote);
+    fields.farmParkedAt = null;
+    fields.farmParkStartedAt = null;
+    fields.farmParkTriedAt = null;
+    // Only a HELD unit has a date it must come off sale by.
+    fields.farmGoneAt = ctx.goneAt ? new Date(ctx.goneAt) : null;
+    fields.farmDownTriedAt = null;
+    fields.farmLimboAt = null;
+    fields.farmToldAt = null;
+    fields.farmReloads = [];
+    fields.farmHuman = "";
+  }
 
   // 2. The existing ledger row, compare-and-set on the status it has. Two rows
   // for one login is ambiguous — the other row may be selling this account
@@ -574,12 +713,14 @@ async function commitLedger(c, ctx) {
   }).lean();
   if (rows.length > 1) return null;
   const existing = rows[0];
+  const writeOptions = ctx.market === "z2u" ? { writeConcern: { w: "majority", j: true } } : {};
   if (existing) {
     if (!FREE_STATUSES.includes(existing.status)) return null;
     const $set = { ...fields, manualPriorStatus: existing.status };
     const r = await UnclaimedAccount.updateOne(
       { _id: existing._id, status: existing.status },
       { $set },
+      writeOptions,
     );
     if (!r || !r.modifiedCount) return null; // someone else took it
     return { ledgerId: existing._id, status: ctx.status, created: false, prior: existing, fields: $set };
@@ -588,12 +729,15 @@ async function commitLedger(c, ctx) {
   // 3. No ledger yet: create ours, then make sure nobody created one beside it
   // (a racing claimer, or the auto-lister's upsert). Losing is fine — both
   // back off and the account stays free for the next attempt.
-  const doc = await UnclaimedAccount.create({
+  const newRow = {
     source: "noclaim",
     loginLower: c.loginLower,
     ...fields,
     manualPriorStatus: "",
-  });
+  };
+  const doc = ctx.market === "z2u"
+    ? (await UnclaimedAccount.create([newRow], writeOptions))[0]
+    : await UnclaimedAccount.create(newRow);
   const n = await UnclaimedAccount.countDocuments({
     source: "noclaim",
     loginLower: c.loginLower,
@@ -651,9 +795,10 @@ async function freeCandidates(set, { fresh = true } = {}) {
 }
 
 // The panel's numbers for one set. Counts only; a DB error propagates rather
-// than reading as an empty farm.
-async function stockForSet(set) {
-  const scan = await scanSet(set);
+// than reading as an empty farm. `leadMs` counts the accounts that will still
+// hold the set that far ahead (see scanSet) — what an offer may advertise.
+async function stockForSet(set, { leadMs = 0 } = {}) {
+  const scan = await scanSet(set, { leadMs });
   return {
     free: scan.fresh.length,
     stale: scan.stale.length,
@@ -687,7 +832,9 @@ async function stockForListing(row) {
   if (!row.set) return 0;
   const set = await DropSet.findById(row.set).lean();
   if (!isNoclaimSet(set)) return 0;
-  const { free } = await stockForSet(set);
+  // Advertised ahead of the next expiry, never up to it: a buyer gets time to
+  // claim what they were sold, and the offer is off sale before a wave goes.
+  const { free } = await stockForSet(set, { leadMs: advertiseLeadMs(market) });
   const capped = Math.min(free, ADVERTISE_MAX);
   if (!capped) return 0;
   const sharers = await MarketplaceListing.find(
@@ -732,7 +879,8 @@ async function claimForSet(set, want, opts = {}) {
   const m = str(market).trim().toLowerCase();
   // The ledger's market enum is only enforced on create — an unknown value
   // written by updateOne would break every later save of that row.
-  if (!SUPPORTED_MARKETS.includes(m)) return [];
+  // Z2U uses its dedicated durable vault lifecycle, never the legacy publisher.
+  if (!SUPPORTED_MARKETS.includes(m) && !(m === "z2u" && mode === "fed")) return [];
   if (!MODES.includes(mode)) return [];
   const n = Math.min(MAX_CLAIM, Math.floor(Number(want)) || 0);
   if (n < 1) return [];
@@ -768,6 +916,11 @@ async function claimForSet(set, want, opts = {}) {
     for (const row of prior) {
       found++;
       skipLogins.add(str(row.loginLower));
+      // An auto-farm account's archive stamps belong to the claim; a first
+      // attempt cut off right after its commit may not have written them.
+      if (str(row.farm) === AUTOFARM) {
+        await safely("archive stamp", () => autofarm().reserveForLedger(row));
+      }
       const cred = await ual().credentialForLedger(row);
       if (!cred || !cred.login || !cred.password) {
         console.error(
@@ -775,7 +928,7 @@ async function claimForSet(set, want, opts = {}) {
         );
         continue;
       }
-      out.push(claimedAccount(row._id, cred, row.poolAccountId));
+      out.push(claimedAccount(row._id, cred, row.poolAccountId, row.farm));
     }
     if (found >= n) return out;
   }
@@ -791,6 +944,15 @@ async function claimForSet(set, want, opts = {}) {
   let reads = 0;
   let took = 0;
   const taken = [];
+  // Why live-checked candidates were passed over ({ why: count }), handed back
+  // as `out.missed` (not enumerable — the return is still the claimed list). A
+  // caller left short can tell "the snapshot was wrong about these accounts"
+  // from "the scan host did not answer".
+  const missed = {};
+  Object.defineProperty(out, "missed", { value: missed, enumerable: false });
+  // Logins Gameflip holds a code for; read once, and only when an auto-farm
+  // account is about to be held for Gameflip.
+  let gfHeld = null;
 
   for (const c of walk) {
     if (took >= need || reads >= budget) break;
@@ -802,12 +964,66 @@ async function claimForSet(set, want, opts = {}) {
     // login slips past every "already listed?" check. Left alone until the
     // config catches up and the sweep files it under one name.
     if (str(c.login).trim().toLowerCase() !== c.loginLower) continue;
+    const isAutofarm = str(c.farm) === AUTOFARM;
+    // Z2U starts with the no-claim farm only; future switches must not widen it.
+    if (m === "z2u" && isAutofarm) continue;
+    if (m === "z2u") {
+      const counts = heldCounts(c.items);
+      if (counts.size !== required.size || [...required].some(([k, qty]) => counts.get(k) !== qty)) continue;
+    }
+    // An auto-farm account is HELD for a vault unit only on the markets its
+    // own switch allows — utils/autofarmStock.vaultAllowed (never Plati). A
+    // held account is treated as sold from this moment except for the money,
+    // and releaseClaim hands it back (releaseHeld).
+    if (isAutofarm && mode !== "sold") {
+      if (!autofarm().vaultAllowed(m)) continue;
+      // …and only while its copies of the bundle have days left, every one of
+      // them with a known leave time: the account is about to sit in the
+      // market's hands, and it comes off again a day before they go
+      // (noclaimListings' expiry step). One that would come straight back
+      // off is not put on.
+      const gone = coverGoneAt(c, scan.base, required);
+      if (!(Number.isFinite(gone) && gone - Date.now() >= autofarm().vaultMinLifeMs())) {
+        missed["drops leave too soon to hold"] = (missed["drops leave too soon to hold"] || 0) + 1;
+        continue;
+      }
+      // Gameflip refuses a code one of our listings still holds, sold ones
+      // for good — and that refusal is the last guard against one login on
+      // two listings. An auto-farm account's unclaimed code is worded
+      // differently, so the guard is asked directly: an account Gameflip
+      // already holds a code for is never held for Gameflip.
+      if (m === "gameflip") {
+        if (gfHeld === null) {
+          try {
+            // strict: a failed read throws here instead of holding nothing back.
+            gfHeld = await require("./gameflipFulfiller").gameflipCodeHeldLogins({ strict: true });
+          } catch (e) {
+            console.error("noclaimStock: Gameflip's held codes could not be read:", e && e.message);
+            break; // not known = nobody is held this time
+          }
+        }
+        if (gfHeld.has(c.loginLower)) {
+          missed["Gameflip already holds a code for it"] = (missed["Gameflip already holds a code for it"] || 0) + 1;
+          continue;
+        }
+      }
+    }
     let commit = null;
+    let pool = null;
     try {
-      const pool = c.poolAccountId
+      pool = c.poolAccountId
         ? await AvailableAccount.findById(c.poolAccountId).lean()
         : null;
       if (poolBlockReason(pool, norms)) continue;
+      if (isAutofarm) {
+        // The auto-farm's own rules, straight from the database: the snapshot
+        // can be 30 s behind a listing, a sale or a connected game.
+        const why = await autofarm().claimBlockReason(c, pool);
+        if (why) {
+          missed[why] = (missed[why] || 0) + 1;
+          continue;
+        }
+      }
       const cred = await ual().credentialForLedger({
         source: "noclaim",
         login: c.login,
@@ -817,13 +1033,26 @@ async function claimForSet(set, want, opts = {}) {
 
       reads++;
       const live = await liveCheck(c, pool, required);
-      if (!live.ok) continue;
+      if (!live.ok) {
+        const why = str(live.why) || "not usable";
+        missed[why] = (missed[why] || 0) + 1;
+        continue;
+      }
+      if (m === "z2u") {
+        const counts = heldCounts(live.sellable);
+        const gone = coverGoneAt({ items: wavesOfDrops(live.sellable), readAt: new Date() }, scan.base, required);
+        if (counts.size !== required.size || [...required].some(([k, qty]) => counts.get(k) !== qty) ||
+            !Number.isFinite(gone) || gone - Date.now() < 24 * 60 * 60 * 1000) {
+          missed["Z2U needs the exact live set with known vault life"] = (missed["Z2U needs the exact live set with known vault life"] || 0) + 1;
+          continue;
+        }
+      }
       if (dryRun) {
         // Reads only: what a real claim would take, never what it would skip.
         const busy = await ual().activeListingsForLogin(c.login);
         if (busy && busy.length) continue;
         const led = ledgerOf(scan.base, c.loginLower);
-        out.push(claimedAccount(led && led._id, { ...cred, login: cred.login || c.login }, c.poolAccountId));
+        out.push(claimedAccount(led && led._id, { ...cred, login: cred.login || c.login }, c.poolAccountId, c.farm));
         took++;
         continue;
       }
@@ -837,6 +1066,19 @@ async function claimForSet(set, want, opts = {}) {
           campaign: str(d.campaign),
           itemKey: keyOfEntry(d),
         }));
+      // A HELD account: how long its bundle lasts is asked again of the copies
+      // Twitch has just shown (the snapshot's waves can be an hour old), and
+      // the answer goes on the ledger — it is the date the unit comes off sale
+      // by, whoever else still holds the campaign by then.
+      let goneAt = null;
+      if (isAutofarm && mode !== "sold") {
+        const g = coverGoneAt({ items: wavesOfDrops(drops), readAt: new Date() }, scan.base, required);
+        if (!(Number.isFinite(g) && g - Date.now() >= autofarm().vaultMinLifeMs())) {
+          missed["drops leave too soon to hold"] = (missed["drops leave too soon to hold"] || 0) + 1;
+          continue;
+        }
+        goneAt = g;
+      }
       commit = await commitLedger(c, {
         status,
         setId,
@@ -846,6 +1088,8 @@ async function claimForSet(set, want, opts = {}) {
         drops,
         game,
         now: new Date(),
+        poolNote: pool && pool.claimedNote,
+        goneAt,
       });
       if (!commit) continue;
 
@@ -862,9 +1106,26 @@ async function claimForSet(set, want, opts = {}) {
         continue;
       }
 
+      // 5. An auto-farm account also has a Drops Archive record. The buyer
+      // gets the whole account, so its claimed drops leave the archive with it
+      // and its bot record is marked sold — now, before the login goes out, or
+      // a claimed-bundle order could be handed the same account. Lost to a
+      // listing or a buyer that got there first: back off.
+      if (isAutofarm) {
+        const lo = await autofarm().reserveLeftovers(pool, { market: m, orderId: oid, setId });
+        if (!lo || !lo.ok) {
+          const undo = commit;
+          commit = null;
+          const why = str(lo && lo.why) || "archive reservation failed";
+          missed[why] = (missed[why] || 0) + 1;
+          await safely("rollback", () => undoCommit(undo, why));
+          continue;
+        }
+      }
+
       const ledgerId = commit.ledgerId;
       commit = null; // handed out — never undone past this point
-      out.push(claimedAccount(ledgerId, { ...cred, login: cred.login || c.login }, c.poolAccountId));
+      out.push(claimedAccount(ledgerId, { ...cred, login: cred.login || c.login }, c.poolAccountId, c.farm));
       taken.push(c.login);
       took++;
       if (mode === "fed") {
@@ -880,6 +1141,12 @@ async function claimForSet(set, want, opts = {}) {
       console.error("noclaimStock claim of " + c.login + " failed:", e && e.message);
       if (commit) {
         await safely("rollback", () => undoCommit(commit, "claim error: " + ((e && e.message) || "?")));
+        // Whatever the archive step stamped before it failed goes back too.
+        if (isAutofarm && pool) {
+          await safely("archive release", () =>
+            autofarm().releaseForPool(pool, { market: m, orderId: oid }),
+          );
+        }
       }
     }
   }
@@ -921,7 +1188,7 @@ async function attachListing(ledgerIds, listingId) {
 // deleted when the claim created them. Only "manual" — a "sold" ledger went to
 // a buyer and is never released. The caller takes the unit off the platform
 // first; this only returns the account. Returns the number released.
-async function releaseClaim(ledgerIds, { reason = "" } = {}) {
+async function releaseClaim(ledgerIds, { reason = "", listingGone = false } = {}) {
   const ids = idList(ledgerIds);
   if (!ids.length) return 0;
   const rows = await UnclaimedAccount.find({ _id: { $in: ids }, status: "manual" }).lean();
@@ -929,9 +1196,31 @@ async function releaseClaim(ledgerIds, { reason = "" } = {}) {
   const logins = [];
   for (const l of rows) {
     let ok = false;
+    // The write only lands on the ledger as it was read — for an auto-farm
+    // one, with the park pass where it was: a park that started in between
+    // owns the account until it has proved it out of its bot.
+    const held = str(l.farm) === AUTOFARM;
+    const same = held
+      ? { _id: l._id, status: "manual", farmParkStartedAt: l.farmParkStartedAt || null, farmParkedAt: l.farmParkedAt || null }
+      : { _id: l._id, status: "manual" };
     try {
+      if (held) {
+        // An auto-farm account is sold whole wherever it is free: it goes back
+        // only when the market it was held for provably no longer has its
+        // login, and never in the middle of its bot removal. Whoever asked.
+        let blocked = "";
+        try {
+          blocked = str(await autofarm().releaseBlocked(l, { listingGone }));
+        } catch (e) {
+          blocked = "the release check failed: " + ((e && e.message) || e);
+        }
+        if (blocked) {
+          console.error("noclaimStock: " + (l.login || String(l._id)) + " stays held (" + (why || "release") + "): " + blocked);
+          continue;
+        }
+      }
       if (!l.manualPriorStatus) {
-        const r = await UnclaimedAccount.deleteOne({ _id: l._id, status: "manual" });
+        const r = await UnclaimedAccount.deleteOne(same);
         ok = !!(r && r.deletedCount);
       } else {
         // Only a FREE status can have been the prior one (claims take nothing
@@ -939,7 +1228,7 @@ async function releaseClaim(ledgerIds, { reason = "" } = {}) {
         // normally, rather than to "listed", which would fake an auto unit.
         const back = FREE_STATUSES.includes(l.manualPriorStatus) ? l.manualPriorStatus : "skipped";
         const r = await UnclaimedAccount.updateOne(
-          { _id: l._id, status: "manual" },
+          same,
           {
             $set: {
               status: back,
@@ -961,6 +1250,13 @@ async function releaseClaim(ledgerIds, { reason = "" } = {}) {
     // Clears the console's "Listed" tick unless another listed/manual ledger
     // of the same pool account still holds it.
     await safely("markOwnerUnlisted", () => ual().markOwnerUnlisted(l));
+    // An auto-farm account held for a vault unit carries the stamps of a sale
+    // (its claimed drops out of the archive, its bot record sold, a pending
+    // note on its pool row). The unit ended without one: they all come off, or
+    // the account is neither stock nor sold for good.
+    if (str(l.farm) === AUTOFARM) {
+      await safely("autofarm release", () => autofarm().releaseHeld(l));
+    }
   }
   if (logins.length) {
     invalidateSnapshot();
@@ -987,14 +1283,21 @@ async function releaseClaim(ledgerIds, { reason = "" } = {}) {
 // nothing and sends the owner a second SOLD message. For the same reason a
 // repeat never wipes a recorded price, market or order anchor with blanks.
 // Returns how many of the ledgers are recorded as sold by this call.
-async function markSold(ledgerIds, { market = "", priceUsd = 0, reason = "", orderId = "" } = {}) {
+async function markSold(ledgerIds, { market = "", priceUsd = 0, reason = "", orderId = "", expectedManualListing = "" } = {}) {
   const ids = idList(ledgerIds);
   if (!ids.length) return 0;
+  // Dedicated vault reconciliation pins the exact batch owner through the CAS.
+  // A release/reclaim between its evidence read and this write cannot sell a
+  // different owner's reservation merely because it is also "manual".
+  const expectedOwner = expectedManualListing
+    ? { source: "noclaim", manualListing: str(expectedManualListing), market: str(market).trim().toLowerCase() }
+    : {};
   const rows = await UnclaimedAccount.find({
     _id: { $in: ids },
     status: { $in: ["manual", "sold"] },
     // This layer's rows only: a stray id must never re-price an auto-lister sale.
     manualAt: { $ne: null },
+    ...expectedOwner,
   }).lean();
   const m = str(market).trim().toLowerCase();
   const price = Math.max(0, Number(priceUsd) || 0);
@@ -1015,7 +1318,10 @@ async function markSold(ledgerIds, { market = "", priceUsd = 0, reason = "", ord
     const note = why || (oid ? orderNote(mk, oid) : fresh ? mk + " sale" : "");
     if (note) $set.note = note;
     try {
-      const r = await UnclaimedAccount.updateOne({ _id: l._id, status: l.status }, { $set });
+      const r = await UnclaimedAccount.updateOne(
+        { _id: l._id, status: l.status, ...expectedOwner }, { $set },
+        m === "z2u" ? { writeConcern: { w: "majority", j: true } } : {},
+      );
       if (r && (r.matchedCount || r.modifiedCount)) n++;
     } catch (e) {
       console.error("noclaimStock markSold of " + String(l._id) + " failed:", e && e.message);
@@ -1053,6 +1359,11 @@ async function spendPending({ limit = 10 } = {}) {
     manualListing: { $gt: "" },
     manualDeliveredAt: { $ne: null },
     manualSpentAt: null,
+    // Never an AUTO-FARM account (utils/autofarmStock.retirePending owns
+    // those): spendAccount looks for the account in no-claim bot configs only.
+    // It would find nothing to remove, call that proof, and stamp the pool row
+    // "spent" while the account is still farming in an auto-farm bot.
+    farm: { $ne: AUTOFARM },
   })
     .sort({ soldAt: 1, _id: 1 })
     .limit(max)
@@ -1128,6 +1439,9 @@ module.exports = {
   poolBlockReason,
   orderNote,
   // reads
+  advertiseLeadMs,
+  coverGoneAt,
+  wavesOfDrops,
   freeCandidates,
   stockForSet,
   stockForListing,

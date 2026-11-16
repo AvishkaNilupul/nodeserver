@@ -23,6 +23,7 @@ const MARKET_CLAIM_TAGS = [
   "playerauctions",
   "g2g",
   "plati",
+  "z2u",
 ];
 
 const MARKET_CLAIM_TAG_SET = new Set(MARKET_CLAIM_TAGS);

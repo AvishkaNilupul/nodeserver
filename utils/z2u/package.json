@@ -1,0 +1,8 @@
+{
+  "name": "nodeserver-z2u-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "engines": { "node": ">=20.19" },
+  "dependencies": { "linkedom": "0.18.12", "tough-cookie": "6.0.0" }
+}

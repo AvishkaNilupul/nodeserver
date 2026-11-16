@@ -38,6 +38,52 @@ const unclaimedAccountSchema = new mongoose.Schema(
     botId: { type: String, default: "" },
     container: { type: String, default: "" },
 
+    // "" = a no-claim farm account. "autofarm" = an AUTO-FARM account sold for
+    // its unclaimed drops through the same claim layer (utils/autofarmStock.js).
+    // `source` stays "noclaim" — it is the lock every seller shares — but the
+    // post-sale clean-up differs: such an account sits in an auto-farm bot
+    // config, which the no-claim clean-up (spendAccount) cannot see.
+    farm: { type: String, default: "", index: true },
+    // Bot configs ("host|file") this sold auto-farm account was removed from
+    // while ENABLED, whose bot has not reloaded yet. Until the list is empty
+    // the bot may still be farming the buyer's account from memory, so the pool
+    // row is not stamped "spent" (utils/autofarmStock.retirePending).
+    farmReloads: { type: [String], default: [] },
+    // Why that pass cannot finish this sale by itself ("" = it can): its token
+    // sits in a renter stack or in a file the config editor will not write.
+    farmHuman: { type: String, default: "" },
+    // An auto-farm account HELD for a vault unit (GGSel / Gameflip — the claim
+    // layer's "fed" mode, utils/autofarmStock.vaultAllowed). `farmPoolNote` is
+    // the note its pool row carried when it was held: what a release puts back
+    // while the account is still in its bot. `farmParkedAt` is when it was
+    // taken out of its bot configs — the marketplace has its login from the
+    // moment it is held — after which a release makes it a stock hold instead.
+    farmPoolNote: { type: String, default: "" },
+    farmParkedAt: { type: Date, default: null },
+    // When the park pass first touched a held account (its task, its bot
+    // config): from then on it may be in no bot, proved or not, so a release
+    // waits for `farmParkedAt` instead of putting a farming note back.
+    farmParkStartedAt: { type: Date, default: null },
+    // When the park pass last looked at a held account. Its own clock: the
+    // health step moves lastCheckedAt every pass, which would keep a row only
+    // a human can finish from ever being looked at again.
+    farmParkTriedAt: { type: Date, default: null },
+    // When the copies a HELD unit was listed for leave the account — read off
+    // the claim's own live inventory, so the expiry step needs nobody else's
+    // snapshot row to know when the unit must come off sale.
+    farmGoneAt: { type: Date, default: null },
+    // When the expiry step last tried to take this held unit off sale — its
+    // own clock, so one unit that will not come down (a buyer in the middle of
+    // paying) never keeps the ones behind it on sale past their day.
+    farmDownTriedAt: { type: Date, default: null },
+    // A held account whose listing row is off sale but which could not be
+    // handed back yet (utils/noclaimListings limbo step): when that was first
+    // seen. And when the owner was told that this hold needs a look — it has
+    // waited too long there, or is still on sale with its drops about to
+    // leave (said once per hold).
+    farmLimboAt: { type: Date, default: null },
+    farmToldAt: { type: Date, default: null },
+
     // Snapshot of the unclaimed drops that were listed, for the panel.
     drops: {
       type: [
@@ -71,6 +117,7 @@ const unclaimedAccountSchema = new mongoose.Schema(
         "eldorado",
         "playerauctions",
         "g2g",
+        "z2u",
       ],
       default: "",
       index: true,
