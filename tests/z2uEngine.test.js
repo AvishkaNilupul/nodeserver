@@ -268,3 +268,59 @@ test('listing drift requests protection while still reconciling a confirmed deli
   assert.equal(f.calls.sale[0].saleReference, 'Z101');
   assert.equal((await f.ledger.snapshot()).units[0].status, 'delivered');
 });
+
+async function preparationFixture(t) {
+  const f = await fixture(t);
+  f.offer.expectedSnapshot.status = 'paused'; f.offer.expectedSnapshot.statusCode = 4;
+  f.offer.storageName = 'Synthetic dedicated preparation vault';
+  f.setActual(structuredClone(f.offer.expectedSnapshot));
+  let imported = false, enabled = false;
+  f.protocol.readStorage = async () => ({ id: 12, gid: 13, category_id: 14, name: f.offer.storageName, type: 1, is_repeat: 2 });
+  f.protocol.readOfferDelivery = async () => enabled ? settings() : { id: 15, storage_id: 0, is_auto_deliver: 2 };
+  f.protocol.reconcileUploadedUnits = async () => imported ? readback() : { complete: true, total: 0, observed: 0, matched: [], missing: [0], ambiguous: [] };
+  f.protocol.importUnits = async () => { f.calls.import++; imported = true; return { acknowledged: true }; };
+  f.protocol.configureNativeDelivery = async () => { enabled = true; return { verified: true }; };
+  f.prepare = true;
+  f.verifyDedicatedStorage = async identity => ({ ...identity, verified: true });
+  return f;
+}
+
+test('explicit preparation accepts observed disabled value2, then ordinary stock replay cannot resend prepared batch', async t => {
+  const f = await preparationFixture(t);
+  const reservations = [];
+  f.stockAdapter.reserveExactBatch = async args => { reservations.push(args); return f.reservation; };
+  assert.equal((await stockOffer(f)).status, 'stocked');
+  assert.equal((await f.ledger.snapshot()).batches[0].preparationOnly, true);
+  const replay = await stockOffer({ ...f, prepare: false, attemptId: 'different-attempt-must-not-send' });
+  assert.equal(replay.verified, true);
+  assert.equal(replay.attemptId, 'attempt');
+  assert.equal(f.calls.import, 1);
+  assert.equal(reservations[1].existingOnly, true);
+});
+
+test('preparation provenance rejection or content drift cannot dispatch native upload', async t => {
+  const bad = await preparationFixture(t);
+  bad.verifyDedicatedStorage = async identity => ({ ...identity, verified: false });
+  await assert.rejects(stockOffer(bad));
+  assert.equal(bad.calls.import, 0);
+  assert.ok(!(await bad.ledger.snapshot()).batches.some(batch => batch.attemptId));
+  const drift = await preparationFixture(t);
+  const verify = drift.reservation.verifyReservation;
+  drift.reservation.verifyReservation = async input => {
+    const proof = await verify(input);
+    drift.setActual({ ...drift.offer.expectedSnapshot, description: 'Changed during source check' });
+    return proof;
+  };
+  await assert.rejects(stockOffer(drift));
+  assert.equal(drift.calls.import, 0);
+  assert.ok(!(await drift.ledger.snapshot()).batches.some(batch => batch.attemptId));
+});
+
+test('unexpected initial activation is contained before preparation allocates any source', async t => {
+  const f = await preparationFixture(t);
+  f.setActual({ ...f.offer.expectedSnapshot, status: 'on_sale', statusCode: 1 });
+  await assert.rejects(stockOffer(f));
+  assert.equal(f.calls.pause, 1);
+  assert.equal(f.calls.reserve, 0);
+  assert.equal(f.calls.import, 0);
+});

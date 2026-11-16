@@ -82,7 +82,8 @@ async function recordIntent(filename, data) {
 }
 
 /**
- * Explicit one-unit launch only. No worker calls this function automatically.
+ * Explicit one-unit launch only, invoked by the sole worker only when its
+ * startup command includes --launch-offer. Normal monitoring never activates.
  * Source/worker callbacks are trusted local verifiers, not remote API schemas.
  * Intent survives crashes and all outcomes; this offer can never auto-retry.
  */
@@ -98,9 +99,27 @@ async function activateOneUnitOffer({ client, protocol, ledger, offer, stateDir,
   const identity = { offerId: wanted.offerId, storageId: wanted.storageId, gameId: wanted.gameId,
     categoryId: wanted.categoryId, setId: wanted.setId, ...unit };
   let source;
-  try { source = await verifySource({ ...identity }); }
-  catch { fail("Fresh source verification failed"); }
-  if (!sourceProofValid(source, identity, now())) fail("Fresh source identity or expiry was not verified");
+  const sourceProof = async () => {
+    let proof;
+    try { proof = structuredClone(await verifySource({ ...identity })); }
+    catch { fail("Fresh source verification failed"); }
+    if (!sourceProofValid(proof, identity, now())) fail("Fresh source identity or expiry was not verified");
+    return proof;
+  };
+  source = await sourceProof();
+  const containPreflightActivation = async actual => {
+    if (actual?.verified !== true || actual.status !== "on_sale" || actual.statusCode !== 1 ||
+        !["offerId", "gameId", "categoryId"].every(key => actual[key] === identity[key])) return;
+    // A concurrent explicit call can have won the durable intent after this
+    // call's first read. Do not deactivate that authorized in-flight launch.
+    try { await fs.lstat(intentFile); throw new Z2uError("ACTIVATION_ALREADY_ATTEMPTED", "Another launch intent exists; reconcile without dispatching again"); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    let paused = false;
+    try { paused = (await protocol.pauseOffer({ ...identity, parseDocument })).verified === true; } catch { /* Remains held. */ }
+    const error = new Z2uError("LAUNCH_UNVERIFIED", paused ? "Unexpected active offer was deactivated before launch" : "Unexpected active offer deactivation is unverified");
+    error.deactivationVerified = paused;
+    throw error;
+  };
   const worker = async () => {
     let proof;
     try { proof = await verifyWorker({ ...identity, configDigest }); }
@@ -109,6 +128,7 @@ async function activateOneUnitOffer({ client, protocol, ledger, offer, stateDir,
   };
   const remote = async status => {
     const actual = await protocol.readOfferSnapshot({ ...identity, parseDocument });
+    if (status === "paused") await containPreflightActivation(actual);
     if (!verifyOfferSnapshot(actual, { ...wanted.expectedSnapshot, status }).verified ||
         actual.statusCode !== (status === "paused" ? 4 : 1)) fail("Full canary snapshot changed");
     const settings = await protocol.readOfferDelivery(wanted.offerId);
@@ -125,8 +145,15 @@ async function activateOneUnitOffer({ client, protocol, ledger, offer, stateDir,
   await worker();
   await remote("paused");
   if (JSON.stringify(await journalUnit(ledger, wanted.offerId)) !== JSON.stringify(unit)) fail("Journal source mapping changed");
+  const renewedSource = await sourceProof();
+  if (!sameDigest(renewedSource.credentialDigest, source.credentialDigest)) fail("Source credentials changed during launch verification");
+  source = renewedSource;
+  // Source verification can perform slow live reads. Refresh the complete
+  // listing, delivery settings and native unit after it, before dispatch.
+  await remote("paused");
   await worker();
   const lastState = await protocol.readOfferState({ ...identity, parseDocument });
+  await containPreflightActivation(lastState);
   if (lastState.verified !== true || lastState.statusCode !== 4 || lastState.status !== "paused" ||
       !["offerId", "gameId", "categoryId"].every(key => lastState[key] === identity[key])) fail("Offer is no longer the reviewed paused listing");
   if (!sourceProofValid(source, identity, now())) fail("Source verification expired before activation");

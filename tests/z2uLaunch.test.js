@@ -46,12 +46,12 @@ async function fixture(t) {
     readOfferState: async () => ({ verified: true, offerId: "15", gameId: "13", categoryId: "14", status: state.status, statusCode: state.status === "paused" ? 4 : 1 }),
     readOfferDelivery: async () => state.settings, readStorage: async () => state.storage,
     readStoragePage: async () => state.inventory,
-    readProduct: async () => { if (state.advanceDuringProductRead) state.now += state.advanceDuringProductRead; return state.product; },
+    readProduct: async () => { if (state.advanceDuringProductRead) { state.now += state.advanceDuringProductRead; state.advanceDuringProductRead = 0; } return state.product; },
     pauseOffer: async () => { state.pauseCalls++; if (state.pauseFails) throw new Error("SECRET pause"); state.status = "paused"; return { verified: true, status: "paused" }; },
   }, ledger, offer, stateDir, parseDocument, now: () => state.now,
   verifySource: async identity => { state.sourceCalls++; return { verified: true, ...identity, checkedAt: new Date(state.now).toISOString(),
     expiresAt: new Date(state.now + 3 * 86400000).toISOString(), credentialDigest: accountDigest("synthetic-account", "synthetic-password"), ...state.sourcePatch }; },
-  verifyWorker: async ({ offerId, configDigest }) => { state.workerCalls++; return { verified: true, running: true, offerId, configDigest,
+  verifyWorker: async ({ offerId, configDigest }) => { state.workerCalls++; if (state.workerAdvanceCall === state.workerCalls) state.now += 120001; return { verified: true, running: true, offerId, configDigest,
     checkedAt: new Date(state.now).toISOString(), ...state.workerPatch }; } };
   return { state, options, intentFile: path.join(stateDir, "launch-intents", "15.json"), launch: () => activateOneUnitOffer(options) };
 }
@@ -122,8 +122,11 @@ test("every native listing, vault and unit identity is rechecked before dispatch
   }
 });
 
-test("slow checks cannot use expired source proof and ambiguous journals cannot launch", async t => {
-  const f = await fixture(t); f.state.advanceDuringProductRead = 120001;
+test("slow checks renew source proof; later stale proof and ambiguous journals cannot launch", async t => {
+  const renewed = await fixture(t); renewed.state.advanceDuringProductRead = 120001;
+  assert.equal((await renewed.launch()).verified, true);
+  assert.equal(renewed.state.sourceCalls, 2);
+  const f = await fixture(t); f.state.workerAdvanceCall = 2;
   await assert.rejects(f.launch(), { code: "LAUNCH_UNVERIFIED" });
   assert.equal(f.state.writes.length, 0);
   const g = await fixture(t), snapshot = await g.options.ledger.snapshot();

@@ -40,8 +40,11 @@ function controlValues(control) {
       const decoder = document.createElement("span");
       // Escape literal markup before HTML parsing so only entities are decoded.
       decoder.innerHTML = control.value.replace(/</g, "&lt;");
-      return [decoder.textContent];
+      return [decoder.textContent.replace(/\r\n?/g, "\n")];
     }
+    // Multipart form submission normalizes newlines to CRLF. HTML textarea
+    // values exposed by browsers normalize them back to LF; LinkeDOM does not.
+    return [control.value.replace(/\r\n?/g, "\n")];
   }
   return [control.value];
 }
@@ -141,6 +144,7 @@ function validateOfferEditFields(input, offerId) {
     if (!Object.hasOwn(input, name) || !validText(input[name])) throw new TypeError(`Invalid ${name}`);
     result[name] = input[name];
   }
+  result.list_description = result.list_description.replace(/\r\n?/g, "\n");
   for (const name of ARRAYS) {
     if (!Object.hasOwn(input, name) || !Array.isArray(input[name]) || input[name].length > 100 ||
         input[name].some(value => !validText(value))) throw new TypeError(`Invalid ${name}`);

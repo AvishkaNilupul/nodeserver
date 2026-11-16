@@ -32,7 +32,7 @@ function buildStorageFields({ gameId, categoryId, name, kind, note = "", deliver
   return { add_gid: id(gameId, "gameId"), add_category: id(categoryId, "categoryId"),
     add_parent: "0", add_name: text(name, "name", { max: 300 }), has_psd: kind === "account" ? "1" : "2",
     add_sort: "0", is_repeat: "2", note: text(note, "note", { empty: true }),
-    delivery_note: text(deliveryNote, "deliveryNote", { empty: true }) };
+    delivery_note: text(deliveryNote, "deliveryNote", { empty: true, max: 200 }) };
 }
 
 /**

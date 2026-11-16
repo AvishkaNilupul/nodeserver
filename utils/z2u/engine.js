@@ -3,6 +3,7 @@ const { randomUUID } = require('node:crypto');
 const { verifyOfferSnapshot } = require('./offers');
 const { importReservedBatch, deliveryReady } = require('./vaultImport');
 const { reconcileProduct } = require('./lifecycle');
+const { prepareReservedBatch } = require('./vaultPrepare');
 const { parseDocument } = require('./runtime');
 const { fault } = require('./privateStore');
 
@@ -16,10 +17,25 @@ async function verifyAdoptedOffer(protocol, offer) {
 }
 
 /** Explicit bounded stock operation. Nothing here creates or revives an offer. */
-async function stockOffer({ protocol, ledger, stockAdapter, offer, count, batchId, attemptId = randomUUID() }) {
+async function stockOffer({ protocol, ledger, stockAdapter, offer, count, batchId, attemptId = randomUUID(), prepare = false, verifyDedicatedStorage }) {
   if (!Number.isSafeInteger(count) || count < 1 || count > 5 || typeof batchId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,100}$/.test(batchId)) throw fault('INVALID_STOCK_REQUEST');
-  await verifyAdoptedOffer(protocol, offer);
-  const reservation = await stockAdapter.reserveExactBatch({ batchId, offerId: offer.offerId, setId: offer.setId, count });
+  const existing = (await ledger.snapshot()).batches.find(row => row.batchId === batchId);
+  const preparation = prepare || existing?.preparationOnly === true;
+  const verify = async ({ containActivation = false } = {}) => {
+    if (!preparation) return verifyAdoptedOffer(protocol, offer);
+    if (offer?.kind !== 'account' || !offer.setId || !offer.storageName || typeof verifyDedicatedStorage !== 'function') throw fault('INVALID_PREPARATION');
+    const actual = await protocol.readOfferSnapshot({ ...offer, parseDocument });
+    if (containActivation && actual.verified === true && actual.status === 'on_sale' && actual.statusCode === 1 &&
+        ['offerId', 'gameId', 'categoryId'].every(key => actual[key] === offer[key])) {
+      try { await protocol.pauseOffer({ ...offer, parseDocument }); } catch { /* Hold and report unverified; never reserve or upload. */ }
+      throw fault('OFFER_UNVERIFIED');
+    }
+    if (actual.status !== 'paused' || actual.statusCode !== 4 || !verifyOfferSnapshot(actual, offer.expectedSnapshot).verified ||
+        actual.constraints.maxPurchaseQuantity !== offer.maxPurchaseQuantity) throw fault('OFFER_UNVERIFIED');
+    return actual;
+  };
+  await verify({ containActivation: preparation });
+  const reservation = await stockAdapter.reserveExactBatch({ batchId, offerId: offer.offerId, setId: offer.setId, count, ...(existing ? { existingOnly: true } : {}) });
   if (reservation.status !== 'reserved' || !Array.isArray(reservation.units) || reservation.units.length !== count || typeof reservation.verifyReservation !== 'function') {
     return { batchId, status: 'held', reason: 'reservation_incomplete' };
   }
@@ -27,14 +43,16 @@ async function stockOffer({ protocol, ledger, stockAdapter, offer, count, batchI
     // The allocator may have made slow remote inventory reads. Repeat the exact
     // content and quantity checks immediately before the import's own gates.
     const proof = await reservation.verifyReservation(input);
-    await verifyAdoptedOffer(protocol, offer);
+    await verify();
     return proof;
   };
-  const existing = (await ledger.snapshot()).batches.find(row => row.batchId === batchId);
-  const result = await importReservedBatch({ ledger, protocol, verifyReservation, offerId: offer.offerId,
+  const operation = preparation ? prepareReservedBatch : importReservedBatch;
+  const result = await operation({ ledger, protocol, verifyReservation, offerId: offer.offerId,
     storageId: offer.storageId, gameId: offer.gameId, categoryId: offer.categoryId,
     batchId, attemptId: existing?.attemptId || attemptId, kind: 'account', units: reservation.units,
-    maxPurchaseQuantity: offer.maxPurchaseQuantity, parseDocument });
+    maxPurchaseQuantity: offer.maxPurchaseQuantity, parseDocument,
+    ...(preparation ? { expectedSnapshot: offer.expectedSnapshot, expectedStorageName: offer.storageName,
+      verifyDedicatedStorage, note: offer.deliveryNote || '' } : {}) });
   return { ...result, expiresAt: reservation.expiresAt };
 }
 

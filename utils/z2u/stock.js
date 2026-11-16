@@ -197,7 +197,7 @@ function createZ2uStockAdapter({ ledger, adoptedOffers = [], minLifeMs = DAY, de
     return { verified: true, reservationId: batch.anchor, offerId, sourceIds: verified.sourceIds, expiresAt: verified.expiresAt };
   }
 
-  async function reserveExactBatch({ batchId, offerId, setId, count }) {
+  async function reserveExactBatch({ batchId, offerId, setId, count, existingOnly = false }) {
     opaque(batchId); offerId = decimal(offerId); objectId(setId);
     requireAdopted(offerId, setId);
     if (!Number.isSafeInteger(count) || count < 1 || count > 80) fail('INVALID_QUANTITY', 'Reserve between one and eighty whole accounts.');
@@ -205,6 +205,7 @@ function createZ2uStockAdapter({ ledger, adoptedOffers = [], minLifeMs = DAY, de
     const { set, signature } = await readSet(setId);
     let batch = await d.readBatch(batchId);
     let created = false;
+    if (!batch && existingOnly) fail('RESERVATION_MISMATCH', 'An existing source batch is required; launch cannot allocate new stock.');
     if (!batch) {
       const proposed = { _id: batchId, offerId, setId, count, setSignature: signature,
         anchor: 'z2u:' + createHash('sha256').update(batchId).digest('hex'), state: 'claiming', sourceIds: [], createdAt: new Date(now()) };

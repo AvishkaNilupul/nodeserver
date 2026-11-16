@@ -23,13 +23,31 @@ function saleReference(value) {
 }
 function checkAutomatic(value) { if (!automatic(value)) fail('AUTOMATIC_DELIVERY_REQUIRED', 'Automatic delivery and deactivation when empty must both be verified.'); }
 function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+function preparationGuard(value, { requireEmpty = false } = {}) {
+  if (!value || value.pausedVerified !== true || value.dedicatedStorageVerified !== true ||
+      (requireEmpty && value.emptyStorageVerified !== true)) fail('PREPARATION_UNVERIFIED', 'Preparation requires a verified paused offer and dedicated empty storage.');
+  for (const key of ['storageCategoryId', 'gameId', 'categoryId', 'snapshotHash', 'storageNameHash', 'evidenceId']) id(value[key]);
+  for (const key of ['storageCategoryId', 'gameId', 'categoryId']) {
+    if (!/^[1-9]\d*$/.test(value[key])) fail('PREPARATION_UNVERIFIED', 'Preparation identities must be canonical native IDs.');
+  }
+  for (const key of ['snapshotHash', 'storageNameHash']) if (!/^[a-f0-9]{64}$/.test(value[key])) fail('PREPARATION_UNVERIFIED', 'Preparation requires exact snapshot and storage-name digests.');
+  return value;
+}
+function samePreparation(a, b) {
+  return ['storageCategoryId', 'gameId', 'categoryId', 'snapshotHash', 'storageNameHash'].every(key => a?.[key] === b?.[key]);
+}
 function initial() { return { version: 1, revision: 0, offers: [], batches: [], units: [] }; }
 function validate(data) {
   if (data?.version !== 1 || !Number.isSafeInteger(data.revision) || data.revision < 0 ||
       !Array.isArray(data.offers) || !Array.isArray(data.batches) || !Array.isArray(data.units)) fail('CORRUPT_LEDGER', 'Invalid vault ledger.');
   const sources = new Set(), storage = new Set(), offers = new Set(), batches = new Set();
   for (const offer of data.offers) { id(offer.offerId); if (offers.has(offer.offerId)) fail('CORRUPT_LEDGER', 'Duplicate offer.'); offers.add(offer.offerId); }
-  for (const batch of data.batches) { id(batch.batchId); id(batch.offerId); if (!offers.has(batch.offerId) || batches.has(batch.batchId)) fail('CORRUPT_LEDGER', 'Invalid batch.'); batches.add(batch.batchId); }
+  for (const batch of data.batches) {
+    id(batch.batchId); id(batch.offerId);
+    if (!offers.has(batch.offerId) || batches.has(batch.batchId)) fail('CORRUPT_LEDGER', 'Invalid batch.');
+    if (batch.preparationOnly === true) preparationGuard(batch.preparation, { requireEmpty: true });
+    batches.add(batch.batchId);
+  }
   for (const unit of data.units) {
     id(unit.sourceId); id(unit.offerId); id(unit.batchId);
     if (!STATES.has(unit.status) || sources.has(unit.sourceId) || !batches.has(unit.batchId) || !offers.has(unit.offerId)) fail('CORRUPT_LEDGER', 'Invalid stock identity or state.');
@@ -145,6 +163,7 @@ function openVaultLedger(filename, { lockTimeoutMs = 5000, pollMs = 20 } = {}) {
       checkAutomatic(data.offers.find(o => o.offerId === offerId));
       const existing = data.batches.find(b => b.batchId === batchId);
       if (existing) {
+        if (existing.preparationOnly) fail('PREPARATION_REQUIRED', 'Use the paused preparation workflow for this batch.');
         const units = data.units.filter(u => u.batchId === batchId);
         if (existing.offerId !== offerId || !same(units.map(u => u.sourceId).sort(), sourceIds)) fail('BATCH_CONFLICT', 'Batch ID already identifies different stock.');
         return { batchId, units, replay: true };
@@ -155,10 +174,54 @@ function openVaultLedger(filename, { lockTimeoutMs = 5000, pollMs = 20 } = {}) {
       data.units.push(...units); return { batchId, units, replay: false };
     });
   }
+  async function reservePreparationBatch({ offerId, batchId, sourceIds, guard }) {
+    id(offerId); id(batchId); guard = { ...preparationGuard(guard) };
+    if (!Array.isArray(sourceIds) || !sourceIds.length || sourceIds.length > 1000) fail('INVALID_BATCH', 'A batch must contain 1–1000 source IDs.');
+    sourceIds = sourceIds.map(id).sort();
+    if (new Set(sourceIds).size !== sourceIds.length) fail('DUPLICATE_SOURCE', 'Duplicate source IDs.');
+    return transaction(data => {
+      const existing = data.batches.find(batch => batch.batchId === batchId);
+      if (existing) {
+        const units = data.units.filter(unit => unit.batchId === batchId);
+        if (!existing.preparationOnly || existing.offerId !== offerId || !samePreparation(existing.preparation, guard) ||
+            !same(units.map(unit => unit.sourceId).sort(), sourceIds)) fail('BATCH_CONFLICT', 'Preparation batch identity changed.');
+        return { batchId, units, replay: true };
+      }
+      preparationGuard(guard, { requireEmpty: true });
+      if (data.batches.some(batch => batch.offerId === offerId || batch.preparation?.storageCategoryId === guard.storageCategoryId)) fail('PREPARATION_CONFLICT', 'Preparation requires a dedicated new offer/storage journal binding.');
+      if (data.units.some(unit => sourceIds.includes(unit.sourceId))) fail('DUPLICATE_SOURCE', 'A source ID is already journaled.');
+      const config = { offerId, automaticDeliveryEnabled: false, deactivateWhenEmpty: false };
+      const index = data.offers.findIndex(offer => offer.offerId === offerId);
+      if (index < 0) data.offers.push(config); else data.offers[index] = config;
+      data.batches.push({ batchId, offerId, attemptId: '', preparationOnly: true, preparation: { ...guard } });
+      const units = sourceIds.map(sourceId => ({ sourceId, batchId, offerId, status: 'reserved', storageId: '', deliveryId: '', evidenceId: '', updatedAt: new Date().toISOString() }));
+      data.units.push(...units);
+      return { batchId, units, replay: false };
+    });
+  }
+  async function beginPreparationUpload(batchId, attemptId, guard) {
+    id(attemptId); guard = { ...preparationGuard(guard) };
+    return transaction(data => {
+      const { batch, units } = batchUnits(data, batchId);
+      if (!batch.preparationOnly || !samePreparation(batch.preparation, guard)) fail('PREPARATION_UNVERIFIED', 'Paused preparation evidence does not match this batch.');
+      if (batch.attemptId) {
+        if (batch.attemptId !== attemptId) fail('RECONCILIATION_REQUIRED', 'An earlier preparation attempt may have uploaded this stock.');
+        return { maySubmit: false, batchId, attemptId, units };
+      }
+      preparationGuard(guard, { requireEmpty: true });
+      if (units.some(unit => unit.status !== 'reserved')) fail('INVALID_TRANSITION', 'Only reserved preparation stock can begin upload.');
+      if (data.batches.some(item => item.attemptId === attemptId)) fail('DUPLICATE_ATTEMPT', 'Upload attempt IDs must be unique.');
+      batch.attemptId = attemptId;
+      for (const unit of units) { unit.status = 'uploading'; unit.updatedAt = new Date().toISOString(); }
+      return { maySubmit: true, batchId, attemptId, units };
+    });
+  }
   async function beginUpload(batchId, attemptId) {
     id(attemptId);
     return transaction(data => {
-      const { batch, units } = batchUnits(data, batchId); checkAutomatic(data.offers.find(o => o.offerId === batch.offerId));
+      const { batch, units } = batchUnits(data, batchId);
+      if (batch.preparationOnly) fail('PREPARATION_REQUIRED', 'Preparation batches require fresh paused-offer evidence.');
+      checkAutomatic(data.offers.find(o => o.offerId === batch.offerId));
       if (batch.attemptId) {
         if (batch.attemptId !== attemptId) fail('RECONCILIATION_REQUIRED', 'A previous attempt may have uploaded this stock.');
         return { maySubmit: false, batchId, attemptId, units };
@@ -190,6 +253,7 @@ function openVaultLedger(filename, { lockTimeoutMs = 5000, pollMs = 20 } = {}) {
     attachStorage(data, unit, storageId);
     if (kind === 'stocked') {
       checkAutomatic(evidence);
+      if (data.batches.find(batch => batch.batchId === unit.batchId)?.preparationOnly) checkAutomatic(data.offers.find(offer => offer.offerId === offerId));
       if (['delivered', 'released'].includes(unit.status)) fail('INVALID_TRANSITION', 'Terminal stock cannot become available again.');
       unit.status = 'stocked';
     } else if (kind === 'delivered') {
@@ -236,7 +300,7 @@ function openVaultLedger(filename, { lockTimeoutMs = 5000, pollMs = 20 } = {}) {
   }
   // Reads also serialize, so an uninitialized file cannot race the first writer.
   async function snapshot() { const owner = await acquire(); try { return structuredClone(await load()); } finally { await release(owner); } }
-  return { configureOffer, disableOffer, reserveBatch, beginUpload, confirmStocked, markUploadUncertain, reconcile, snapshot, inspectLock, recoverDeadLock };
+  return { configureOffer, disableOffer, reserveBatch, reservePreparationBatch, beginPreparationUpload, beginUpload, confirmStocked, markUploadUncertain, reconcile, snapshot, inspectLock, recoverDeadLock };
 }
 
 module.exports = { openVaultLedger };

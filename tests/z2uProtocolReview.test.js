@@ -17,3 +17,10 @@ test('boolean or composite status fields cannot be coerced into verified unsold 
   assert.equal(stockEvidence({ ...product, status: 1 }).unsoldVerified, true);
   assert.equal(stockEvidence({ ...product, status: '1' }).unsoldVerified, true);
 });
+
+test('storage auto-delivery note respects the observed 200-character server limit', () => {
+  const input = { gameId: '13', categoryId: '14', name: 'Synthetic storage', kind: 'account' };
+  assert.equal(buildStorageFields({ ...input, deliveryNote: 'x'.repeat(200) }).delivery_note.length, 200);
+  assert.throws(() => buildStorageFields({ ...input, deliveryNote: 'x'.repeat(201) }), TypeError);
+  assert.equal(buildStorageFields({ ...input, deliveryNote: '' }).delivery_note, '');
+});

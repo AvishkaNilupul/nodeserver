@@ -113,6 +113,8 @@ test('actual Node DOM parser verifies both seller and storage access, not login 
   assert.deepEqual(await verifyAccess(client), { sellerAccess: true, storageAccess: true, storageVisible: 1, orderTotal: 0 });
   await assert.rejects(verifyAccess({ readPage: async () => '<form id="login"></form>' }), { code: 'SESSION_UNVERIFIED' });
   assert.throws(() => validateConfig({ version: 1, offers: [offer, offer] }), { code: 'INVALID_CONFIG' });
+  assert.throws(() => validateConfig({ version: 1, offers: [offer, { ...offer, offerId: '99' }] }), { code: 'INVALID_CONFIG' });
+  assert.equal(validateConfig({ version: 1, offers: [offer, { ...offer, offerId: '99', storageId: '98' }] }).offers.length, 2);
 });
 
 test('offer read failures remain unknown and cannot advance full health success', async () => {

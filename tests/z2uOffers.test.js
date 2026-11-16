@@ -67,6 +67,11 @@ test("static textarea values decode entities once while preserving literal marku
   assert.equal(extractOfferEditor(document).description, "<strong>One & two</strong> &lt;literal&gt;");
 });
 
+test("server CRLF textarea readback is normalized to the browser's LF form value", () => {
+  const actual = extractOfferEditor(parseDocument(editorHtml("", { list_description: "Line one\r\nLine two\rLine three\nLine four" })));
+  assert.equal(actual.fields.list_description, "Line one\nLine two\nLine three\nLine four");
+});
+
 test("editor rejects unknown, disabled, missing or duplicate scalar fields", () => {
   for (const html of [editorHtml('<input name="unexpected" value="x">'),
     editorHtml('<input name="list_pk" value="15">'),

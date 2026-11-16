@@ -32,13 +32,13 @@ async function verifyAccess(client, { signal } = {}) {
 }
 function validateConfig(config) {
   if (!config || config.version !== 1 || !Array.isArray(config.offers) || config.offers.length > 20) throw fault('INVALID_CONFIG');
-  const seen = new Set();
+  const seen = new Set(), storages = new Set();
   for (const offer of config.offers) {
-    if (!offer || !['offerId', 'storageId', 'gameId', 'categoryId'].every(key => typeof offer[key] === 'string' && /^[1-9]\d*$/.test(offer[key])) || seen.has(offer.offerId) || !Number.isSafeInteger(offer.maxPurchaseQuantity) || offer.maxPurchaseQuantity < 1 || !['account', 'code'].includes(offer.kind)) throw fault('INVALID_CONFIG');
+    if (!offer || !['offerId', 'storageId', 'gameId', 'categoryId'].every(key => typeof offer[key] === 'string' && /^[1-9]\d*$/.test(offer[key])) || seen.has(offer.offerId) || storages.has(offer.storageId) || !Number.isSafeInteger(offer.maxPurchaseQuantity) || offer.maxPurchaseQuantity < 1 || !['account', 'code'].includes(offer.kind)) throw fault('INVALID_CONFIG');
     // Offer IDs and exact source sets are explicitly adopted. A matching title
     // never grants permission to feed or revive another product.
     if (offer.setId !== undefined && !/^[a-f0-9]{24}$/.test(offer.setId)) throw fault('INVALID_CONFIG');
-    seen.add(offer.offerId);
+    seen.add(offer.offerId); storages.add(offer.storageId);
   }
   return config;
 }
