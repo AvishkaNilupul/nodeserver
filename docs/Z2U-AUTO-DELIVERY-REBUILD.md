@@ -2,7 +2,7 @@
 
 The integration uses Z2U's authenticated seller web endpoints, not an official API. It now includes durable session storage, a production stock adapter, single-dispatch imports, inventory reconciliation, offer protection and a monitoring CLI. Native automatic delivery is mandatory; there is no manual-delivery fallback.
 
-A one-unit production canary is the next launch step. A diagnostic native import/readback/recycle round trip has been verified. A completed paid automatic delivery and its populated success-receipt format still need verification. Normal monitoring does not refill, publish or resume offers. An explicit `run --launch-offer` startup option permits one guarded, durable one-unit launch.
+The guarded one-unit production pilot has been activated and verified on the public storefront with instant delivery. Native account import/readback, paused preparation, sending-limit configuration, launch and the persistent protection worker have been exercised live. A completed paid automatic delivery and its populated success-receipt format still need verification. Normal monitoring does not refill, publish or resume offers. An explicit `run --launch-offer` startup option permits one guarded, durable one-unit launch.
 
 ## Components
 
