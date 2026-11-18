@@ -19,6 +19,7 @@
 //        invalid (credentials likely changed — delivery may not work)
 //    Findings are upserted by a stable dedupeKey and auto-resolve when the
 //    underlying condition clears, so the tab always reflects reality.
+const { isObjectIdOrHexString } = require("mongoose");
 const AuditFinding = require("../models/AuditFinding");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
@@ -300,6 +301,18 @@ async function autoResolveStale(seenKeys) {
 // ------------------------------------------------------------------
 // Integrity checks
 // ------------------------------------------------------------------
+// DropLog.soldSetId can also identify a whole-account reservation. Only
+// archive set ids can be looked up in DropSet or reported as deleted sets.
+async function reservationOwnerName(owner, listingSet, setMap) {
+  if (!owner) return "";
+  if (String(owner) === String(listingSet)) return "this same set";
+  if (!isObjectIdOrHexString(owner)) {
+    return String(owner).startsWith("skin-account:") ? "a Skin Account" : "a non-set reservation";
+  }
+  const rival = setMap.get(String(owner)) || await DropSet.findById(owner, { name: 1 }).lean();
+  return rival ? '"' + rival.name + '"' : "a set that has since been DELETED";
+}
+
 async function runChecks(allRows, seenKeys) {
   // Account listings are skipped WHOLE, not check by check
   // (docs/ACCOUNT-LISTINGS-CONTRACT.md §B5). Every check below is ultimately a
@@ -457,7 +470,7 @@ async function runChecks(allRows, seenKeys) {
   // Only rows that HAVE a set: String() of a missing one is "undefined", which
   // Mongoose refuses to cast and which fails the whole lookup, not just its row.
   const setIds = [
-    ...new Set(rows.filter((r) => r.set).map((r) => String(r.set))),
+    ...new Set(rows.map((r) => r.set).filter(isObjectIdOrHexString).map(String)),
   ];
   const sets = setIds.length
     ? await DropSet.find({ _id: { $in: setIds } }, { items: 1, name: 1 }).lean()
@@ -506,18 +519,7 @@ async function runChecks(allRows, seenKeys) {
         // finding the owner can act on and one they have to go dig out by
         // hand. A set id with no set behind it is itself the answer: the drops
         // are frozen by a product that no longer exists.
-        const rival =
-          otherSet && String(otherSet) !== String(row.set)
-            ? setMap.get(String(otherSet)) ||
-              (await DropSet.findById(otherSet, { name: 1 }).lean())
-            : null;
-        const rivalName = otherSet
-          ? String(otherSet) === String(row.set)
-            ? "this same set"
-            : rival
-              ? '"' + rival.name + '"'
-              : "a set that has since been DELETED"
-          : "";
+        const rivalName = await reservationOwnerName(otherSet, row.set, setMap);
         await flag({
           type: "claim-mismatch",
           // Only a cross-tag conflict or a wholly-unreserved unit is about to
@@ -616,11 +618,12 @@ async function runChecks(allRows, seenKeys) {
 // Reservations whose set has been deleted, grouped by set: one finding each,
 // carrying the count so the size of the frozen inventory is visible.
 async function reportOrphanedReservations(flag) {
-  const referenced = await DropLog.distinct("soldSetId", {
+  const owners = await DropLog.distinct("soldSetId", {
     soldAt: { $ne: null },
     connected: { $ne: true },
     soldSetId: { $nin: [null, ""] },
   });
+  const referenced = owners.filter(isObjectIdOrHexString);
   if (!referenced.length) return 0;
   const alive = new Set(
     (await DropSet.find({ _id: { $in: referenced } }, { _id: 1 }).lean()).map(

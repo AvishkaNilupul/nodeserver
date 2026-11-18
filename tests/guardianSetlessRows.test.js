@@ -69,7 +69,7 @@ const UNCLAIMED_ROW = {
   qtyTarget: 0,
 };
 
-function loadGuardian(rows) {
+function loadGuardian(rows, { reservationTag = "", referenced = [] } = {}) {
   const world = {
     setLookups: [],
     upserts: [],
@@ -85,6 +85,7 @@ function loadGuardian(rows) {
         type: update.$set && update.$set.type,
         listing: update.$set && update.$set.listing,
         severity: update.$set && update.$set.severity,
+        message: update.$set && update.$set.message,
       });
       return { lastErrorObject: { upserted: true }, value: null };
     },
@@ -121,7 +122,8 @@ function loadGuardian(rows) {
             : [],
       };
     },
-    findById() {
+    findById(id) {
+      RealDropSet.findById(id).cast();
       return { lean: async () => null };
     },
   };
@@ -133,8 +135,9 @@ function loadGuardian(rows) {
           {
             account: "acc-1",
             itemKey: "k1",
-            soldAt: null,
-            soldToUsername: "",
+            soldAt: reservationTag ? new Date() : null,
+            soldToUsername: reservationTag,
+            soldSetId: reservationTag,
             connected: false,
             name: "Rust skin",
           },
@@ -142,7 +145,10 @@ function loadGuardian(rows) {
       };
     },
     async distinct() {
-      return [];
+      return referenced;
+    },
+    async countDocuments() {
+      return 1;
     },
   };
 
@@ -205,6 +211,27 @@ function loadGuardian(rows) {
 }
 
 // ------------------------------------------------------------------ tests --
+
+test("the guardian preserves a Skin Account hold while reporting a deleted DropSet", async () => {
+  const reservationTag = "skin-account:64b000000000000000000002";
+  const deletedSet = "64b000000000000000000003";
+  const { guardian, world, restore } = loadGuardian([ARCHIVE_ROW], {
+    reservationTag,
+    referenced: [SET_ID, deletedSet, reservationTag],
+  });
+  try {
+    const run = await guardian.runOnce();
+    assert.equal(run.listingsChecked, 1);
+  } finally {
+    restore();
+  }
+  assert.deepEqual(world.setLookups, [[SET_ID], [SET_ID, deletedSet]]);
+  const orphans = world.upserts.filter((f) => f.type === "orphaned-reservation");
+  assert.deepEqual(orphans.map((f) => f.dedupeKey), ["orphan-set:" + deletedSet]);
+  const mismatch = world.upserts.find((f) => f.type === "claim-mismatch");
+  assert.match(mismatch.message, /a Skin Account/);
+  assert.equal(world.healed, 1);
+});
 
 test("a rent-farm buffer row no longer aborts the pass", async () => {
   const rows = [ARCHIVE_ROW, rentFarmRow(1, "poolacct1")];
