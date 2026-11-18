@@ -586,6 +586,97 @@ test("Eldorado: a ledger read that FAILS never pauses a live offer", async () =>
   assert.strictEqual(listing.saves, 0, "an Atlas hiccup is not an empty shelf");
 });
 
+function reservedShelf() {
+  const listing = row({
+    _id: "listing", marketplace: "eldorado", externalId: "offer", set: "set",
+    updatedAt: new Date(), title: "Bundle", units: [{ accountId: "good" }, { accountId: "held" }],
+  });
+  const env = eldEnv({ rows: [listing] });
+  env.Listing.exists = spy(async () => ({ _id: listing._id }));
+  env.Listing.updateOne = spy();
+  env.mp.eldoradoOffer = spy(async () => ({ offerState: "Active", quantity: 2 }));
+  env.mp.eldoradoPaidOrders = spy(async () => []);
+  env.stubs["../utils/dropReservation"].liveUnits = async (units) =>
+    units.filter((u) => u.accountId === "good");
+  return { ...env, listing };
+}
+
+test("Eldorado caps a reserved shelf and verifies the listing has not changed", async () => {
+  const env = reservedShelf();
+  const changes = await withStubbed("../utils/eldoradoFulfiller", env.stubs, (e) => e.syncBundleStock());
+  assert.deepStrictEqual(changes, [{ title: "Bundle", action: "2 -> 1" }]);
+  assert.deepStrictEqual(env.mp.eldoradoSetQuantity.calls, [["offer", 1]]);
+  assert.equal(env.Listing.exists.calls[0][0].updatedAt, env.listing.updatedAt);
+  assert.ok(env.Listing.calls.find[0].$or.some((q) => q.units?.$elemMatch && q.bulkOfferId === null));
+});
+
+test("Eldorado pauses a completely ineligible shelf, preserving its reserved accounts", async () => {
+  const env = reservedShelf();
+  env.stubs["../utils/dropReservation"].liveUnits = async () => [];
+  await withStubbed("../utils/eldoradoFulfiller", env.stubs, (e) => e.syncBundleStock());
+  assert.deepStrictEqual(env.mp.eldoradoDelist.calls, [["offer"]]);
+  assert.equal(env.Listing.updateOne.calls[0][1].$set.autoPaused, true);
+  assert.equal(env.listing.saves, 0);
+  assert.equal(env.mp.eldoradoSetQuantity.calls.length, 0);
+});
+
+for (const scenario of ["pending order", "empty shelf with a pending order", "full paid queue", "paused", "closed", "quantity dropped", "row changed", "stock read failed"]) {
+  test("Eldorado skips a reserved-shelf correction for " + scenario, async () => {
+    const env = reservedShelf();
+    if (scenario.includes("pending order")) env.mp.eldoradoPaidOrders = async () => [{ offerId: "offer" }];
+    if (scenario === "empty shelf with a pending order") env.stubs["../utils/dropReservation"].liveUnits = async () => [];
+    if (scenario === "full paid queue") env.mp.eldoradoPaidOrders = async () => Array(50).fill({ offerId: "elsewhere" });
+    if (scenario === "paused" || scenario === "closed") {
+      env.mp.eldoradoOffer = async () => ({ offerState: scenario === "paused" ? "Paused" : "Closed", quantity: 2 });
+    }
+    if (scenario === "quantity dropped") {
+      let quantity = 2;
+      env.mp.eldoradoOffer = async () => ({ offerState: "Active", quantity: quantity-- });
+    }
+    if (scenario === "row changed") env.Listing.exists = async () => null;
+    if (scenario === "stock read failed") env.stubs["../utils/dropReservation"].liveUnits = async () => { throw Error("stock unavailable"); };
+    const changes = await withStubbed("../utils/eldoradoFulfiller", env.stubs, (e) => e.syncBundleStock());
+    assert.deepStrictEqual(changes, []);
+    assert.equal(env.mp.eldoradoSetQuantity.calls.length + env.mp.eldoradoDelist.calls.length + env.mp.eldoradoRelist.calls.length, 0);
+  });
+}
+
+test("Eldorado keeps a verified handover when the remaining stock cannot be read", async () => {
+  const env = reservedShelf();
+  env.stubs["../models/BotAccount"] = fakeById({ login: "fixture", credPassword: "fixture" });
+  env.stubs["../utils/dropReservation"].liveUnits = async (units) => {
+    if (units.length === 1) throw Error("second stock read failed");
+    return [units[0]];
+  };
+  const result = await withStubbed("../utils/eldoradoFulfiller", env.stubs, (e) =>
+    e.deliverOrder({ id: "paid", offerId: "offer", purchaseQuantity: 1 }, { dryRun: false }));
+  assert.equal(result.delivered, 1);
+  assert.equal(env.listing.units[0].orderId, "paid");
+  assert.deepStrictEqual(env.mp.eldoradoMarkDelivered.calls, [["paid"]]);
+  assert.equal(env.mp.eldoradoSendOrderMessage.calls.length, 1);
+  assert.equal(env.mp.eldoradoSetQuantity.calls.length, 0);
+});
+
+test("Eldorado reports an unexpected paid-order error once across retries", async () => {
+  const env = reservedShelf();
+  env.stubs["../utils/settings"] = fakeSettings({ af: { eldoradoAutoDeliver: true, eldoradoDeliverDryRun: false } });
+  env.mp.keyStatus = () => ({ eldorado: { configured: true } });
+  env.mp.eldoradoEnsureFreshSession = async () => {};
+  env.mp.eldoradoPaidOrders = async () => [{ id: "paid", offerId: "offer" }];
+  env.stubs["../utils/eldoradoFarmService"].deliverFarmOrder = async () => null;
+  env.stubs["../utils/dropReservation"].liveUnits = async () => { throw Error("private diagnostic detail"); };
+  const page = spy();
+  env.stubs["../utils/telegram"].sendTelegram = page;
+  await withStubbed("../utils/eldoradoFulfiller", env.stubs, async (e) => {
+    await e.deliverPaidOrders();
+    await e.deliverPaidOrders();
+  });
+  assert.equal(page.calls.length, 1);
+  assert.match(page.calls[0][0], /buyer.s chat/);
+  assert.doesNotMatch(page.calls[0][0], /private diagnostic detail/);
+  assert.equal(env.mp.eldoradoSendOrderMessage.calls.length, 0);
+});
+
 /* -------------------------------- G2G ----------------------------------- */
 
 function g2gEnv({
