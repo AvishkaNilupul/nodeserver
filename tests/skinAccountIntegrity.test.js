@@ -12,6 +12,7 @@ const Skin = require("../models/SkinAccount");
 const Bot = require("../models/BotAccount");
 const Pool = require("../models/AvailableAccount");
 const Drop = require("../models/DropLog");
+const DropSet = require("../models/DropSet");
 const BuyerSession = require("../models/BuyerMailSession");
 const { encrypt } = require("../utils/secretBox");
 const sales = require("../utils/epicSales");
@@ -386,6 +387,37 @@ test("sale ownership hook completes before mail activation and a failed ledger w
   } finally {
     skinService.markSkinSold = original;
   }
+});
+
+test("reserved marketplace units keep expiry, same-game and whole-account checks at handover", async () => {
+  const game = "Active Matter";
+  const item = { itemKey: "reward|active matter", game };
+  const set = await DropSet.create({ name: "Reserved bundle", items: [item] });
+  const fresh = new Date();
+  const expired = new Date(fresh.getTime() - 200 * 86400000);
+  const skin = await pair();
+  const makeUnit = async (label, awardedAt, login = label) => {
+    const bot = await Bot.create({ clientSecret: label, login });
+    await Drop.create({
+      account: bot._id, benefitId: label, ...item, name: "Reward", awardedAt,
+      soldAt: fresh, soldSetId: String(set._id), soldToUsername: "eldorado",
+    });
+    return { accountId: String(bot._id) };
+  };
+  const good = await makeUnit("deliverable", fresh);
+  const aged = await makeUnit("expired", expired);
+  const aliased = await makeUnit("skin-alias", fresh, skin.bot.login);
+  const foreign = await makeUnit("foreign", fresh);
+  await Drop.create({
+    account: foreign.accountId, benefitId: "second-benefit", game,
+    itemKey: "other reward|active matter", soldAt: fresh,
+    soldSetId: String(oid()), soldToUsername: "g2g",
+  });
+  const units = [aged, aliased, foreign, good];
+  assert.deepEqual(await reservations.liveUnits(units, set._id), [good]);
+  assert.deepEqual(await reservations.liveUnits(units, null), [aged, foreign, good]);
+  assert.deepEqual(await reservations.liveUnits([], set._id), []);
+  assert.equal(await Drop.countDocuments({ soldAt: fresh }), 5);
 });
 
 test("ordinary per-game stock still reserves and releases normally", async () => {
