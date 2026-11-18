@@ -166,6 +166,8 @@ async function censusForSet(set) {
         itemKey: { $in: keys },
         connected: { $ne: true },
         soldAt: null,
+        // Expired drops are not stock (utils/dropReservation.js).
+        ...require("./dropReservation").notExpiredMatch(),
       },
     },
     { $group: { _id: { a: "$account", k: "$itemKey" } } },
