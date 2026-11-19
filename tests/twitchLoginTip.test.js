@@ -3,7 +3,7 @@
 // that prompt (owner, 2026-11-03); the line lives in utils/twitchLoginTip.js.
 const test = require("node:test");
 const assert = require("node:assert");
-const { TWITCH_LINK_TIP } = require("../utils/twitchLinkTip");
+const { TWITCH_LINK_TIP, CLAIMED_DROPS_TIP } = require("../utils/twitchLinkTip");
 
 const TIP = /Remind me later/;
 const L = "someLogin";
@@ -14,7 +14,7 @@ test("the Eldorado / G2G chat hand-over carries the tip in the log-in step", () 
   for (const opts of [{}, { unclaimed: true }]) {
     const msg = e.eldoradoDeliveryCode(L, P, opts);
     assert.match(msg, TIP);
-    assert.ok(msg.includes(TWITCH_LINK_TIP));
+    assert.ok(msg.includes(opts.unclaimed ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP));
     assert.ok(msg.indexOf("Remind me later") < msg.indexOf("drops/inventory"));
   }
   const { g2gDeliveryCode } = require("../utils/g2gFulfiller");
@@ -27,7 +27,7 @@ test("a multi-account Eldorado order says it once, with the guide", () => {
   for (const opts of [{}, { unclaimed: true }]) {
     const msg = e.eldoradoAccountsMessage(creds, 2, opts);
     assert.strictEqual((msg.match(/Remind me later/g) || []).length, 1);
-    assert.strictEqual(msg.split(TWITCH_LINK_TIP).length - 1, 1);
+    assert.strictEqual(msg.split(opts.unclaimed ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP).length - 1, 1);
   }
 });
 
@@ -44,7 +44,7 @@ test("new GGSel vault guides preserve credential parsing for both stock types", 
   const { ggselCodeLogin } = require("../utils/marketplaces");
   for (const opts of [{}, { unclaimed: true }]) {
     const code = ggselDeliveryCode("example_login", "example_password", opts);
-    assert.ok(code.includes(TWITCH_LINK_TIP));
+    assert.ok(code.includes(opts.unclaimed ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP));
     assert.strictEqual(ggselCodeLogin(code), "example_login");
     assert.ok(code.includes("Password: example_password"));
   }
@@ -58,7 +58,7 @@ test("PlayerAuctions keeps the tip inside its 300-character message", () => {
     assert.strictEqual(msgs.length, 2);
     assert.ok(msgs[1].length <= copy.LIMIT);
     assert.match(msgs[1], TIP, kind + " message lost the tip");
-    assert.strictEqual(msgs[0], TWITCH_LINK_TIP);
+    assert.strictEqual(msgs[0], kind === "unclaimed" ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP);
   }
   // unclaimed: "connect first" and "claim today" still come first
   const u = copy.deliveryMessages(one, { kind: "unclaimed" })[1];
@@ -71,7 +71,7 @@ test("PlayerAuctions keeps the tip inside its 300-character message", () => {
     const last = msgs[msgs.length - 1];
     assert.match(last, TIP);
     assert.match(last, /delivery instructions\.$/);
-    assert.strictEqual(msgs[0], TWITCH_LINK_TIP);
+    assert.strictEqual(msgs[0], kind === "unclaimed" ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP);
     assert.ok(msgs.every((m) => m.length <= copy.LIMIT));
   }
 });
@@ -86,8 +86,8 @@ test("PlayerAuctions never drops or truncates the linking fallback for large cre
     for (const kind of ["bundle", "unclaimed"]) {
       const messages = copy.deliveryMessages(accounts, { kind });
       const text = messages.join("\n");
-      assert.strictEqual(text.split(TWITCH_LINK_TIP).length - 1, 1);
-      assert.strictEqual(messages[0], TWITCH_LINK_TIP);
+      assert.strictEqual(text.split(kind === "unclaimed" ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP).length - 1, 1);
+      assert.strictEqual(messages[0], kind === "unclaimed" ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP);
       assert.ok(messages.every((message) => message.length <= copy.LIMIT));
       for (const account of accounts) {
         const credential = count === 1
@@ -102,4 +102,22 @@ test("PlayerAuctions never drops or truncates the linking fallback for large cre
       assert.deepStrictEqual(farmMessages, [copy.farmDeliveryMessage(accounts, 30)]);
     }
   }
+});
+
+
+test("claimed stock explains Claimed without requiring a missing Connect button", () => {
+  const e = require("../utils/eldoradoFulfiller");
+  const p = require("../utils/playerauctionsCopy");
+  const g = require("../utils/ggselFulfiller");
+  for (const text of [e.eldoradoDeliveryCode(L, P), p.bundleInstruction(),
+    p.deliveryMessages({ login: L, password: P }).join("\n"), g.ggselDeliveryCode(L, P)]) {
+    assert.match(text, /already claimed into Twitch inventory, not redeemed to a game account/);
+    assert.match(text, /no Connect button/);
+    assert.match(text, /Epic Games for Rocket League/);
+    assert.doesNotMatch(text, /(?:press|click) (?:the purple )?["']?Connect/i);
+  }
+  assert.ok(p.bundleInstruction().length < p.INSTRUCTION_LIMIT);
+  assert.match(p.bundleInstruction(), /Message me here for help\.$/);
+  const cards = Array.from({ length: 5 }, () => e.eldoradoDeliveryCode("x".repeat(14), "y".repeat(18)));
+  assert.ok(cards.join("\n\n").length < 5000);
 });

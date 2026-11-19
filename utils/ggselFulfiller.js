@@ -19,7 +19,7 @@ const {
 // Distinct from the Gameflip tag so a Shop buyer, a Gameflip listing and a
 // GGSel listing can never be handed the same account's drops for one game.
 const GG_CLAIM_TAG = "ggsel";
-const { CLAIMED_CODE_STEPS, UNCLAIMED_CODE_STEPS } = require("./farmHandover");
+const { UNCLAIMED_CODE_STEPS } = require("./farmHandover");
 
 // `opts.unclaimed`: the account's drops are finished but NOT claimed (an
 // auto-farm account sold for its unclaimed stock) — the buyer connects first,
@@ -33,8 +33,11 @@ function ggselDeliveryCode(login, password, opts = {}) {
     "\nPassword: " +
     password +
     "\n\n" +
-    (opts && opts.unclaimed ? UNCLAIMED_CODE_STEPS : CLAIMED_CODE_STEPS) +
-    require("./twitchLinkTip").TWITCH_LINK_TIP + "\n\n" +
+    (opts && opts.unclaimed
+      ? UNCLAIMED_CODE_STEPS + require("./twitchLinkTip").TWITCH_LINK_TIP
+      : "Log in to the supplied Twitch account. View your items at " +
+        "https://www.twitch.tv/drops/inventory\n\n" +
+        require("./twitchLinkTip").CLAIMED_DROPS_TIP) + "\n\n" +
     "If you have any issue please contact the seller."
   );
 }

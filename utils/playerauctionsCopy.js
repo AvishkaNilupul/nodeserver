@@ -21,7 +21,7 @@ const LIMIT = 300;
 const { termWords, dayText, connectFirstShort } = require("./farmHandover");
 // The "click Remind me later" line (utils/twitchLoginTip.js), short form.
 const { TWITCH_CODE_TIP_SHORT: CODE_TIP } = require("./twitchLoginTip");
-const { TWITCH_LINK_TIP } = require("./twitchLinkTip");
+const { TWITCH_LINK_TIP, CLAIMED_DROPS_TIP } = require("./twitchLinkTip");
 
 // Assemble `head` (never dropped) plus as many `tail` sentences as fit.
 // Returns the longest result within `limit`.
@@ -51,13 +51,13 @@ function credBlock(accounts) {
 }
 
 // --- Bundle orders ------------------------------------------------------
-// The buyer bought an account that already holds the drops, unclaimed.
+// The buyer bought an account that already holds claimed Twitch drops, not yet redeemed to a game account.
 function bundleDeliveryMessage(accounts) {
   const list = Array.isArray(accounts) ? accounts : [accounts];
   const head =
     (list.length > 1 ? list.length + " accounts:\n" : "") + credBlock(list);
   return fit(head + "\n\n", [
-    "Log in on Twitch, open Drops & Rewards > Inventory, and press Connect under each item to link it to your own game account.",
+    "Log in to this Twitch account, then link it from your own game account website or in-game to receive the already-claimed drops.",
     CODE_TIP,
     "Any problem, reply here first and I will make it right.",
     "Full steps are in this offer's delivery instructions.",
@@ -143,14 +143,10 @@ function bundleInstruction(opts = {}) {
   if (opts && opts.unclaimed) return unclaimedInstruction();
   return clampInstruction(
     [
-      "HOW TO CLAIM",
-      "1. Log in to the Twitch account sent to you in the order messages.",
-      "2. Open twitch.tv/drops/inventory",
-      '3. Under "Received", click Connect on each item and link it to your own game account.',
-      "",
-      "If the event is still running, more items can still land on this account - our farm keeps collecting them, so leave it linked and check again in a day or two.",
-      "",
-      "Please do not change the password or email. Any problem, message me here first and I will make it right.",
+      "HOW TO RECEIVE YOUR CLAIMED DROPS",
+      "Log in to the supplied Twitch account. View items at twitch.tv/drops/inventory.",
+      CLAIMED_DROPS_TIP,
+      "No Claim Now step is needed for these items. Do not change the password or email. Message me here for help.",
     ].join("\n"),
   );
 }
@@ -199,12 +195,12 @@ function farmInstruction(days, game) {
 // resends the same credentials instead of claiming fresh ones.
 // kind: "bundle" (claimed drops), "unclaimed" (drops still to be claimed — a
 // no-claim offer) or "farm" (rent-farm).
-// Send the fallback first in its own short message, keeping existing bodies
-// intact and within the 300-character cap. If this new message fails, no
+// Send the fallback first in its own short message, keeping each message
+// within the 300-character cap. If this new message fails, no
 // credential has been sent yet; it adds no post-credential partial-send window.
 // Farm hand-overs retain their existing wording.
 function withLinkTip(messages, kind) {
-  if (kind !== "farm") messages.unshift(TWITCH_LINK_TIP);
+  if (kind !== "farm") messages.unshift(kind === "unclaimed" ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP);
   return messages;
 }
 
@@ -260,8 +256,8 @@ function deliveryMessages(accounts, { kind = "bundle", days, game, until = null 
           "and link your own game account, then press Claim on each drop. " +
           "Claim today - unclaimed drops expire days after the event. " +
           CODE_TIP + " Full steps are in this offer's delivery instructions."
-        : "Log in on Twitch, open Drops & Rewards > Inventory, and press Connect " +
-          "under each item to link it to your own game account. " + CODE_TIP +
+        : "Log in to this Twitch account, then link it from your own game account " +
+          "website or in-game to receive the already-claimed drops. " + CODE_TIP +
           " Full steps are in this offer's delivery instructions.";
   out.push(note.slice(0, LIMIT));
   return withLinkTip(out, kind);

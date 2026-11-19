@@ -55,7 +55,7 @@ test("a single-account hand-over keeps its credential message and adds the linki
   assert.strictEqual(msgs.length, 2);
   assert.match(msgs[1], /someLogin/);
   assert.match(msgs[1], /somePass/);
-  assert.strictEqual(msgs[0], require("../utils/twitchLinkTip").TWITCH_LINK_TIP);
+  assert.strictEqual(msgs[0], require("../utils/twitchLinkTip").CLAIMED_DROPS_TIP);
 });
 
 test("an order too large for one message keeps every credential exactly once", () => {
@@ -232,7 +232,7 @@ test("a failed confirm-delivery does not re-send the buyer their credentials", a
 });
 
 test("a failed linking-tip send stops before credentials, delivery stamp or confirmation", async () => {
-  const { TWITCH_LINK_TIP } = require("../utils/twitchLinkTip");
+  const { TWITCH_LINK_TIP, CLAIMED_DROPS_TIP } = require("../utils/twitchLinkTip");
   const deliveryProof = require("../utils/playerauctionsProof");
   const original = {
     send: mp.playerauctionsSendOrderMessage,
@@ -259,7 +259,7 @@ test("a failed linking-tip send stops before credentials, delivery stamp or conf
         }),
         /linking tip rejected/,
       );
-      assert.deepStrictEqual(events, [TWITCH_LINK_TIP]);
+      assert.deepStrictEqual(events, [kind === "unclaimed" ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP]);
     }
   } finally {
     mp.playerauctionsSendOrderMessage = original.send;
@@ -269,7 +269,7 @@ test("a failed linking-tip send stops before credentials, delivery stamp or conf
 });
 
 test("a successful hand-over sends linking tip then credentials before stamping and confirming", async () => {
-  const { TWITCH_LINK_TIP } = require("../utils/twitchLinkTip");
+  const { TWITCH_LINK_TIP, CLAIMED_DROPS_TIP } = require("../utils/twitchLinkTip");
   const deliveryProof = require("../utils/playerauctionsProof");
   const original = {
     send: mp.playerauctionsSendOrderMessage,
@@ -300,7 +300,7 @@ test("a successful hand-over sends linking tip then credentials before stamping 
         ? copy.unclaimedDeliveryMessage(accounts)
         : copy.bundleDeliveryMessage(accounts);
       assert.deepStrictEqual(events, [
-        TWITCH_LINK_TIP, credentialMessage, "stamp", "proof", "confirm", "cleanup",
+        kind === "unclaimed" ? TWITCH_LINK_TIP : CLAIMED_DROPS_TIP, credentialMessage, "stamp", "proof", "confirm", "cleanup",
       ]);
       assert.strictEqual(count, 2);
     }

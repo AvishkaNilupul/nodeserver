@@ -4517,11 +4517,8 @@ async function zeusxResolveCategory(game, serviceCategoryId) {
 function zxConnectGuide() {
   return (
     "You received a Twitch account (username + password above).\n\n" +
-    "1. Log in to it, then open https://www.twitch.tv/drops/inventory and " +
-    'scroll to the "Received" section at the bottom.\n' +
-    '2. Click the purple "Connect" button under the item you want to add.\n' +
-    "3. Follow the instructions on the site where the connection is made.\n\n" +
-    require("./twitchLinkTip").TWITCH_LINK_TIP + "\n\n" +
+    "Log in to it and view your items at https://www.twitch.tv/drops/inventory.\n\n" +
+    require("./twitchLinkTip").CLAIMED_DROPS_TIP + "\n\n" +
     "Any issue — message the seller here on ZeusX."
   );
 }

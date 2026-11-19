@@ -57,23 +57,17 @@ function advertisedFor(listing, freeAccounts) {
 // ONCE instead of once per account (see eldoradoAccountsMessage).
 function eldoradoClaimGuide() {
   return (
-    "HOW TO CLAIM\n" +
+    "HOW TO RECEIVE YOUR CLAIMED DROPS\n" +
     "1. Log in to this Twitch account. " + TWITCH_CODE_TIP + "\n" +
-    "2. Open https://www.twitch.tv/drops/inventory\n" +
-    '3. Scroll to the "Received" section at the bottom of the page.\n' +
-    '4. Click the purple "Connect" button under each item and follow the steps ' +
-    "to link it to YOUR OWN game account.\n" +
-    require("./twitchLinkTip").TWITCH_LINK_TIP + "\n\n" +
+    "2. View your items at https://www.twitch.tv/drops/inventory\n" +
+    "3. " + require("./twitchLinkTip").CLAIMED_DROPS_TIP + "\n" +
+    "No Claim Now step is needed for these already-claimed items.\n\n" +
     "KEEP IT LINKED\n" +
-    "If this event is still running, more items can still land on this " +
-    "account — our farm keeps collecting them automatically. Just leave it " +
-    "linked and check the drops inventory page again in a day or two, and " +
-    "claim anything new that has appeared.\n\n" +
-    "Please do not change the account's password or email, and claim your " +
-    "items reasonably soon — drops stay claimable only for a limited time " +
-    "after an event ends.\n\n" +
-    "Any problem, message me here first. Your feedback " +
-    "helps our small shop. Thank you!"
+    "If the event is still running, our farm may collect more items. Leave " +
+    "it linked and check the inventory for new drops.\n\n" +
+    "Please do not change the password or email. Link your game account soon " +
+    "because rewards remain available only for a limited time.\n\n" +
+    "Any problem, message me here first. Thank you!"
   );
 }
 
@@ -82,7 +76,7 @@ function eldoradoClaimGuide() {
 // are not under "Received": they wait at the top of the inventory page, and
 // since 2026-10-05 Twitch lets them be claimed only once the account is
 // connected to the buyer's own game account (twitchdev/issues #1216). The
-// guide above sends a buyer to "Received → Connect", where there is nothing.
+// claimed guide above does not apply: these drops still need Claim Now.
 // No "our farm keeps collecting" here: a sold no-claim account leaves its bot
 // minutes after the hand-over.
 function eldoradoUnclaimedGuide() {
