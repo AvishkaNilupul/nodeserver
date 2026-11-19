@@ -280,6 +280,12 @@ function undeliveredUnits(listing) {
   return (listing.units || []).filter((u) => !u.deliveredAt && u.accountId);
 }
 
+async function eligibleReservedUnits(listing, units = undeliveredUnits(listing)) {
+  if (listing.bulkOfferId) return units;
+  const free = units.filter((unit) => !unit.orderId);
+  return require("./dropReservation").liveUnits(free, listing.set);
+}
+
 // Reserve more accounts behind an existing Eldorado offer and push the new
 // stock count to Eldorado. Returns how many units were added.
 async function restockListing(listing, set, want) {
@@ -296,9 +302,12 @@ async function restockListing(listing, set, want) {
     })),
   );
   await listing.save();
-  await mp
-    .eldoradoSetQuantity(listing.externalId, undeliveredUnits(listing).length)
-    .catch((e) => console.error("eldorado restock quantity:", e.message));
+  try {
+    const free = await eligibleReservedUnits(listing);
+    await mp.eldoradoSetQuantity(listing.externalId, free.length);
+  } catch (e) {
+    console.error("eldorado restock quantity:", e.message);
+  }
   return claimed.length;
 }
 
@@ -1015,14 +1024,12 @@ async function deliverOrder(order, { dryRun, unitGapMs }) {
   // reserved stock" error below, which pages (ALERT_REASONS). Bulk pack rows
   // keep their own health loop and whole-pack rules.
   const allFree = undeliveredUnits(listing);
-  const free = listing.bulkOfferId
-    ? allFree
-    : await require("./dropReservation").liveUnits(allFree, listing.set);
+  const free = await eligibleReservedUnits(listing, allFree);
   if (free.length < allFree.length) {
     console.warn(
       "eldorado deliver " + orderId + ": skipping " +
         (allFree.length - free.length) +
-        " reserved unit(s) whose drops expired on Twitch",
+        " ineligible reserved unit(s)",
     );
   }
   if (free.length < need) {
@@ -1094,17 +1101,13 @@ async function deliverOrder(order, { dryRun, unitGapMs }) {
   // account count on every other row.
   // Expired units are not stock: never advertise one (dropReservation).
   let quantityPushed = true;
-  const leftUnits = listing.bulkOfferId
-    ? undeliveredUnits(listing)
-    : await require("./dropReservation")
-        .liveUnits(undeliveredUnits(listing), listing.set)
-        .catch(() => undeliveredUnits(listing));
-  await mp
-    .eldoradoSetQuantity(offerId, advertisedFor(listing, leftUnits.length))
-    .catch((e) => {
-      quantityPushed = false;
-      console.error("eldorado post-delivery quantity:", e.message);
-    });
+  try {
+    const left = await eligibleReservedUnits(listing);
+    await mp.eldoradoSetQuantity(offerId, advertisedFor(listing, left.length));
+  } catch (e) {
+    quantityPushed = false;
+    console.error("eldorado post-delivery quantity:", e.message);
+  }
 
   // The last unit of a reserved-units row is the end of that row. Eldorado
   // CLOSES an offer when its quantity reaches 0, and nothing restocks a units
@@ -1182,8 +1185,40 @@ function noclaimAccountPriceUsd(order, qty, listing) {
 }
 
 
-// Keep every claim-from-archive listing's advertised stock equal to what can
-// ACTUALLY be claimed, and take a listing off sale the moment that reaches zero.
+// A legacy reserved shelf can lose rewards or acquire a conflicting hold
+// between orders. Only reduce an active offer with proven ineligible units.
+async function capReservedStock(row, dryRun) {
+  const units = undeliveredUnits(row);
+  const eligible = (await eligibleReservedUnits(row, units)).length;
+  if (eligible === units.length) return null;
+  const offer = await mp.eldoradoOffer(row.externalId);
+  if (offer?.offerState !== "Active") return null;
+  if (eligible && !(Number(offer.quantity) > eligible)) return null;
+
+  const action = eligible ? offer.quantity + " -> " + eligible : "pause (no eligible reserved stock)";
+  if (!dryRun) {
+    // A paid order may already have reduced the public quantity while its
+    // local unit still looks free. Let delivery finish before publishing a cap.
+    const paid = await mp.eldoradoPaidOrders();
+    if (paid.length >= 50 || paid.some((o) => o.offerId === row.externalId)) return null;
+    const current = { _id: row._id, status: "active", externalId: row.externalId, updatedAt: row.updatedAt };
+    if (!(await MarketplaceListing.exists(current))) return null;
+    const latest = await mp.eldoradoOffer(row.externalId);
+    if (latest?.offerState !== "Active" || Number(latest.quantity) !== Number(offer.quantity)) return null;
+    if (eligible) {
+      await mp.eldoradoSetQuantity(row.externalId, eligible);
+    } else {
+      await mp.eldoradoDelist(row.externalId);
+      await MarketplaceListing.updateOne(current, {
+        $set: { autoPaused: true, lastError: "paused: no eligible reserved account for this offer" },
+      });
+    }
+  }
+  return { title: row.title, action };
+}
+
+// Reconcile claim-at-sale quantities and cap ordinary reserved offers when
+// one of their accounts is no longer eligible for delivery.
 //
 // Advertised stock drifts on its own: accounts get sold on other marketplaces,
 // attached to other listings, or lose their drops. A listing that keeps selling
@@ -1195,11 +1230,6 @@ async function syncBundleStock({ dryRun = false } = {}) {
   const DropSet = require("../models/DropSet");
   const { availableAccountsForSet } = require("../routes/shopRoutes");
   const listedElsewhere = await loginsOnActiveListings();
-  // Two stock sources, one rule. `autoClaimSet` rows are backed by the Drop
-  // Archive; `unclaimedGame` rows are backed by the no-claim ledger and were
-  // not covered here at all, so their advertised quantity was whatever they
-  // were published with, for as long as they stayed up.
-  //
   // Every clause pins status "active": a delisted, sold or removed row is not
   // ours to put stock behind. The autoClaimSet clause once had no status, and
   // both halves of this loop then brought delisted offers back on sale. A
@@ -1221,6 +1251,10 @@ async function syncBundleStock({ dryRun = false } = {}) {
       // No-claim Shop listings (contract §8b): claimed at sale out of the
       // no-claim farm, whose stock moves with no order placed here.
       { noclaimStock: true, status: "active" },
+      {
+        status: "active", set: { $ne: null }, bulkOfferId: null, funpaySource: null,
+        units: { $elemMatch: { accountId: { $gt: "" }, deliveredAt: null } },
+      },
     ],
   });
   const changes = [];
@@ -1257,6 +1291,14 @@ async function syncBundleStock({ dryRun = false } = {}) {
     } else if (row.unclaimedGame) {
       // A by-game offer has nothing it may sell (retired): 0 takes it off sale.
       real = 0;
+    } else if (!row.autoClaimSet) {
+      try {
+        const change = await capReservedStock(row, dryRun);
+        if (change) changes.push(change);
+      } catch (e) {
+        console.error("eldorado reserved stock " + row.externalId + ":", e.message);
+      }
+      continue;
     } else {
       const set = await DropSet.findById(row.set).lean();
       if (!set) continue;
@@ -1495,7 +1537,7 @@ async function holdShortOffer(listing, set, orderId, missed) {
 
 // Returns true only on the tick that actually paged, so the tick's new log line
 // (S3) rides this same once-per-order gate instead of inventing a second one.
-async function alertUnfulfillable(order, why) {
+async function alertUnfulfillable(order, why, { handoverUnknown = false } = {}) {
   const id = String((order && (order.id || order.orderId)) || "");
   // Once per order — and once more for an order going out one message per
   // unit: whatever stops it then (stuck, or any other reason raised while this
@@ -1541,6 +1583,8 @@ async function alertUnfulfillable(order, why) {
             "every minute. If it has to be finished by hand, look at the chat " +
             "first and send only the missing units — the delivery guarantee " +
             "is running."
+          : handoverUnknown
+          ? "Check the order state and the buyer's chat before a manual handover. The worker will retry."
           : "This one needs delivering by hand, and the delivery guarantee is running."),
     )
     .catch(() => {});
@@ -1690,8 +1734,12 @@ async function deliverPaidOrders() {
           r.delivered + " account(s)",
         );
     } catch (e) {
-      console.error("eldorado deliver failed:", e.message);
-      results.push({ orderId: String(order.id || ""), error: e.message });
+      const orderId = String(order.id || "");
+      console.error("eldorado deliver failed for " + orderId + ":", e.message);
+      if (!dryRun) {
+        await alertUnfulfillable(order, "Unexpected delivery error. See the worker log for this order.", { handoverUnknown: true });
+      }
+      results.push({ orderId, error: e.message });
     }
   }
   return { orders: orders.length, results };
