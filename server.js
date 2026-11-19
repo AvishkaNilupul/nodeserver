@@ -558,6 +558,8 @@ app.get("/radar.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "radar.html"));
 });
 
+app.use(require("./routes/twitchRewardRoutes"));
+
 // Banned accounts (superadmin only) — ban waves, cohorts and what they cost.
 app.get("/banned-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "banned-accounts.html"));

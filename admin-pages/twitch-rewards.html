@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Twitch Reward Campaigns · RedeemHub</title>
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/epic-page.css">
+    <link rel="stylesheet" href="/twitch-rewards.css">
+    <link rel="stylesheet" href="/admin-nav.css">
+    <script defer src="/admin-nav.js"></script>
+    <script defer src="/twitch-rewards.js"></script>
+  </head>
+  <body>
+    <aside class="nav" aria-label="Admin navigation">
+      <a class="brand" href="/admin.html"><span class="mark" aria-hidden="true">R</span><b>RedeemHub<span>Admin console</span></b></a>
+      <nav class="links" aria-label="Admin pages">
+        <a href="/admin.html">Inbox</a><a href="/orders">Orders</a><a href="/inventory">Inventory</a>
+        <a class="active" aria-current="page" href="/twitch-rewards.html">Twitch rewards</a>
+      </nav>
+      <div class="me"><span class="who"><b>RedeemHub</b><span id="meRole">Admin</span></span><button class="themebtn" type="button" id="theme" data-theme-toggle aria-label="Switch color theme">◐</button></div>
+    </aside>
+    <main class="ep-main">
+      <header class="ep-head rewards-head">
+        <div><h1>Twitch Reward Campaigns</h1><p>Follow watch rewards, subscription offers, and game giveaways.</p></div>
+        <div class="row">
+          <button class="btn" id="refresh" type="button">Refresh</button>
+          <a class="btn btn-primary" href="https://www.twitch.tv/drops/inventory" target="_blank" rel="noopener noreferrer">My Twitch inventory ↗</a>
+        </div>
+      </header>
+      <p id="notice" class="ep-note is-warn" role="status" hidden></p>
+      <details class="card viewer-panel" id="viewer-panel">
+        <summary>Track earned rewards <span id="viewer-summary" class="muted"></span></summary>
+        <p>Open the viewer’s Twitch inventory, then check the items they received. Confirmations are saved under your dashboard login.</p>
+        <form id="viewer-form" class="row">
+          <label for="viewer">Twitch username</label>
+          <input type="text" id="viewer" maxlength="25" pattern="[A-Za-z0-9_]{1,25}" autocapitalize="none" autocomplete="off" spellcheck="false" required>
+          <button class="btn" type="submit">Load viewer</button>
+        </form>
+        <p id="viewer-status" role="status" class="muted"></p>
+        <ul id="receipts" aria-label="Confirmed inventory items"></ul>
+      </details>
+      <div class="rewards-layout">
+        <section aria-labelledby="campaigns-title">
+          <header class="section-head"><h2 id="campaigns-title">Campaigns</h2><a href="https://www.twitch.tv/drops/campaigns" target="_blank" rel="noopener noreferrer">My eligible campaigns ↗</a></header>
+          <div id="campaigns" class="ep-panel" aria-busy="true"><p class="muted">Loading reward campaigns…</p></div>
+        </section>
+        <aside id="giveaway" class="card giveaway" aria-label="Game code giveaway" hidden></aside>
+      </div>
+      <footer class="catalog-source"><a href="https://drops.sunkwi.com/docs" target="_blank" rel="noopener noreferrer">Public catalog via Sunkwi ↗</a><span id="updated" role="status"></span></footer>
+    </main>
+  </body>
+</html>

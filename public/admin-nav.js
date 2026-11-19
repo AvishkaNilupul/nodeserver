@@ -280,6 +280,12 @@
           superOnly: true,
         },
         {
+          href: "/twitch-rewards.html",
+          label: "Twitch rewards",
+          icon: ICONS.twitchDrops,
+          superOnly: true,
+        },
+        {
           href: "/epic-accounts.html",
           label: "Epic accounts",
           icon: ICONS.epicAccounts,

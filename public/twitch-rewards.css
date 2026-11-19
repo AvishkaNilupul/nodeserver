@@ -1,0 +1,49 @@
+.brand .mark { color: #fff; font-weight: 750; }
+.rewards-head, .section-head { justify-content: space-between; }
+.rewards-head { margin: 6px 0 24px; align-items: center; }
+.rewards-layout { display: grid; gap: 16px 24px; grid-template-columns: minmax(0, 1fr); }
+.rewards-layout:has(.giveaway:not([hidden])) { grid-template-columns: minmax(0, 1fr) minmax(230px, .39fr); }
+.section-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 12px; }
+.section-head h2 { margin: 0; font-size: 16px; }
+.section-head a, .catalog-source a, .reward-links a, .giveaway a:not(.btn) { color: var(--ep-accent-ink); }
+.section-head a:hover, .catalog-source a:hover, .reward-links a:hover, .giveaway a:not(.btn):hover { text-decoration: underline; }
+.reward-card { padding: 0; overflow: hidden; margin: 0; }
+.reward-card > summary { display: flex; align-items: center; gap: 12px; padding: 15px 17px; cursor: pointer; list-style: none; }
+.reward-card > summary::-webkit-details-marker { display: none; }
+.reward-card > summary::after { content: "▸"; color: var(--muted); margin-left: auto; }
+.reward-card[open] > summary::after { transform: rotate(90deg); }
+.reward-card > summary:focus-visible { outline-offset: -3px; }
+.reward-art { flex: none; width: 48px; height: 48px; border-radius: 8px; background: var(--surface-2); object-fit: contain; }
+.reward-heading { display: grid; gap: 2px; min-width: 0; }
+.reward-heading b { font-size: 15px; overflow-wrap: anywhere; }
+.reward-heading small, .catalog-source { color: var(--muted); font-size: 12px; }
+.reward-content { padding: 0 17px 17px; }
+.reward-content p { margin: 0 0 10px; }
+.reward-group { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+.reward-group h3 { margin: 0 0 4px; }
+.reward-group p { margin: 4px 0; }
+.reward-items { color: var(--muted); }
+.reward-links { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; padding-top: 8px; }
+.giveaway { align-self: start; margin: 0; border-top: 3px solid var(--accent); }
+.giveaway h2 { font-size: 17px; }
+.giveaway p { margin: 10px 0; }
+.giveaway .reward-links { margin-top: 12px; }
+.catalog-source { display: flex; gap: 5px 14px; flex-wrap: wrap; margin-top: 18px; }
+#notice { margin-bottom: 14px; }
+.viewer-panel > summary { cursor: pointer; font-weight: 600; }
+.viewer-panel p { margin: 8px 0; }
+.viewer-panel ul { display: grid; gap: 5px; padding-left: 0; list-style: none; }
+.viewer-panel ul:empty { display: none; }
+.viewer-panel li { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 5px; }
+.reward-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 6px 0 8px; }
+.reward-checks label { display: inline-flex; align-items: center; gap: 4px; }
+.reward-checks input { accent-color: var(--accent); }
+@media (max-width: 1000px) {
+  .rewards-layout:has(.giveaway:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .rewards-head { align-items: flex-start; }
+  .reward-card > summary { padding: 12px; gap: 8px; }
+  .reward-content { padding: 0 12px 12px; }
+  .reward-art { height: 38px; width: 38px; }
+}
