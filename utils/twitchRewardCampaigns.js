@@ -281,6 +281,8 @@ function createRewardCatalog(read = fetchFeed, clock = Date.now) {
 }
 
 module.exports = {
+  GTA_ID,
+  GTA_GIVEAWAY,
   createRewardCatalog,
   getGiveaway,
   getRewardCatalog: createRewardCatalog(),

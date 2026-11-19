@@ -225,10 +225,9 @@
     return data;
   }
 
-  async function selectViewer(event) {
-    event.preventDefault();
+  async function selectViewer(value) {
     if (saving) return;
-    const login = byId("viewer").value.trim().toLowerCase();
+    const login = value.trim().toLowerCase();
     saving = true;
     byId("viewer-status").textContent = "Loading " + login + "…";
     try {
@@ -337,17 +336,34 @@
   }
 
   byId("theme").addEventListener("click", () => window.toggleTheme());
-  byId("viewer-form").addEventListener("submit", selectViewer);
+  byId("viewer-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    selectViewer(byId("viewer").value);
+  });
+  document.addEventListener("twitch-reward-viewer", (event) => {
+    byId("viewer-panel").open = true;
+    byId("viewer").value = event.detail;
+    selectViewer(event.detail);
+  });
   document.addEventListener("change", (event) => {
     const box = event.target.closest(".reward-checks input");
     if (box) saveReceipt(box.dataset.campaign, box.dataset.reward, box.checked);
   });
-  refresh.addEventListener("click", load);
+  const campaignView = () => window.location.hash !== "#accounts";
+  refresh.addEventListener("click", () => {
+    if (campaignView()) load();
+  });
+  window.addEventListener("hashchange", () => {
+    if (campaignView()) {
+      load();
+      if (viewer && !saving) selectViewer(viewer);
+    }
+  });
   setInterval(
     () => {
-      if (!document.hidden) load();
+      if (!document.hidden && campaignView()) load();
     },
     5 * 60 * 1000,
   );
-  load();
+  if (campaignView()) load();
 })();

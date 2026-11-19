@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/admin-nav.css">
     <script defer src="/admin-nav.js"></script>
     <script defer src="/twitch-rewards.js"></script>
+    <script defer src="/twitch-reward-accounts.js"></script>
   </head>
   <body>
     <aside class="nav" aria-label="Admin navigation">
@@ -28,6 +29,11 @@
           <a class="btn btn-primary" href="https://www.twitch.tv/drops/inventory" target="_blank" rel="noopener noreferrer">My Twitch inventory ↗</a>
         </div>
       </header>
+      <nav class="ep-tabs" aria-label="Twitch Rewards views">
+        <a class="ep-tab is-active" id="tab-campaigns" href="#overview" aria-controls="campaign-view" aria-current="page">Campaigns</a>
+        <a class="ep-tab" id="tab-accounts" href="#accounts" aria-controls="accounts-view">Accounts &amp; codes</a>
+      </nav>
+      <section id="campaign-view" aria-label="Campaigns">
       <p id="notice" class="ep-note is-warn" role="status" hidden></p>
       <details class="card viewer-panel" id="viewer-panel">
         <summary>Track earned rewards <span id="viewer-summary" class="muted"></span></summary>
@@ -48,6 +54,46 @@
         <aside id="giveaway" class="card giveaway" aria-label="Game code giveaway" hidden></aside>
       </div>
       <footer class="catalog-source"><a href="https://drops.sunkwi.com/docs" target="_blank" rel="noopener noreferrer">Public catalog via Sunkwi ↗</a><span id="updated" role="status"></span></footer>
+      </section>
+      <section id="accounts-view" aria-labelledby="tab-accounts" hidden>
+        <div class="ep-stats" aria-label="Account totals">
+          <div class="ep-stat"><span class="ep-stat-label">Tracked accounts</span><strong class="ep-stat-value" id="stat-tracked">—</strong></div>
+          <div class="ep-stat"><span class="ep-stat-label">Farmed accounts</span><strong class="ep-stat-value" id="stat-farmed">—</strong></div>
+          <div class="ep-stat"><span class="ep-stat-label">Confirmed rewards</span><strong class="ep-stat-value" id="stat-rewards">—</strong></div>
+          <div class="ep-stat"><span class="ep-stat-label">Saved codes</span><strong class="ep-stat-value" id="stat-codes">—</strong><small class="muted" id="stat-redemptions"></small></div>
+        </div>
+        <p class="muted account-hint">Totals use your dashboard login. An account counts as farmed when you confirm its first reward or save an issued game code.</p>
+        <section aria-labelledby="account-list-title">
+          <header class="section-head"><h2 id="account-list-title">Accounts</h2>
+            <form id="track-account" class="row">
+              <label for="track-name">Twitch username</label><input id="track-name" type="text" required maxlength="25" pattern="[A-Za-z0-9_]{1,25}" autocomplete="off" autocapitalize="none" spellcheck="false">
+              <button type="submit" class="btn btn-primary">Track account</button>
+            </form>
+          </header>
+          <div class="row account-filters"><label for="account-search">Search</label><input id="account-search" type="search" maxlength="25" placeholder="Username" autocomplete="off" spellcheck="false">
+            <label for="account-filter">Show</label><select id="account-filter"><option value="all">All accounts</option><option value="farmed">Farmed accounts</option><option value="codes">Accounts with codes</option></select>
+          </div>
+          <div class="ep-table-wrap"><table class="ep-table reward-account-table"><thead><tr><th>Account</th><th>Rewards</th><th>Codes</th><th>Last recorded activity</th></tr></thead><tbody id="account-rows"></tbody></table></div>
+          <p id="account-status" class="muted" role="status"></p>
+          <div id="account-pager" class="ep-more" hidden><span id="account-range"></span><div class="row"><button type="button" id="accounts-prev" class="btn">Previous</button><button type="button" id="accounts-next" class="btn">Next</button></div></div>
+        </section>
+        <section class="card account-detail" id="account-detail" aria-labelledby="detail-name" hidden>
+          <header class="section-head"><h2 id="detail-name" tabindex="-1"></h2><a id="review-account" href="#overview">Review campaign rewards</a></header>
+          <p class="muted" id="account-dates"></p>
+          <ul id="account-items" aria-label="Confirmed rewards and saved codes"></ul>
+          <p id="account-detail-status" class="muted" role="status"></p>
+          <button id="untrack-account" type="button" class="btn btn-sm" hidden>Stop tracking this account</button>
+          <details id="save-code-panel"><summary>Save an issued code</summary>
+            <form id="save-account-code" class="account-code-form" autocomplete="off">
+              <label>Reward<select id="code-award" required></select></label>
+              <label>Game code<input id="new-code" type="password" maxlength="160" minlength="4" required autocomplete="off" spellcheck="false"></label>
+              <label>Platform (optional)<input id="code-platform" maxlength="60" placeholder="e.g. PS5"></label>
+              <label>Region (optional)<input id="code-region" maxlength="60" placeholder="e.g. Japan"></label>
+              <button type="submit" class="btn btn-primary">Save code</button>
+            </form>
+          </details>
+        </section>
+      </section>
     </main>
   </body>
 </html>

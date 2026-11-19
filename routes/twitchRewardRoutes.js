@@ -34,16 +34,19 @@ router.get("/api/twitch-rewards/campaigns", async (req, res) => {
   }
 });
 
-router.use("/api/twitch-rewards/viewers", (req, res, next) => {
-  if (!req.session.admin.id)
-    return res
-      .status(401)
-      .json({ message: "Sign in again to manage confirmations." });
-  next();
-});
+router.use(
+  ["/api/twitch-rewards/viewers", "/api/twitch-rewards/accounts"],
+  (req, res, next) => {
+    if (!req.session.admin.id)
+      return res
+        .status(401)
+        .json({ message: "Sign in again to manage confirmations." });
+    next();
+  },
+);
 
-router.param("viewer", (req, res, next, raw) => {
-  const viewer = raw.trim().toLowerCase();
+router.use("/api/twitch-rewards/viewers/:viewer", (req, res, next) => {
+  const viewer = req.params.viewer.trim().toLowerCase();
   if (!/^[a-z0-9_]{1,25}$/.test(viewer)) {
     return res.status(400).json({ message: "Enter a Twitch username." });
   }
@@ -51,10 +54,23 @@ router.param("viewer", (req, res, next, raw) => {
   next();
 });
 
+router.use("/api/twitch-rewards", require("./twitchRewardAccountRoutes"));
+
 router.get("/api/twitch-rewards/viewers/:viewer/receipts", async (req, res) => {
   const rows = await TwitchRewardReceipt.find(
     { adminId: req.session.admin.id, viewer: req.rewardViewer },
-    { _id: 0, campaignId: 1, reward: 1, recordedAt: 1 },
+    {
+      _id: 0,
+      campaignId: 1,
+      campaignName: 1,
+      reward: 1,
+      recordedAt: 1,
+      codeSavedAt: 1,
+      codeVersion: 1,
+      codeRedeemedAt: 1,
+      platform: 1,
+      region: 1,
+    },
   )
     .sort({ recordedAt: -1 })
     .lean();
@@ -86,6 +102,7 @@ router.put("/api/twitch-rewards/viewers/:viewer/receipts", async (req, res) => {
     const giveaway = getGiveaway();
     const isGiveaway =
       giveaway && campaignId === giveaway.id && reward === giveaway.name;
+    let campaignName = "GTA VI Ultimate Edition giveaway";
     if (!isGiveaway) {
       let catalog;
       try {
@@ -99,17 +116,16 @@ router.put("/api/twitch-rewards/viewers/:viewer/receipts", async (req, res) => {
         (item) => item.id === campaignId && item.status === "Live",
       );
       if (!campaign?.groups.some((group) => group.rewards.includes(reward))) {
-        return res
-          .status(400)
-          .json({
-            message: "This item is outside the current reward catalog.",
-          });
+        return res.status(400).json({
+          message: "This item is outside the current reward catalog.",
+        });
       }
+      campaignName = campaign.name;
     }
     try {
       await TwitchRewardReceipt.updateOne(
         key,
-        { $setOnInsert: key },
+        { $setOnInsert: { ...key, campaignName } },
         { upsert: true },
       );
     } catch (err) {
@@ -118,7 +134,23 @@ router.put("/api/twitch-rewards/viewers/:viewer/receipts", async (req, res) => {
         throw err;
     }
   } else {
-    await TwitchRewardReceipt.deleteOne(key);
+    const removed = await TwitchRewardReceipt.deleteOne({
+      ...key,
+      codeSavedAt: { $exists: false },
+    });
+    if (
+      !removed.deletedCount &&
+      (await TwitchRewardReceipt.exists({
+        ...key,
+        codeSavedAt: { $exists: true },
+      }))
+    )
+      return res
+        .status(409)
+        .json({
+          message:
+            "Remove the saved code in Accounts & codes before undoing this confirmation.",
+        });
   }
   res.json({ viewer: req.rewardViewer, campaignId, reward, confirmed });
 });

@@ -38,6 +38,41 @@
 .reward-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 6px 0 8px; }
 .reward-checks label { display: inline-flex; align-items: center; gap: 4px; }
 .reward-checks input { accent-color: var(--accent); }
+#accounts-view[hidden], #campaign-view[hidden], #account-pager[hidden], #account-detail[hidden] { display: none; }
+.account-hint { margin: 8px 0 22px; }
+.account-filters { margin: 0 0 12px; }
+.reward-account-table th, .reward-account-table td { text-align: left; }
+.reward-account-table .viewer-link { color: var(--ep-accent-ink); background: none; border: 0; font: inherit; font-weight: 650; padding: 4px 0; cursor: pointer; }
+.reward-account-table tr.is-selected { background: var(--surface-2); }
+.account-detail { margin-top: 18px; scroll-margin-top: 65px; }
+.account-detail ul { list-style: none; padding: 0; }
+.account-detail li { padding: 10px 0; border-top: 1px solid var(--line); }
+.account-detail li p { margin: 3px 0 6px; }
+.account-detail summary { font-weight: 650; cursor: pointer; }
+.account-detail code { display: inline-block; background: var(--surface-2); color: var(--ink); padding: 6px; overflow-wrap: anywhere; user-select: all; }
+.account-detail .code-output:empty { display: none; }
+#untrack-account[hidden] { display: none; }
+#untrack-account { margin-bottom: 10px; }
+.account-code-form { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; padding-top: 12px; }
+.account-code-form label { display: grid; gap: 4px; min-width: 0; }
+.account-code-form select { max-width: 100%; }
+@media (max-width: 600px) {
+  .account-code-form { display: grid; }
+  #track-account, .account-filters { display: grid; gap: 4px 8px; }
+  #track-account { width: 100%; grid-template-columns: minmax(0, 1fr) auto; }
+  #track-account label { grid-column: 1 / -1; }
+  .account-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .account-filters label[for="account-filter"] { grid-area: 1 / 2; }
+  #account-search { grid-area: 2 / 1; }
+  #track-account input, .account-filters input, .account-filters select { min-width: 0; width: 100%; }
+  .reward-account-table { table-layout: fixed; }
+  .reward-account-table th, .reward-account-table td { padding: 7px 5px; white-space: normal; overflow-wrap: anywhere; }
+  .reward-account-table th:first-child { width: 33%; }
+  .reward-account-table th:nth-child(2) { width: 18%; }
+  .reward-account-table th:nth-child(3) { width: 14%; }
+  .reward-account-table th:nth-child(2), .reward-account-table th:nth-child(3) { white-space: nowrap; font-size: 10px; letter-spacing: .01em; }
+  .reward-account-table .viewer-link { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+}
 @media (max-width: 1000px) {
   .rewards-layout:has(.giveaway:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
 }
