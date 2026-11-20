@@ -92,16 +92,22 @@ async function create(adminId, { count = 1 } = {}) {
     const guard = require("./pristineReserve");
     const id = new mongoose.Types.ObjectId(), note = "twitch-reward-farm:" + id, p = paths(id);
     const ledger = await require("./noclaimFleet").committedLedgers();
+    const renterTokens = await require("../models/RenterAccount").distinct("clientSecret", {});
+    const resellerTokens = await require("../models/ResellerAccount").distinct("clientSecret",
+      { showcaseOnly: { $ne: true }, resellerStatus: { $ne: "returned" } });
+    const taskLogins = await require("../models/AutoFarmTask").distinct("assignedAccounts",
+      { status: { $in: ["active", "planned"] }, dryRun: { $ne: true } });
     const heldIds = existing.flatMap(b => members(b).map(m => String(m.poolAccountId)));
     const heldTokens = await Pool.distinct("clientSecret", { _id: { $in: heldIds } });
     const heldTwitchIds = new Set(existing.flatMap(b => members(b).map(m => String(m.twitchId))));
-    const excluded = new Set([...a.exclude, ...b.exclude, ...heldTokens]);
+    const excluded = new Set([...a.exclude, ...b.exclude, ...heldTokens, ...renterTokens, ...resellerTokens]);
     const accounts = [];
     let validatingId = "";
     try {
       while (accounts.length < count) {
         const ids = [...ledger.poolIds, ...heldIds, ...rejectedIds, ...accounts.map(a => String(a._id))];
-        const q = claimQuery([...excluded], await guard.farmClaimFilter(), { logins: ledger.logins, poolIds: ids });
+        const q = claimQuery([...excluded], await guard.farmClaimFilter(),
+          { logins: [...ledger.logins, ...taskLogins.map(l => String(l).toLowerCase())], poolIds: ids });
         q.$and[0].twitchId.$nin = [...heldTwitchIds];
         // Reuse idle claimed-only accounts before drawing on pristine order supply.
         const account = await Pool.findOneAndUpdate(q,
@@ -185,11 +191,14 @@ function parseActivity(lines) {
   return { activity: (accepted.at(-1) || "Waiting for a reward watch report.").slice(0, 350),
     currentMinutes: counters ? Number(counters[1]) : null, requiredMinutes: counters ? Number(counters[2]) : null };
 }
+function isGtaReceipt(receipt) {
+  return receipt.CampaignId === GTA_ID ||
+    /(?:gta\s*(?:vi|6)|grand\s*theft\s*auto\s*(?:vi|6))/i.test(String(receipt.CampaignName || "") + " " + String(receipt.RewardName || ""));
+}
 async function importCode(bot, receipt) {
   if (String(receipt.AccountId) !== bot.twitchId || String(receipt.Login).toLowerCase() !== bot.viewer)
     throw new Error("Code receipt account mismatch.");
-  if (receipt.CampaignId !== GTA_ID &&
-      !/(?:gta\s*(?:vi|6)|grand\s*theft\s*auto\s*(?:vi|6))/i.test(String(receipt.CampaignName || "") + " " + String(receipt.RewardName || "")))
+  if (!isGtaReceipt(receipt))
     throw new Error("Code receipt belongs to another campaign.");
   if (!/^[\x21-\x7e][\x20-\x7e]{2,158}[\x21-\x7e]$/.test(receipt.Code || "")) throw new Error("Invalid code receipt.");
   const key = { adminId: bot.adminId, viewer: bot.viewer, campaignId: GTA_GIVEAWAY.id, reward: GTA_GIVEAWAY.name };
@@ -242,6 +251,7 @@ async function runOnce() {
           for (const receipt of rows) {
             const member = members(bot).find(a => String(a.twitchId) === String(receipt.AccountId));
             if (!member) throw new Error("Receipt account is not assigned to this bot.");
+            if (!isGtaReceipt(receipt)) continue; // retain unrelated historical codes in the encrypted outbox
             await importCode({ ...bot, viewer: member.viewer, twitchId: member.twitchId }, receipt);
           }
         }
@@ -259,4 +269,4 @@ async function status(adminId) {
   const bots = await Bot.find({ adminId }, { poolAccountId: 0, "accounts.poolAccountId": 0, __v: 0 }).sort({ createdAt: -1 }).lean();
   return { bots, campaign: "GTA VI", endsAt: new Date(END), maxBots: MAX_BOTS, maxAccounts: MAX_ACCOUNTS, totalAccounts: bots.reduce((n,b) => n + members(b).length, 0) };
 }
-module.exports = { create, action, start, runOnce, status, workerConfig, claimQuery, parseActivity, accountActivity, importCode, members, checkCapacity, IMAGE, BASE, HOST };
+module.exports = { create, action, start, runOnce, status, workerConfig, claimQuery, parseActivity, accountActivity, importCode, isGtaReceipt, members, checkCapacity, IMAGE, BASE, HOST };

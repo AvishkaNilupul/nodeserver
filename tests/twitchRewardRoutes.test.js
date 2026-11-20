@@ -448,6 +448,8 @@ test("worker code import is encrypted, identity-checked, idempotent and visible 
   const receipt = { AccountId: "123", Login: "fixture_import", Code: "SYNTHETIC-REWARD-KEY", CampaignName: "GTA VI Ultimate Edition giveaway" };
   await assert.rejects(farm.importCode(bot, { ...receipt, AccountId: "456" }), /mismatch/);
   await assert.rejects(farm.importCode(bot, { ...receipt, CampaignName: "Different game" }), /another campaign/);
+  assert.equal(farm.isGtaReceipt({ CampaignName: null, RewardName: "Old unrelated cape" }), false);
+  assert.equal(farm.isGtaReceipt(receipt), true);
   await farm.importCode(bot, receipt);
   await farm.importCode(bot, receipt);
   const rows = await Receipt.find({ adminId: bot.adminId }).select("+codeCipher +codeFingerprint").lean();
