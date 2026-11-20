@@ -13,13 +13,21 @@
   async function load() {
     if (!visible() || busy) return;
     try {
-      const { bots, endsAt } = await request("/farm");
-      $("reward-farm-summary").textContent = `${bots.length} dedicated account(s) · viewing ends ${new Date(endsAt).toLocaleString()}`;
+      const { bots, endsAt, totalAccounts } = await request("/farm");
+      $("reward-farm-summary").textContent = `${totalAccounts} dedicated accounts in ${bots.length} bots · viewing ends ${new Date(endsAt).toLocaleString()}`;
       $("reward-farm-bots").replaceChildren(...bots.map(bot => {
         const card = document.createElement("article"); card.className = "card";
-        card.append(text("h3", bot.viewer), text("p", `Bot: ${bot.state} · Target: ${bot.desired}`));
+        const accounts = bot.accounts?.length ? bot.accounts : [bot];
+        card.append(text("h3", accounts.length > 1 ? `${accounts.length} GTA VI accounts` : bot.viewer), text("p", `Bot: ${bot.state} · Target: ${bot.desired}`));
         card.append(text("p", bot.currentMinutes == null ? "Twitch watch progress: not reported" : `Twitch watch progress: ${bot.currentMinutes}/${bot.requiredMinutes} minutes`));
         card.append(text("p", bot.activity || "Waiting for the worker's first report."));
+        if (accounts.length > 1) {
+          const details = document.createElement("details");
+          details.append(text("summary", `Accounts · ${accounts.filter(a => a.currentMinutes != null).length}/${accounts.length} reporting progress`));
+          const list = document.createElement("ul");
+          for (const a of accounts) list.append(text("li", `${a.viewer}: ${a.currentMinutes == null ? "not reported" : `${a.currentMinutes}/${a.requiredMinutes} minutes`}`));
+          details.append(list); card.append(details);
+        }
         if (bot.error) card.append(text("p", bot.error));
         card.append(text("small", bot.checkedAt ? `Last checked ${new Date(bot.checkedAt).toLocaleString()}` : "Not checked yet"));
         const controls = document.createElement("div"); controls.className = "row";

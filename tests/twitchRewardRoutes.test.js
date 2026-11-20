@@ -472,12 +472,14 @@ test("dedicated bot creation reserves atomically, writes a private reward-only c
   t.mock.method(hosts, "resolveHost", () => ({ id: "fixture", transport: "ssh" }));
   let written;
   t.mock.method(hosts, "runShell", async (_host, script, options) => {
+    if (script.includes("# reward-capacity")) return { stdout: JSON.stringify({ availableMb: 20000, load: 0.5, cpus: 6 }) };
     if (options?.input) written = JSON.parse(options.input);
     return { stdout: script.includes("echo ABSENT") ? "ABSENT" : "" };
   });
   t.mock.method(fences, "claimFence", async () => ({ exclude: [] }));
   t.mock.method(fleet, "committedLedgers", async () => ({ logins: [], poolIds: [] }));
   t.mock.method(guard, "farmClaimFilter", async () => ({}));
+  t.mock.method(require("../utils/twitchInventory"), "fetchInventory", async () => ({ twitchId: "123456", login: "fixture_reserved", inProgress: [] }));
   const nativeFetch = globalThis.fetch;
   t.mock.method(globalThis, "fetch", (url, options) => String(url).startsWith("https://id.twitch.tv/")
     ? Promise.resolve({ ok: true, json: async () => ({ user_id: "123456", login: "fixture_reserved" }) })
@@ -500,13 +502,63 @@ test("dedicated bot creation reserves atomically, writes a private reward-only c
     clientSecret: "synthetic-only", status: "available", lastCheckStatus: "ok", dropCount: 0, unclaimedDropCount: 0 });
   let removedConfig = false;
   t.mock.method(hosts, "runShell", async (_host, script) => {
+    if (script.includes("# reward-capacity")) return { stdout: JSON.stringify({ availableMb: 20000, load: 0.5, cpus: 6 }) };
     if (script.startsWith("docker create ")) throw Error("Synthetic provisioning failure");
     if (script.startsWith("rm -f ")) removedConfig = true;
     return { stdout: script.includes("echo ABSENT") ? "ABSENT" : "" };
   });
-  await assert.rejects(farm.create("fixture_owner"), /provisioning failed/);
+  await assert.rejects(farm.create("fixture_owner"), /creation failed/);
   assert.equal(removedConfig, true);
   assert.equal((await Pool.findById(failedAccount._id).lean()).status, "available");
   assert.equal(await FarmBot.countDocuments({ poolAccountId: failedAccount._id }), 0);
   await Pool.deleteOne({ _id: failedAccount._id });
+});
+
+test("grouped reward bots keep per-account identity, reject partial ownership and roll back an incomplete group", async (t) => {
+  const farm = require("../utils/twitchRewardFarm"), h = require("../utils/botHosts");
+  const Pool = require("../models/AvailableAccount"), Bot = require("../models/TwitchRewardFarmBot");
+  await Bot.init();
+  t.mock.method(h, "resolveHost", () => ({ id: "fixture", transport: "ssh" }));
+  let written;
+  t.mock.method(h, "runShell", async (_host, script, options) => {
+    if (script.includes("# reward-capacity")) return { stdout: '{"availableMb":20000,"load":0.5,"cpus":6}' };
+    if (options?.input) written = JSON.parse(options.input);
+    return { stdout: script.includes("echo ABSENT") ? "ABSENT" : "" };
+  });
+  t.mock.method(require("../utils/fleetIntegrity"), "claimFence", async () => ({ exclude: [] }));
+  t.mock.method(require("../utils/noclaimFleet"), "committedLedgers", async () => ({ logins: [], poolIds: [] }));
+  t.mock.method(require("../utils/pristineReserve"), "farmClaimFilter", async () => ({}));
+  const identities = { "fixture-group-a": { user_id: "10001", login: "fixture_group_a" }, "fixture-group-b": { user_id: "10002", login: "fixture_group_b" } };
+  const nativeFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (url, options) => String(url).startsWith("https://id.twitch.tv/")
+    ? Promise.resolve({ ok: true, json: async () => identities[options.headers.Authorization.slice(6)] }) : nativeFetch(url, options));
+  t.mock.method(require("../utils/twitchInventory"), "fetchInventory", async token => ({ twitchId: identities[token].user_id, login: identities[token].login, inProgress: [] }));
+  const a = await Pool.create({ username: "fixture_group_a", usernameLower: "fixture_group_a", twitchId: "10001", clientSecret: "fixture-group-a", status: "available", lastCheckStatus: "ok", dropCount: 20 });
+  const b = await Pool.create({ username: "fixture_group_b", usernameLower: "fixture_group_b", twitchId: "10002", clientSecret: "fixture-group-b", status: "available", lastCheckStatus: "ok", dropCount: 10 });
+  const id = await farm.create("group-owner", { count: 2 });
+  assert.equal(written.TwitchSettings.TwitchUsers.length, 2);
+  const bot = await Bot.findById(id).lean();
+  assert.equal(farm.members(bot).length, 2);
+  assert.equal(await Pool.countDocuments({ _id: { $in: [a._id, b._id] }, claimedNote: "twitch-reward-farm:" + id }), 2);
+  const states = farm.accountActivity(bot,
+    "[TwitchUser - fixture_group_a] Reward watch progress reported by Twitch: 2/60 minutes\n" +
+    "[TwitchUser - fixture_group_b] Reward watch progress reported by Twitch: 5/60 minutes");
+  assert.deepEqual(states.map(a => a.currentMinutes), [2,5]);
+  const visible = await farm.status("group-owner");
+  assert.equal(visible.totalAccounts, 2);
+  assert.equal(visible.bots[0].accounts[0].poolAccountId, undefined);
+  await Pool.updateOne({ _id: b._id }, { $set: { status: "available" } });
+  await assert.rejects(farm.action("group-owner", id, "start"), /reservation/);
+  await Pool.updateOne({ _id: b._id }, { $set: { status: "claimed" } });
+  await farm.action("group-owner", id, "start");
+  await farm.action("group-owner", id, "stop");
+  await Bot.deleteOne({ _id: id });
+  await Pool.updateMany({ _id: { $in: [a._id, b._id] } }, { $set: { status: "available", claimedNote: "" } });
+  await assert.rejects(farm.create("group-owner", { count: 3 }), /eligible idle/);
+  assert.equal(await Pool.countDocuments({ _id: { $in: [a._id, b._id] }, status: "available" }), 2);
+  assert.equal(await Bot.countDocuments({ adminId: "group-owner" }), 0);
+  await Pool.deleteMany({ _id: { $in: [a._id, b._id] } });
+  assert.throws(() => farm.checkCapacity({ availableMb: 7000, load: 0.5, cpus: 6 }), /capacity/);
+  assert.throws(() => farm.checkCapacity({ availableMb: 20000, load: 12, cpus: 6 }), /capacity/);
+  await assert.rejects(farm.create("group-owner", { count: 21 }), /1–20/);
 });

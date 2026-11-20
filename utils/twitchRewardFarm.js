@@ -24,8 +24,8 @@ function host() {
 }
 function workerConfig(account) {
   return { TwitchSettings: {
-    TwitchUsers: [{ Login: account.username, Id: String(account.twitchId), ClientSecret: account.clientSecret,
-      Enabled: true, FavouriteGames: ["Grand Theft Auto VI"] }],
+    TwitchUsers: (Array.isArray(account) ? account : [account]).map(a => ({ Login: a.username, Id: String(a.twitchId), ClientSecret: a.clientSecret,
+      Enabled: true, FavouriteGames: ["Grand Theft Auto VI"] })),
     OnlyFavouriteGames: true, OnlyConnectedAccounts: false, ClaimDrops: false,
     RewardCampaignsOnly: true, CollectRewardCodes: true,
     RewardCodeDirectory: "/app/Configuration/reward-codes", RewardCodeKeyFile: "/app/Configuration/reward-code.key",
@@ -38,69 +38,125 @@ function workerConfig(account) {
 function claimQuery(excludedTokens, reserveFilter, ledger = { logins: [], poolIds: [] }) {
   return { $and: [{ status: "available", manualSold: { $ne: true }, lastCheckStatus: "ok",
     clientSecret: { $gt: "", $nin: excludedTokens }, twitchId: { $regex: "^[0-9]+$" },
-    dropCount: { $not: { $gt: 0 } }, unclaimedDropCount: { $not: { $gt: 0 } },
+    unclaimedDropCount: { $not: { $gt: 0 } },
     "soldGames.0": { $exists: false }, usernameLower: { $nin: ledger.logins },
     _id: { $nin: ledger.poolIds } }, reserveFilter] };
 }
-async function create(adminId) {
+const MAX_BOTS = 10, MAX_ACCOUNTS = 101, MAX_PER_BOT = 20;
+const rejectedIds = new Set();
+function members(bot) {
+  return bot.accounts?.length ? bot.accounts : [{ poolAccountId: bot.poolAccountId,
+    viewer: bot.viewer, twitchId: bot.twitchId, currentMinutes: bot.currentMinutes,
+    requiredMinutes: bot.requiredMinutes }];
+}
+function checkCapacity(data) {
+  if (!Number.isFinite(data.availableMb) || !Number.isFinite(data.load) || !Number.isFinite(data.cpus))
+    throw new Error("Cannot verify reward host capacity.");
+  if (data.availableMb < 7168 || data.load > data.cpus * 1.5)
+    throw new Error("Reward host needs more free capacity before another bot can start.");
+}
+async function assertCapacity() {
+  const r = await hosts.runShell(host(), `# reward-capacity
+python3 - <<'PY'
+import json,os
+m={a.split(':')[0]:int(a.split()[1]) for a in open('/proc/meminfo') if a.startswith(('MemAvailable:','MemTotal:'))}
+print(json.dumps({'availableMb':m['MemAvailable']/1024,'load':os.getloadavg()[0],'cpus':os.cpu_count()}))
+PY`, { timeout: 15000 });
+  checkCapacity(JSON.parse(r.stdout));
+}
+async function validateAccount(account) {
+  const verified = await fetch("https://id.twitch.tv/oauth2/validate", {
+    headers: { Authorization: "OAuth " + account.clientSecret }, signal: AbortSignal.timeout(15000) });
+  const identity = verified.ok && await verified.json();
+  if (!identity || String(identity.user_id) !== String(account.twitchId) ||
+      String(identity.login).toLowerCase() !== account.username.toLowerCase()) throw new Error("Account identity mismatch.");
+  // Stored counts can lag. Never borrow an account with earned-unclaimed inventory.
+  const inv = await require("./twitchInventory").fetchInventory(account.clientSecret, { host: host() });
+  if ((inv.twitchId && String(inv.twitchId) !== String(account.twitchId)) ||
+      (inv.login && String(inv.login).toLowerCase() !== account.username.toLowerCase()) ||
+      inv.inProgress.some(d => !d.claimed && d.required > 0 && d.current >= d.required))
+    throw new Error("Account inventory needs review.");
+}
+async function create(adminId, { count = 1 } = {}) {
+  if (!Number.isInteger(count) || count < 1 || count > MAX_PER_BOT) throw new Error("Choose 1–20 accounts per bot.");
   if (Date.now() >= END) throw new Error("The GTA VI viewing window has ended.");
   return withFileLock("twitch-rewards", "create", async () => {
-    if (await Bot.countDocuments({}) >= 5) throw new Error("This section currently supports five dedicated bots.");
+    const existing = await Bot.find({}).lean();
+    if (existing.length >= MAX_BOTS || existing.reduce((n, b) => n + members(b).length, 0) + count > MAX_ACCOUNTS)
+      throw new Error("The dedicated Rewards farm has reached its account or bot limit.");
     const h = host();
+    await assertCapacity();
     await hosts.runShell(h, "docker image inspect " + hosts.shq(IMAGE) + " >/dev/null", { timeout: 15000 });
     const fence = require("./fleetIntegrity");
     const a = await fence.claimFence("managed"), b = await fence.claimFence("noclaim");
     const guard = require("./pristineReserve");
-    const id = new mongoose.Types.ObjectId();
-    const note = "twitch-reward-farm:" + id;
+    const id = new mongoose.Types.ObjectId(), note = "twitch-reward-farm:" + id, p = paths(id);
     const ledger = await require("./noclaimFleet").committedLedgers();
-    const account = await Pool.findOneAndUpdate(claimQuery([...new Set([...a.exclude, ...b.exclude])], await guard.farmClaimFilter(), ledger),
-      { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
-      { returnDocument: "after", sort: { lastCheckAt: -1 }, lean: true });
-    if (!account) throw new Error("No unused verified account is available above the pool reserve.");
-    guard.noteClaimed(account);
-    const p = paths(id);
+    const heldIds = existing.flatMap(b => members(b).map(m => String(m.poolAccountId)));
+    const heldTokens = await Pool.distinct("clientSecret", { _id: { $in: heldIds } });
+    const heldTwitchIds = new Set(existing.flatMap(b => members(b).map(m => String(m.twitchId))));
+    const excluded = new Set([...a.exclude, ...b.exclude, ...heldTokens]);
+    const accounts = [];
+    let validatingId = "";
     try {
-      const verified = await fetch("https://id.twitch.tv/oauth2/validate", {
-        headers: { Authorization: "OAuth " + account.clientSecret }, signal: AbortSignal.timeout(15000) });
-      const identity = verified.ok && await verified.json();
-      if (!identity || String(identity.user_id) !== String(account.twitchId) ||
-          String(identity.login).toLowerCase() !== account.username.toLowerCase()) throw new Error("Account identity mismatch.");
-      await Bot.create({ _id: id, adminId, poolAccountId: account._id, viewer: account.username.toLowerCase(),
-        twitchId: String(account.twitchId), desired: "stopped" });
-      await recordPoolUsage(account._id, { event: "claimed", actor: "twitch-reward-farm", game: "Grand Theft Auto VI", note });
-      const config = JSON.stringify(workerConfig(account));
+      while (accounts.length < count) {
+        const ids = [...ledger.poolIds, ...heldIds, ...rejectedIds, ...accounts.map(a => String(a._id))];
+        const q = claimQuery([...excluded], await guard.farmClaimFilter(), { logins: ledger.logins, poolIds: ids });
+        q.$and[0].twitchId.$nin = [...heldTwitchIds];
+        // Reuse idle claimed-only accounts before drawing on pristine order supply.
+        const account = await Pool.findOneAndUpdate(q,
+          { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
+          { returnDocument: "after", sort: { dropCount: -1, lastCheckAt: -1 }, lean: true });
+        if (!account) throw new Error("Not enough eligible idle accounts above the protected reserve.");
+        guard.noteClaimed(account);
+        accounts.push(account); excluded.add(account.clientSecret); heldTwitchIds.add(String(account.twitchId));
+        if (guard.isPristine(account)) {
+          const reserve = (await guard.farmGuard()).reserve;
+          const remaining = await Pool.countDocuments({ status: "available", clientSecret: { $gt: "" },
+            manualSold: { $ne: true }, unclaimedDropCount: { $not: { $gt: 0 } }, ...guard.PRISTINE_CONDITIONS });
+          if (remaining < reserve) throw new Error("Not enough eligible idle accounts above the protected reserve.");
+        }
+        validatingId = String(account._id);
+        await validateAccount(account);
+        validatingId = "";
+        await recordPoolUsage(account._id, { event: "claimed", actor: "twitch-reward-farm", game: "Grand Theft Auto VI", note });
+      }
+      const entries = accounts.map(a => ({ poolAccountId: a._id, viewer: a.username.toLowerCase(), twitchId: String(a.twitchId) }));
+      await Bot.create({ _id: id, adminId, ...entries[0], accounts: entries, desired: "stopped" });
+      const config = JSON.stringify(workerConfig(accounts));
       const script = hosts.guardedWriteScript(p.dir + "/Configuration/config.json", Buffer.byteLength(config),
         { mode: "600", mkdirs: [p.dir + "/Configuration", p.dir + "/logs"] });
       await hosts.runShell(h, script, { input: config, timeout: 25000 });
       await hosts.runShell(h, "docker create --name " + hosts.shq(p.container) +
-        " --restart unless-stopped --user 0:0 --memory 768m --cpus 1 -e INSIDE_DOCKER=true -v " +
+        " --restart unless-stopped --user 0:0 --memory 1024m --cpus 1 -e INSIDE_DOCKER=true -v " +
         hosts.shq(p.dir + "/Configuration") + ":/app/Configuration -v " + hosts.shq(p.dir + "/logs") +
         ":/app/logs " + hosts.shq(IMAGE) + " >/dev/null", { timeout: 25000 });
-      await Roster.updateOne({ adminId, viewer: account.username.toLowerCase() },
-        { $setOnInsert: { adminId, viewer: account.username.toLowerCase() } }, { upsert: true });
+      for (const entry of entries) await Roster.updateOne({ adminId, viewer: entry.viewer },
+        { $setOnInsert: { adminId, viewer: entry.viewer } }, { upsert: true });
       await Bot.updateOne({ _id: id }, { $set: { state: "stopped" } });
       return String(id);
     } catch (error) {
-      // Never return a login to the pool if its container might exist.
+      // A rejected identity must not be selected again by a later batch in this process.
+      if (validatingId) rejectedIds.add(validatingId);
       let absent = false;
       try {
         const r = await hosts.runShell(h, "if docker container inspect " + hosts.shq(p.container) +
           " >/dev/null 2>&1; then echo PRESENT; else docker info >/dev/null 2>&1 && echo ABSENT; fi", { timeout: 15000 });
         absent = r.stdout.trim() === "ABSENT";
-      } catch { /* keep the reservation */ }
+      } catch { /* retain claims when the container state is unknown */ }
       if (absent) {
         try {
           await hosts.runShell(h, "rm -f " + hosts.shq(p.dir + "/Configuration/config.json"), { timeout: 15000 });
-          // Drop the failed reservation's unique pointer before making the pool row reusable.
-          await Bot.deleteOne({ _id: id, poolAccountId: account._id });
-          await Pool.updateOne({ _id: account._id, status: "claimed", claimedNote: note },
-            { $set: { status: "available", claimedAt: null, claimedNote: "" } });
-          await recordPoolUsage(account._id, { event: "returned", actor: "twitch-reward-farm", note: "Reward bot provisioning failed before startup." });
-        } catch { absent = false; } // an uncertain cleanup must keep the account out of circulation
+          await Bot.deleteOne({ _id: id });
+          for (const account of accounts) {
+            await Pool.updateOne({ _id: account._id, status: "claimed", claimedNote: note },
+              { $set: { status: "available", claimedAt: null, claimedNote: "" } });
+            await recordPoolUsage(account._id, { event: "returned", actor: "twitch-reward-farm", note: "Reward bot creation failed before startup." });
+          }
+        } catch { absent = false; }
       }
-      await Bot.updateOne({ _id: id }, { $set: { state: "error", error: absent ? "Provisioning failed; account returned." : "Provisioning failed; account remains reserved." } });
-      throw new Error("Reward bot provisioning failed. Check this section's status before retrying.");
+      await Bot.updateOne({ _id: id }, { $set: { state: "error", error: absent ? "Creation failed; accounts returned." : "Creation failed; claims retained for review." } });
+      throw new Error("Reward bot creation failed: " + (/eligible idle/.test(error.message) ? error.message : "check account or host status before retrying."));
     }
   });
 }
@@ -112,7 +168,8 @@ async function action(adminId, id, verb) {
     if (!["start", "stop"].includes(verb)) throw new Error("Unknown bot action.");
     if (verb === "start") {
       if (Date.now() >= END) throw new Error("The viewing window has ended.");
-      if (!await Pool.exists({ _id: bot.poolAccountId, status: "claimed", claimedNote: "twitch-reward-farm:" + id }))
+      await assertCapacity();
+      if (await Pool.countDocuments({ _id: { $in: members(bot).map(m => m.poolAccountId) }, status: "claimed", claimedNote: "twitch-reward-farm:" + id }) !== members(bot).length)
         throw new Error("This bot's account reservation needs review.");
     }
     await hosts.runShell(host(), "docker " + verb + " " + hosts.shq(p.container) + " >/dev/null", { timeout: 30000 });
@@ -148,6 +205,11 @@ async function importCode(bot, receipt) {
       throw new Error("Code receipt conflicts with an existing saved code.");
   }
 }
+function accountActivity(bot, lines) {
+  return members(bot).map(member => ({ ...member,
+    ...parseActivity(String(lines).split("\n").filter(line =>
+      line.toLowerCase().includes("[twitchuser - " + member.viewer.toLowerCase() + "]")).join("\n")) }));
+}
 let running = false, timer;
 async function runOnce() {
   if (running || mongoose.connection.readyState !== 1) return;
@@ -160,17 +222,28 @@ async function runOnce() {
         if (Date.now() >= END && bot.desired === "running") { await action(bot.adminId, String(bot._id), "stop"); continue; }
         const inspected = await hosts.runShell(host(), "docker inspect --format '{{.State.Running}}' " + hosts.shq(p.container), { timeout: 15000 });
         const live = inspected.stdout.trim() === "true";
-        const logs = live ? await hosts.dockerLogs(host(), p.container, { tail: 100, since: "3m" }) : "";
-        const activity = parseActivity(typeof logs === "string" ? logs : logs.stdout || "");
+        const logs = live ? await hosts.dockerLogs(host(), p.container, { tail: Math.max(100, members(bot).length * 15), since: "3m" }) : "";
+        const raw = typeof logs === "string" ? logs : logs.stdout || "";
+        const activity = parseActivity(raw);
+        const accounts = accountActivity(bot, raw);
+        if (accounts.length > 1) {
+          activity.currentMinutes = accounts.every(a => a.currentMinutes != null)
+            ? Math.min(...accounts.map(a => a.currentMinutes)) : null;
+          activity.requiredMinutes = accounts.find(a => a.requiredMinutes != null)?.requiredMinutes ?? null;
+        }
         await Bot.updateOne({ _id: bot._id }, { $set: { state: live ? "running" : "stopped", ...activity,
-          checkedAt: new Date(), error: "" } });
+          ...(bot.accounts?.length ? { accounts } : {}), checkedAt: new Date(), error: "" } });
         // stdout is an internal SSH transport, never an HTTP response or log.
         if (live) {
           const exported = await hosts.runShell(host(), "docker exec -e TWITCH_REWARD_CODE_KEY_FILE=/app/Configuration/reward-code.key " +
             hosts.shq(p.container) + " dotnet TwitchDropsBot.Console.dll reward-codes export /app/Configuration/reward-codes", { timeout: 20000 });
           const rows = JSON.parse(exported.stdout);
-          if (!Array.isArray(rows) || rows.length > 50) throw new Error("Invalid receipt export.");
-          for (const receipt of rows) await importCode(bot, receipt);
+          if (!Array.isArray(rows) || rows.length > 200) throw new Error("Invalid receipt export.");
+          for (const receipt of rows) {
+            const member = members(bot).find(a => String(a.twitchId) === String(receipt.AccountId));
+            if (!member) throw new Error("Receipt account is not assigned to this bot.");
+            await importCode({ ...bot, viewer: member.viewer, twitchId: member.twitchId }, receipt);
+          }
         }
       } catch {
         await Bot.updateOne({ _id: bot._id }, { $set: { checkedAt: new Date(), error: "Worker check or code sync failed; account remains reserved." } });
@@ -183,7 +256,7 @@ function start() {
   timer = setInterval(() => runOnce().catch(() => {}), 60000); timer.unref();
 }
 async function status(adminId) {
-  const bots = await Bot.find({ adminId }, { poolAccountId: 0, __v: 0 }).sort({ createdAt: -1 }).lean();
-  return { bots, campaign: "GTA VI", endsAt: new Date(END), maxBots: 5 };
+  const bots = await Bot.find({ adminId }, { poolAccountId: 0, "accounts.poolAccountId": 0, __v: 0 }).sort({ createdAt: -1 }).lean();
+  return { bots, campaign: "GTA VI", endsAt: new Date(END), maxBots: MAX_BOTS, maxAccounts: MAX_ACCOUNTS, totalAccounts: bots.reduce((n,b) => n + members(b).length, 0) };
 }
-module.exports = { create, action, start, runOnce, status, workerConfig, claimQuery, parseActivity, importCode, IMAGE, BASE, HOST };
+module.exports = { create, action, start, runOnce, status, workerConfig, claimQuery, parseActivity, accountActivity, importCode, members, checkCapacity, IMAGE, BASE, HOST };
