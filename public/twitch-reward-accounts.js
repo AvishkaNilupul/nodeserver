@@ -426,9 +426,9 @@
   function showTab() {
     const active = inAccounts();
     el("accounts-view").hidden = !active;
-    el("campaign-view").hidden = active;
+    el("campaign-view").hidden = active || window.location.hash === "#farm";
     for (const [id, chosen] of [
-      ["tab-campaigns", !active],
+      ["tab-campaigns", !active && window.location.hash !== "#farm"],
       ["tab-accounts", active],
     ]) {
       const tab = el(id);

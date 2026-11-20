@@ -349,7 +349,7 @@
     const box = event.target.closest(".reward-checks input");
     if (box) saveReceipt(box.dataset.campaign, box.dataset.reward, box.checked);
   });
-  const campaignView = () => window.location.hash !== "#accounts";
+  const campaignView = () => !["#accounts", "#farm"].includes(window.location.hash);
   refresh.addEventListener("click", () => {
     if (campaignView()) load();
   });

@@ -11,6 +11,7 @@
     <script defer src="/admin-nav.js"></script>
     <script defer src="/twitch-rewards.js"></script>
     <script defer src="/twitch-reward-accounts.js"></script>
+    <script defer src="/twitch-reward-farm.js"></script>
   </head>
   <body>
     <aside class="nav" aria-label="Admin navigation">
@@ -32,6 +33,7 @@
       <nav class="ep-tabs" aria-label="Twitch Rewards views">
         <a class="ep-tab is-active" id="tab-campaigns" href="#overview" aria-controls="campaign-view" aria-current="page">Campaigns</a>
         <a class="ep-tab" id="tab-accounts" href="#accounts" aria-controls="accounts-view">Accounts &amp; codes</a>
+        <a class="ep-tab" id="tab-farm" href="#farm" aria-controls="farm-view">Farm bots</a>
       </nav>
       <section id="campaign-view" aria-label="Campaigns">
       <p id="notice" class="ep-note is-warn" role="status" hidden></p>
@@ -93,6 +95,13 @@
             </form>
           </details>
         </section>
+      </section>
+      <section id="farm-view" aria-labelledby="tab-farm" hidden>
+        <header class="section-head"><h2>GTA VI reward farm</h2><button type="button" class="btn btn-primary" id="reward-farm-add">Add one pool account</button></header>
+        <p>This farm uses dedicated accounts. Watch progress and badges are separate from surprise game-code awards. Issued codes sync to Accounts &amp; codes.</p>
+        <p id="reward-farm-summary" class="muted"></p>
+        <p id="reward-farm-status" role="status" class="muted"></p>
+        <div id="reward-farm-bots" class="reward-farm-bots"></div>
       </section>
     </main>
   </body>

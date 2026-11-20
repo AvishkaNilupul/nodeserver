@@ -407,3 +407,92 @@ test("issued codes are encrypted, counted once, scoped, and safely correctable",
     else process.env.CRED_SECRET = previous;
   }
 });
+
+test("dedicated reward farm endpoints are scoped, guarded and keep ordinary drop claims off", async (t) => {
+  t.mock.method(settings, "getRequire2fa", () => true);
+  const FarmBot = require("../models/TwitchRewardFarmBot");
+  const farm = require("../utils/twitchRewardFarm");
+  const row = await FarmBot.create({ adminId: "farm-owner", poolAccountId: new mongoose.Types.ObjectId(), viewer: "synthetic_farm", twitchId: "123", desired: "stopped" });
+  const own = await request("/api/twitch-rewards/farm", { admin: "farm-owner" });
+  assert.equal(own.status, 200);
+  const data = await own.json();
+  assert.equal(data.bots.length, 1);
+  assert.equal(data.bots[0].poolAccountId, undefined);
+  const other = await request("/api/twitch-rewards/farm", { admin: "other" });
+  assert.equal((await other.json()).bots.length, 0);
+  assert.equal((await request("/api/twitch-rewards/farm", { role: "admin" })).status, 403);
+  assert.equal((await request("/api/twitch-rewards/farm", { tfa: "no" })).status, 403);
+  const bad = await request("/api/twitch-rewards/farm/invalid/start", { method: "POST", body: {} });
+  assert.equal(bad.status, 400);
+  const cfg = farm.workerConfig({ username: "fixture", twitchId: "123", clientSecret: "fixture-only" });
+  assert.equal(cfg.TwitchSettings.ClaimDrops, false);
+  assert.equal(cfg.TwitchSettings.RewardCampaignsOnly, true);
+  assert.equal(cfg.TwitchSettings.CollectRewardCodes, true);
+  assert.equal(cfg.WebhookURL, "");
+  assert.deepEqual(farm.parseActivity("Token: never display this\nReward watch active; Twitch has not reported a timed progress counter."), {
+    activity: "Reward watch active; Twitch has not reported a timed progress counter.", currentMinutes: null, requiredMinutes: null });
+  assert.equal(farm.parseActivity("Reward watch progress reported by Twitch: 2/60 minutes (not a game-code count).").currentMinutes, 2);
+  const q = farm.claimQuery(["fenced"], { protect: "reserve" }, { logins: ["listed"], poolIds: [String(row.poolAccountId)] });
+  assert.deepEqual(q.$and[0].clientSecret.$nin, ["fenced"]);
+  assert.deepEqual(q.$and[0].usernameLower.$nin, ["listed"]);
+  assert.equal(q.$and[0]["soldGames.0"].$exists, false);
+  await FarmBot.deleteOne({ _id: row._id });
+});
+
+test("worker code import is encrypted, identity-checked, idempotent and visible in existing account totals", async (t) => {
+  const oldSecret = process.env.CRED_SECRET;
+  process.env.CRED_SECRET = randomBytes(32).toString("hex");
+  t.after(() => { if (oldSecret === undefined) delete process.env.CRED_SECRET; else process.env.CRED_SECRET = oldSecret; });
+  const farm = require("../utils/twitchRewardFarm");
+  const bot = { adminId: "import-owner", viewer: "fixture_import", twitchId: "123" };
+  const receipt = { AccountId: "123", Login: "fixture_import", Code: "SYNTHETIC-REWARD-KEY" };
+  await assert.rejects(farm.importCode(bot, { ...receipt, AccountId: "456" }), /mismatch/);
+  await farm.importCode(bot, receipt);
+  await farm.importCode(bot, receipt);
+  const rows = await Receipt.find({ adminId: bot.adminId }).select("+codeCipher +codeFingerprint").lean();
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0].codeCipher.startsWith("enc:v1:"));
+  assert.ok(!JSON.stringify(rows).includes(receipt.Code));
+  await assert.rejects(farm.importCode(bot, { ...receipt, Code: "DIFFERENT-REWARD-KEY" }), /conflicts/);
+  const r = await request("/api/twitch-rewards/accounts", { admin: bot.adminId });
+  const data = await r.json();
+  assert.equal(data.totals.codes, 1);
+  assert.equal(data.totals.farmed, 1);
+});
+
+test("dedicated bot creation reserves atomically, writes a private reward-only config, and stop keeps ownership", async (t) => {
+  const farm = require("../utils/twitchRewardFarm");
+  const hosts = require("../utils/botHosts");
+  const fences = require("../utils/fleetIntegrity");
+  const fleet = require("../utils/noclaimFleet");
+  const guard = require("../utils/pristineReserve");
+  const Pool = require("../models/AvailableAccount");
+  const FarmBot = require("../models/TwitchRewardFarmBot");
+  t.mock.method(hosts, "resolveHost", () => ({ id: "fixture", transport: "ssh" }));
+  let written;
+  t.mock.method(hosts, "runShell", async (_host, script, options) => {
+    if (options?.input) written = JSON.parse(options.input);
+    return { stdout: script.includes("echo ABSENT") ? "ABSENT" : "" };
+  });
+  t.mock.method(fences, "claimFence", async () => ({ exclude: [] }));
+  t.mock.method(fleet, "committedLedgers", async () => ({ logins: [], poolIds: [] }));
+  t.mock.method(guard, "farmClaimFilter", async () => ({}));
+  const nativeFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (url, options) => String(url).startsWith("https://id.twitch.tv/")
+    ? Promise.resolve({ ok: true, json: async () => ({ user_id: "123456", login: "fixture_reserved" }) })
+    : nativeFetch(url, options));
+  const account = await Pool.create({ username: "fixture_reserved", usernameLower: "fixture_reserved", twitchId: "123456",
+    clientSecret: "synthetic-only", status: "available", lastCheckStatus: "ok", dropCount: 0, unclaimedDropCount: 0 });
+  const id = await farm.create("fixture_owner");
+  const claimed = await Pool.findById(account._id).lean();
+  assert.equal(claimed.status, "claimed");
+  assert.equal(claimed.claimedNote, "twitch-reward-farm:" + id);
+  assert.equal(written.TwitchSettings.ClaimDrops, false);
+  assert.equal(written.TwitchSettings.RewardCampaignsOnly, true);
+  await farm.action("fixture_owner", id, "start");
+  await farm.action("fixture_owner", id, "stop");
+  assert.equal((await Pool.findById(account._id).lean()).status, "claimed");
+  await assert.rejects(farm.action("another_owner", id, "start"), /not found/);
+  await Pool.deleteOne({ _id: account._id });
+  await FarmBot.deleteOne({ _id: id });
+});

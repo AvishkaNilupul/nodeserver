@@ -82,3 +82,7 @@
   .reward-content { padding: 0 12px 12px; }
   .reward-art { height: 38px; width: 38px; }
 }
+
+.reward-farm-bots { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:16px; }
+.reward-farm-bots article { padding:20px; overflow-wrap:anywhere; }
+.reward-farm-bots .row { margin-top:16px; flex-wrap:wrap; }

@@ -23,6 +23,8 @@ router.use("/api/twitch-rewards", guards, (req, res, next) => {
   next();
 });
 
+router.use("/api/twitch-rewards", require("./twitchRewardFarmRoutes"));
+
 router.get("/api/twitch-rewards/campaigns", async (req, res) => {
   try {
     res.json(await getRewardCatalog());
