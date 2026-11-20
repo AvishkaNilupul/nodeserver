@@ -562,3 +562,19 @@ test("grouped reward bots keep per-account identity, reject partial ownership an
   assert.throws(() => farm.checkCapacity({ availableMb: 20000, load: 12, cpus: 6 }), /capacity/);
   await assert.rejects(farm.create("group-owner", { count: 21 }), /1–20/);
 });
+
+test("an exact reserve recheck rolls back a pristine claim even if a cached filter allowed it", async (t) => {
+  const farm=require("../utils/twitchRewardFarm"),h=require("../utils/botHosts"),Pool=require("../models/AvailableAccount"),Bot=require("../models/TwitchRewardFarmBot");
+  t.mock.method(h,"resolveHost",()=>({id:"fixture",transport:"ssh"}));
+  t.mock.method(h,"runShell",async(_h,script)=>({stdout:script.includes("# reward-capacity")?'{"availableMb":20000,"load":0,"cpus":6}':script.includes("echo ABSENT")?"ABSENT":""}));
+  t.mock.method(require("../utils/fleetIntegrity"),"claimFence",async()=>({exclude:[]}));
+  t.mock.method(require("../utils/noclaimFleet"),"committedLedgers",async()=>({logins:[],poolIds:[]}));
+  const guard=require("../utils/pristineReserve");
+  t.mock.method(guard,"farmClaimFilter",async()=>({}));
+  t.mock.method(guard,"farmGuard",async()=>({reserve:2}));
+  const rows=await Pool.create([1,2].map(n=>({username:`fixture_reserve_${n}`,usernameLower:`fixture_reserve_${n}`,twitchId:`3000${n}`,clientSecret:`fixture-only-${n}`,status:"available",lastCheckStatus:"ok",hasPassword:true,dropCount:0,unclaimedDropCount:0})));
+  await assert.rejects(farm.create("reserve-owner"),/protected reserve/);
+  assert.equal(await Pool.countDocuments({_id:{$in:rows.map(r=>r._id)},status:"available"}),2);
+  assert.equal(await Bot.countDocuments({adminId:"reserve-owner"}),0);
+  await Pool.deleteMany({_id:{$in:rows.map(r=>r._id)}});
+});
