@@ -123,6 +123,9 @@ function parseActivity(lines) {
 async function importCode(bot, receipt) {
   if (String(receipt.AccountId) !== bot.twitchId || String(receipt.Login).toLowerCase() !== bot.viewer)
     throw new Error("Code receipt account mismatch.");
+  if (receipt.CampaignId !== GTA_ID &&
+      !/(?:gta\s*(?:vi|6)|grand\s*theft\s*auto\s*(?:vi|6))/i.test(String(receipt.CampaignName || "") + " " + String(receipt.RewardName || "")))
+    throw new Error("Code receipt belongs to another campaign.");
   if (!/^[\x21-\x7e][\x20-\x7e]{2,158}[\x21-\x7e]$/.test(receipt.Code || "")) throw new Error("Invalid code receipt.");
   const key = { adminId: bot.adminId, viewer: bot.viewer, campaignId: GTA_GIVEAWAY.id, reward: GTA_GIVEAWAY.name };
   const fingerprint = crypto.createHmac("sha256", process.env.CRED_SECRET || process.env.SESSION_SECRET)
