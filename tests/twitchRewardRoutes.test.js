@@ -496,4 +496,17 @@ test("dedicated bot creation reserves atomically, writes a private reward-only c
   await assert.rejects(farm.action("another_owner", id, "start"), /not found/);
   await Pool.deleteOne({ _id: account._id });
   await FarmBot.deleteOne({ _id: id });
+  const failedAccount = await Pool.create({ username: "fixture_reserved", usernameLower: "fixture_reserved", twitchId: "123456",
+    clientSecret: "synthetic-only", status: "available", lastCheckStatus: "ok", dropCount: 0, unclaimedDropCount: 0 });
+  let removedConfig = false;
+  t.mock.method(hosts, "runShell", async (_host, script) => {
+    if (script.startsWith("docker create ")) throw Error("Synthetic provisioning failure");
+    if (script.startsWith("rm -f ")) removedConfig = true;
+    return { stdout: script.includes("echo ABSENT") ? "ABSENT" : "" };
+  });
+  await assert.rejects(farm.create("fixture_owner"), /provisioning failed/);
+  assert.equal(removedConfig, true);
+  assert.equal((await Pool.findById(failedAccount._id).lean()).status, "available");
+  assert.equal(await FarmBot.countDocuments({ poolAccountId: failedAccount._id }), 0);
+  await Pool.deleteOne({ _id: failedAccount._id });
 });

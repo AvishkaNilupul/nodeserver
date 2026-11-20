@@ -89,8 +89,16 @@ async function create(adminId) {
           " >/dev/null 2>&1; then echo PRESENT; else docker info >/dev/null 2>&1 && echo ABSENT; fi", { timeout: 15000 });
         absent = r.stdout.trim() === "ABSENT";
       } catch { /* keep the reservation */ }
-      if (absent) await Pool.updateOne({ _id: account._id, status: "claimed", claimedNote: note },
-        { $set: { status: "available", claimedAt: null, claimedNote: "" } });
+      if (absent) {
+        try {
+          await hosts.runShell(h, "rm -f " + hosts.shq(p.dir + "/Configuration/config.json"), { timeout: 15000 });
+          // Drop the failed reservation's unique pointer before making the pool row reusable.
+          await Bot.deleteOne({ _id: id, poolAccountId: account._id });
+          await Pool.updateOne({ _id: account._id, status: "claimed", claimedNote: note },
+            { $set: { status: "available", claimedAt: null, claimedNote: "" } });
+          await recordPoolUsage(account._id, { event: "returned", actor: "twitch-reward-farm", note: "Reward bot provisioning failed before startup." });
+        } catch { absent = false; } // an uncertain cleanup must keep the account out of circulation
+      }
       await Bot.updateOne({ _id: id }, { $set: { state: "error", error: absent ? "Provisioning failed; account returned." : "Provisioning failed; account remains reserved." } });
       throw new Error("Reward bot provisioning failed. Check this section's status before retrying.");
     }
