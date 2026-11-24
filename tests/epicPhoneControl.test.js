@@ -78,6 +78,67 @@ test('phone relay preserves server rate-limit retry time', async t => {
   const base=await serve(t,app),r=await fetch(base+'/phone/control/status',{headers:{Authorization:authorization}});
   assert.equal(r.status,429);assert.equal(r.headers.get('retry-after'),'123');assert.equal((await r.json()).retryAfterSeconds,123);
 });
+
+test('a paused security check cancels an outstanding shortcut launch and explains the handoff', async t => {
+  const fs = require('node:fs');
+  const vm = require('node:vm');
+  const html = fs.readFileSync(require.resolve('../extension/epic-claim-helper-android/phone/phone-panel.html'), 'utf8');
+  const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
+  let state = 'idle', jobState = 'pending';
+  const batch = {status: () => ({
+    state, total: 2, completed: 0, reason: 'Checkout did not finish (store.epicgames.com/purchase)',
+    jobs: [{game: 'Game A', state: jobState}],
+  })};
+  const f = fixture({batch});
+  const base = await serve(t, f.app);
+  const snapshot = () => fetch(base + '/api/epic/phone/claims', {headers: {Authorization: authorization}});
+
+  const intervals = new Map(), elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {style: {}, replaceChildren() {}});
+    return elements.get(id);
+  };
+  let starts = 0, lastResponse, pathAfterLoad;
+  const context = {
+    URLSearchParams, AbortSignal, location: {pathname: '/phone', search: ''},
+    history: {replaceState(_state, _title, url) { pathAfterLoad = url; }},
+    document: {visibilityState: 'visible', getElementById: element, createElement: () => ({append() {}}), addEventListener() {}},
+    setInterval(fn, ms) { intervals.set(fn, ms); return fn; },
+    clearInterval(fn) { intervals.delete(fn); },
+    fetch: async url => {
+      if (url.endsWith('/start')) starts++;
+      if (url.endsWith('/status')) return lastResponse;
+      return {ok: true, json: async () => ({success: true})};
+    },
+  };
+  const refresh = async () => {
+    lastResponse = await snapshot();
+    await element('refresh').onclick();
+  };
+  lastResponse = await snapshot();
+  vm.runInNewContext(script, context);
+  await new Promise(setImmediate);
+  assert.equal([...intervals.values()].filter(ms => ms === 1000).length, 2);
+  state = 'paused';
+  jobState = 'needs_captcha';
+  await refresh();
+  for (let i = 0; i < 5; i++) for (const [fn, ms] of intervals) if (ms === 1000) fn();
+  await new Promise(setImmediate);
+  assert.equal(starts, 0);
+  assert.equal(element('connection').textContent, 'Security check');
+  assert.match(element('message').textContent, /Game A/);
+  assert.match(element('message').textContent, /library/i);
+  assert.equal(element('start').textContent, 'Start a new run');
+
+  jobState = 'worker_unavailable';
+  await refresh();
+  assert.doesNotMatch(element('message').textContent, /security check/i);
+  context.location.pathname = '/connect';
+  lastResponse = await snapshot();
+  vm.runInNewContext(script, context);
+  await new Promise(setImmediate);
+  assert.equal(pathAfterLoad, '/connect');
+});
 test('dashboard waits out a status rate limit while local visibility beats continue', async()=>{
   const fs=require('node:fs'),vm=require('node:vm');
   const html=fs.readFileSync(require.resolve('../extension/epic-claim-helper-android/phone/phone-panel.html'),'utf8');
