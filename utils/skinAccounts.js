@@ -62,21 +62,53 @@ function available(s) {
   if (s.ownershipStatus !== "owned" || s.soldAt || s.state === "sold")
     fail("This pair is sold or quarantined and cannot be offered or farmed");
 }
-async function quarantine(s, message) {
+async function finishQuarantinePause(s) {
+  const offerId = s.pendingPauseOfferId;
+  if (!offerId) return;
+  const listing = await Listing.findById(s.listingId)
+    .select("externalId managedBy")
+    .lean();
+  if (
+    listing?.managedBy !== "skin-account" ||
+    listing.externalId !== offerId ||
+    s.remoteOfferId !== offerId
+  )
+    fail("The quarantined marketplace offer identity changed");
+  let offer = await eld.getAccountOffer(offerId);
+  if (offer?.offerState === "Active") {
+    await eld.pauseAccountOffer(offerId);
+    offer = await eld.getAccountOffer(offerId);
+  }
+  if (offer?.offerState !== "Paused")
+    fail("Marketplace quarantine pause could not be verified");
+  await patch(s, { pendingPauseOfferId: "" });
+}
+async function quarantine(
+  s,
+  message,
+  farmReadRecovery = "",
+  pauseNeeded = true,
+) {
   const next = await patch(
     s,
     {
       ownershipStatus: "quarantined",
+      farmReadRecovery,
+      pendingPauseOfferId: pauseNeeded ? s.remoteOfferId || "" : "",
       state: "attention",
       "farm.allowed": false,
       lastError: message,
     },
-    "quarantined",
+    s.ownershipStatus === "quarantined" && s.lastError === message
+      ? null
+      : "quarantined",
     message,
   );
-  await farm.stopFarm(next, message);
-  if (s.remoteOfferId)
-    await eld.pauseAccountOffer(s.remoteOfferId).catch(() => {});
+  try {
+    await finishQuarantinePause(next);
+  } finally {
+    await farm.stopFarm(next, message);
+  }
   return next;
 }
 async function markSkinSold(
@@ -90,6 +122,8 @@ async function markSkinSold(
     {
       state: "sold",
       ownershipStatus: "sold",
+      farmReadRecovery: "",
+      pendingPauseOfferId: "",
       soldAt,
       "farm.allowed": false,
       lastError: "",
@@ -341,6 +375,12 @@ async function remoteCheck(s) {
     Epic.findById(s.epicAccountId).lean(),
   ]);
   if (!l || !acc) fail("The linked Epic listing or account is missing");
+  if (
+    !s.remoteOfferId ||
+    l.externalId !== s.remoteOfferId ||
+    l.managedBy !== "skin-account"
+  )
+    fail("Marketplace offer identity changed; review before continuing");
   if (
     acc.sold ||
     l.accounts.some(
@@ -867,10 +907,7 @@ async function refreshUnlocked(key, { manual = false } = {}) {
     await farm.stopFarm(s, "Account sold");
     return publicRow(await get(key));
   }
-  if (s.ownershipStatus === "quarantined" && !manual) {
-    await farm.stopFarm(s, "Ownership needs review");
-    return publicRow(await get(key));
-  }
+  let remote, ownershipFailure;
   try {
     const [soldEpic, soldListing] = await Promise.all([
       Epic.findById(s.epicAccountId).select("sold").lean(),
@@ -888,6 +925,11 @@ async function refreshUnlocked(key, { manual = false } = {}) {
       await markSkinSold(s.epicAccountId);
       return publicRow(await get(key));
     }
+    await finishQuarantinePause(s);
+    if (s.ownershipStatus === "quarantined" && !s.farmReadRecovery && !manual) {
+      await farm.stopFarm(s, "Ownership needs review");
+      return publicRow(await get(key));
+    }
     const currentEpic = await assertEpicOwnership(s.epicAccountId, s.listingId);
     if (s.link?.status === "verified") {
       await require("./skinAccountLink").verify(s, currentEpic);
@@ -898,7 +940,6 @@ async function refreshUnlocked(key, { manual = false } = {}) {
       fail(
         "The last publish outcome is uncertain. Inspect the seller offer before attaching or retrying it",
       );
-    let remote;
     if (s.listingId) {
       remote = await remoteCheck(s);
       if (remote.sold) return publicRow(await get(key));
@@ -909,7 +950,10 @@ async function refreshUnlocked(key, { manual = false } = {}) {
       requireHold: true,
       requireScan: true,
     });
-    if (!own.ok) fail(own.reason);
+    if (!own.ok) {
+      ownershipFailure = own;
+      fail(own.reason);
+    }
     const canFarm =
       s.link?.status === "verified" &&
       !!s.inventory?.verifiedAt &&
@@ -932,6 +976,7 @@ async function refreshUnlocked(key, { manual = false } = {}) {
       // ownership but only the explicit Resume action restores availability.
       s = await patch(s, {
         state: "paused",
+        farmReadRecovery: "",
         mutation: {},
         lastError:
           "The interrupted update was recovered paused. Review its preview, then resume.",
@@ -979,6 +1024,10 @@ async function refreshUnlocked(key, { manual = false } = {}) {
       }
     }
     const farmResult = await farm.reconcileFarm(s);
+    if (farmResult?.locationFailure) {
+      ownershipFailure = farmResult;
+      fail(farmResult.reason);
+    }
     if (farmResult?.ok === false)
       s = await patch(s, {
         state: "attention",
@@ -986,6 +1035,11 @@ async function refreshUnlocked(key, { manual = false } = {}) {
         lastError:
           farmResult.reason || "The farm needs attention; inspect its status",
       });
+    else if (s.farmReadRecovery) {
+      if (s.farmReadRecovery === "resume" && canFarm && s.remoteOfferId)
+        await resumeVerified(s);
+      else await patch(s, { farmReadRecovery: "" });
+    }
     return publicRow(await get(key));
   } catch (e) {
     const message = safeError(e);
@@ -994,13 +1048,22 @@ async function refreshUnlocked(key, { manual = false } = {}) {
       await farm.stopFarm(fresh, "Account sold");
       return publicRow(fresh);
     }
-    if (
-      e.user &&
-      /ownership|another|already|no longer proven|identity changed|password needs|missing|reserved|leased|copied|different identity|disconnected/i.test(
-        message,
-      )
+    if (fresh.pendingPauseOfferId) {
+      await farm.stopFarm(fresh, message);
+    } else if (
+      ownershipFailure ||
+      (e.user &&
+        /ownership|another|already|no longer proven|identity changed|password needs|missing|reserved|leased|copied|different identity|disconnected/i.test(
+          message,
+        ))
     ) {
-      await quarantine(fresh, message);
+      let recovery = "";
+      if (ownershipFailure?.unreadableHomes && !fresh.mutation?.kind) {
+        if (fresh.farmReadRecovery) recovery = fresh.farmReadRecovery;
+        else if (fresh.ownershipStatus === "owned")
+          recovery = remote?.active ? "resume" : "recheck";
+      }
+      await quarantine(fresh, message, recovery, remote?.active !== false);
     } else {
       const fields = {
         state: "attention",
@@ -1008,6 +1071,7 @@ async function refreshUnlocked(key, { manual = false } = {}) {
         lastError: message,
         "inventory.scanError": message,
       };
+      if (fresh.mutation?.kind) fields.farmReadRecovery = "";
       const next = await patch(fresh, fields, "check-failed", message);
       await farm.stopFarm(next, message);
       if (fresh.mutation?.kind === "edit" && fresh.remoteOfferId)
@@ -1050,6 +1114,8 @@ async function pause(key) {
     let s = await get(key);
     if (!s.remoteOfferId) fail("No marketplace offer is attached");
     if (s.soldAt) fail("The account has already sold");
+    if (s.farmReadRecovery === "resume")
+      s = await patch(s, { farmReadRecovery: "recheck" });
     await eld.pauseAccountOffer(s.remoteOfferId);
     s = await patch(
       s,
@@ -1062,6 +1128,28 @@ async function pause(key) {
     return publicRow(await get(key));
   });
 }
+async function resumeVerified(s) {
+  available(s);
+  if (s.state === "attention" || s.mutation?.kind)
+    fail("Resolve the outstanding account check before resuming");
+  const p = content.content(s);
+  if (!p.canPublish) fail(p.problems.join("; "));
+  const r = await remoteCheck(s);
+  if (r.sold) return publicRow(await get(s._id));
+  if (!r.active) {
+    await eld.resumeAccountOffer(s.remoteOfferId);
+    const after = await remoteCheck(s);
+    if (after.sold) return publicRow(await get(s._id));
+    if (!after.active) fail("Marketplace resume could not be verified");
+  }
+  s = await patch(
+    s,
+    { state: "listed", farmReadRecovery: "", lastError: "" },
+    "resumed",
+    "Marketplace listing resumed after unsold-stock check",
+  );
+  return publicRow(s);
+}
 async function resume(key) {
   return sales._internals.withLock(async () => {
     let s = await get(key);
@@ -1069,22 +1157,7 @@ async function resume(key) {
     if (!s.remoteOfferId) fail("No offer is attached");
     await refreshUnlocked(key, { manual: true });
     s = await get(key);
-    available(s);
-    const p = content.content(s);
-    if (!p.canPublish) fail(p.problems.join("; "));
-    const r = await remoteCheck(s);
-    if (r.sold) fail("The account has sold");
-    await eld.resumeAccountOffer(s.remoteOfferId);
-    const after = await remoteCheck(s);
-    if (after.sold) return publicRow(await get(key));
-    if (!after.active) fail("Marketplace resume could not be verified");
-    s = await patch(
-      s,
-      { state: "listed", lastError: "" },
-      "resumed",
-      "Marketplace listing resumed after unsold-stock check",
-    );
-    return publicRow(s);
+    return resumeVerified(s);
   });
 }
 async function uploadCover(url) {
@@ -1435,9 +1508,15 @@ async function tick() {
     })
       .select("_id")
       .lean();
-    for (const row of rows)
-      await sales._internals.withLock(() => refreshUnlocked(row._id));
     worker.lastError = "";
+    for (const row of rows) {
+      try {
+        await sales._internals.withLock(() => refreshUnlocked(row._id));
+      } catch {
+        worker.lastError =
+          "A skin-account check could not finish and will be retried";
+      }
+    }
   } catch {
     worker.lastError =
       "Skin-account worker could not finish; reserved pairs will be rechecked";

@@ -20,6 +20,23 @@ const containerFor = (file) =>
       ? "twitchbotx" + Number(file.match(/\d+/)[0])
       : "";
 
+class FarmLocationError extends Error {
+  constructor(message, unreadableHomes = false) {
+    super(message);
+    this.unreadableHomes = unreadableHomes;
+  }
+}
+
+function checkFarmLocations(audit, protectedKeys) {
+  if (audit.matches.some((home) => protectedKeys.has(homeKey(home))))
+    throw new FarmLocationError("A matching account belongs to a rental stack");
+  if (audit.unreadable?.length)
+    throw new FarmLocationError(
+      "Cannot verify ownership while a farm location is unreadable",
+      true,
+    );
+}
+
 function derivePolicy(skin, now = new Date()) {
   if (!skin)
     return {
@@ -503,7 +520,15 @@ function createController(overrides = {}) {
         "The whole Twitch account is not exclusively held for this product",
       );
     }
-    const noClaim = await fleet.readNoclaimHomes();
+    let noClaim;
+    try {
+      noClaim = await fleet.readNoclaimHomes();
+    } catch {
+      throw new FarmLocationError(
+        "Cannot verify ownership while the no-claim farm is unreadable",
+        true,
+      );
+    }
     for (const [secret, home] of noClaim) {
       if (
         identity.secrets.has(secret) ||
@@ -526,13 +551,7 @@ function createController(overrides = {}) {
         ...opts,
       });
       const audit = await managedAudit(accountData.identity);
-      if (audit.unreadable?.length)
-        throw new Error(
-          "Cannot verify ownership while a farm location is unreadable",
-        );
-      const protectedKeys = await rentalKeys();
-      if (audit.matches.some((home) => protectedKeys.has(homeKey(home))))
-        throw new Error("A matching account belongs to a rental stack");
+      checkFarmLocations(audit, await rentalKeys());
       return {
         ok: true,
         homes: audit.matches.map((home) => ({
@@ -543,6 +562,8 @@ function createController(overrides = {}) {
     } catch (error) {
       return {
         ok: false,
+        unreadableHomes:
+          error instanceof FarmLocationError && error.unreadableHomes,
         reason: error.message || "Twitch ownership could not be verified",
       };
     }
@@ -556,13 +577,8 @@ function createController(overrides = {}) {
     const { primary, identity } = accountData;
     await checkOwnership(skin, accountData);
     let audit = await managedAudit(identity);
-    if (audit.unreadable?.length)
-      throw new Error(
-        "Cannot prove a single home while a farm location is unreadable",
-      );
     const protectedKeys = await rentalKeys();
-    if (audit.matches.some((home) => protectedKeys.has(homeKey(home))))
-      throw new Error("A matching account belongs to a rental stack");
+    checkFarmLocations(audit, protectedKeys);
     let home = skin.farm?.configFile
       ? {
           host: skin.farm.host,
@@ -684,8 +700,7 @@ function createController(overrides = {}) {
     // Atomic-write hooks can reject an enabled entry (e.g. no-claim fence).
     // Check the actual written files, not the desired JSON or BotAccount mirror.
     audit = await managedAudit(identity);
-    if (audit.unreadable?.length)
-      throw new Error("Farm placement cannot be verified");
+    checkFarmLocations(audit, await rentalKeys());
     const active = audit.matches.filter((candidate) =>
       usersOf(candidate.cfg).some(
         (user) => matchesUser(user, identity) && user.Enabled !== false,
@@ -803,6 +818,9 @@ function createController(overrides = {}) {
           ok: false,
           status: "attention",
           reason: message,
+          locationFailure: error instanceof FarmLocationError,
+          unreadableHomes:
+            error instanceof FarmLocationError && error.unreadableHomes,
           stopped: !!stopped.ok,
         };
       }

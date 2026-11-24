@@ -66,6 +66,13 @@ const schema = new mongoose.Schema(
       enum: ["owned", "quarantined", "sold"],
       default: "owned",
     },
+    // Only the worker's own pause of a previously active offer can be undone.
+    farmReadRecovery: {
+      type: String,
+      enum: ["", "recheck", "resume"],
+      default: "",
+    },
+    pendingPauseOfferId: { type: String, default: "" },
     soldAt: { type: Date, default: null },
     holdTag: { type: String, required: true },
     heldAt: { type: Date, default: Date.now },

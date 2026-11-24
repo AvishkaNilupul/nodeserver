@@ -29,6 +29,7 @@ let memory,
   base,
   sequence = 0;
 let ownershipError = "",
+  unreadableHomes = false,
   scanError = null,
   scanOverride = null,
   linkError = null,
@@ -47,7 +48,7 @@ const profile = {
 farm.validateOwnership = async (skin, options) => {
   calls.push({ event: "ownership", skinId: String(skin._id), options });
   return ownershipError
-    ? { ok: false, reason: ownershipError }
+    ? { ok: false, reason: ownershipError, unreadableHomes }
     : { ok: true, homes: [] };
 };
 farm.reconcileFarm = async (skin) => {
@@ -376,6 +377,7 @@ test.beforeEach(async () => {
   remotes.clear();
   inventoryByToken.clear();
   ownershipError = "";
+  unreadableHomes = false;
   scanError = null;
   scanOverride = null;
   linkError = null;
@@ -843,6 +845,101 @@ test("wrong Twitch scan identity never confirms a link and refresh stops farming
   assert.equal(skin.farm.allowed, false);
   assert.equal(skin.ownershipStatus, "quarantined");
   assert.equal(skin.twitchId, p.bot.twitchId);
+});
+
+async function interruptFarmRead(p) {
+  ownershipError =
+    "Cannot verify ownership while a farm location is unreadable";
+  unreadableHomes = true;
+  return service._internals.refreshUnlocked(p.skinId);
+}
+
+test("scheduled checks pause through an outage and resume the same unsold offer once", async () => {
+  const p = await verifiedAdoption();
+  const remote = remotes.get(p.offerId);
+  await Skin.updateOne({ _id: p.skinId }, { $set: { "farm.enabled": true } });
+  const before = copy(remote.entries);
+  const held = await interruptFarmRead(p);
+  assert.equal(held.ownershipStatus, "quarantined");
+  assert.equal(held.farm.allowed, false);
+  assert.equal(remote.offer.offerState, "Paused");
+  calls.length = 0;
+  await service.tick();
+  assert.ok(!calls.some((c) => ["resume", "farm"].includes(c.event)));
+  ownershipError = "";
+  farmError = "Farm reload pending";
+  await service.tick();
+  assert.equal(remote.offer.offerState, "Paused");
+  await assert.rejects(service.resume(p.skinId), /outstanding account check/);
+  farmError = "";
+  await service.tick();
+  await service.tick();
+  const s = await Skin.findById(p.skinId).lean();
+  assert.equal(s.state, "listed");
+  assert.equal(s.ownershipStatus, "owned");
+  assert.equal(s.farm.status, "farming");
+  assert.equal(s.farmReadRecovery, "");
+  assert.equal(calls.filter((c) => c.event === "resume").length, 1);
+  assert.deepEqual(remote.entries, before);
+  assert.equal(remote.offer.offerState, "Active");
+});
+
+test("pre-existing and operator pauses survive recovery", async () => {
+  for (const alreadyPaused of [true, false]) {
+    const p = await verifiedAdoption();
+    if (alreadyPaused) await service.pause(p.skinId);
+    await interruptFarmRead(p);
+    if (!alreadyPaused) await service.pause(p.skinId);
+    ownershipError = "";
+    calls.length = 0;
+    const row = await service._internals.refreshUnlocked(p.skinId);
+    assert.equal(row.state, "paused");
+    assert.equal(remotes.get(p.offerId).offer.offerState, "Paused");
+    assert.ok(!calls.some((c) => c.event === "resume"));
+  }
+});
+
+test("a sale, missing stock, changed delivery or confirmed conflict cancels outage recovery", async () => {
+  for (const kind of ["sold", "stock", "delivery", "renter"]) {
+    const p = await verifiedAdoption();
+    await interruptFarmRead(p);
+    ownershipError = "";
+    unreadableHomes = false;
+    if (kind === "sold")
+      await Epic.updateOne({ _id: p.epic._id }, { $set: { sold: true } });
+    if (kind === "stock") remotes.get(p.offerId).entries = [];
+    if (kind === "delivery")
+      remotes.get(p.offerId).entries[0].emailPassword = "changed";
+    if (kind === "renter")
+      ownershipError = "This Twitch identity is assigned to a renter";
+    calls.length = 0;
+    const row = await service._internals.refreshUnlocked(p.skinId);
+    assert.equal(row.ownershipStatus, kind === "sold" ? "sold" : "quarantined");
+    assert.equal((await Skin.findById(p.skinId)).farmReadRecovery, "");
+    ownershipError = "";
+    await service._internals.refreshUnlocked(p.skinId);
+    assert.ok(!calls.some((c) => ["resume", "farm"].includes(c.event)));
+  }
+});
+
+test("a failed marketplace pause is retried before ownership recovery", async () => {
+  const p = await verifiedAdoption();
+  const pause = eld.pauseAccountOffer;
+  try {
+    eld.pauseAccountOffer = async () => {
+      throw new Error("Temporary marketplace outage");
+    };
+    await assert.rejects(interruptFarmRead(p), /Temporary marketplace outage/);
+    assert.equal(
+      (await Skin.findById(p.skinId)).pendingPauseOfferId,
+      p.offerId,
+    );
+  } finally {
+    eld.pauseAccountOffer = pause;
+  }
+  await service.tick();
+  assert.equal(remotes.get(p.offerId).offer.offerState, "Paused");
+  assert.equal((await Skin.findById(p.skinId)).pendingPauseOfferId, "");
 });
 
 test("failed farm reconciliation is surfaced as product attention and clears its farming exemption", async () => {

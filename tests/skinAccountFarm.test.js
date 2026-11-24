@@ -566,6 +566,29 @@ test("read-only enrollment preflight blocks buyer, no-claim, tenant and inaccess
   }
 });
 
+test("an unreadable home is retryable only when there is no known ownership conflict", async () => {
+  const unreadable = ["remote/config_02.json"];
+  const r = rig({ unreadable });
+  const outage = await r.controller.validateOwnership(r.row);
+  assert.equal(outage.ok, false);
+  assert.equal(outage.unreadableHomes, true);
+  const late = await r.controller.reconcileFarm(r.row);
+  assert.equal(late.locationFailure, true);
+  assert.equal(late.unreadableHomes, true);
+  const noClaim = rig({ noClaimError: true });
+  assert.equal(
+    (await noClaim.controller.validateOwnership(noClaim.row)).unreadableHomes,
+    true,
+  );
+  const conflict = rig({
+    unreadable,
+    stacks: [{ host: "local", file: "config_01.json" }],
+  });
+  const result = await conflict.controller.validateOwnership(conflict.row);
+  assert.match(result.reason, /rental stack/);
+  assert.ok(!result.unreadableHomes);
+});
+
 test("failed persistence still stops the known isolated farm, without claiming global success", async () => {
   const r = rig({
     skin: {
