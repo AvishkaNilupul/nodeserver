@@ -26,7 +26,7 @@
           <p class="quick-intro">One click opens the stream in the selected profiles and starts their automatic chat.</p>
           <div class="quick-channel-row"><label for="quick-channel">Channel<select id="quick-channel"><option value="aviskarex">aviskarex · Favorite</option></select></label><button class="subtle" id="quick-refresh" type="button">Refresh live channels</button></div>
           <p class="field-note quick-channel-detail" id="quick-channel-detail">aviskarex is pinned here for quick access.</p>
-          <div class="quick-lookup-row"><label for="quick-lookup">Another channel<input id="quick-lookup" type="text" placeholder="Twitch channel login" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="25" pattern="[A-Za-z0-9_]{3,25}"></label><button id="quick-find" type="button">Find channel</button></div>
+          <details class="quick-other-channel"><summary>Find another channel</summary><div class="quick-lookup-row"><label for="quick-lookup">Channel login<input id="quick-lookup" type="text" placeholder="Twitch channel login" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="25" pattern="[A-Za-z0-9_]{3,25}"></label><button id="quick-find" type="button">Find channel</button></div></details>
           <fieldset class="quick-accounts"><legend>Use these accounts</legend><div class="quick-account-options">
             <label><input id="quick-account-primary" type="radio" name="quick-accounts" value="primary" checked><span>Main account<small id="quick-primary-label">Waiting for account</small></span></label>
             <label><input id="quick-account-test" type="radio" name="quick-accounts" value="test"><span>Second account<small id="quick-test-label">Waiting for account</small></span></label>
