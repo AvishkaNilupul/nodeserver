@@ -111,7 +111,7 @@ const watch = new WatchSession(chrome, settings, {
 });
 
 async function refreshChannelInfo(s) {
-  if (channelInfo?.channel === s.allowedChannel && Date.now() - channelInfo.checkedAt < 60_000) return channelInfo;
+  if (channelInfo?.channel === s.allowedChannel && Date.now() - channelInfo.checkedAt < 30_000) return channelInfo;
   if (metadataFlight) { await metadataFlight; return channelInfo?.channel === s.allowedChannel ? channelInfo : null; }
   const epoch = operationEpoch;
   metadataFlight = (async () => {

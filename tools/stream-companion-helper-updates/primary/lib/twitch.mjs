@@ -191,7 +191,7 @@ export class TwitchChat {
     await this.ensureIdentity(account);
     if (generation !== this.generation) throw new Error('Channel check cancelled.');
     const key = `${account}:${channel}`, cached = this.channelCache.get(key);
-    if (cached && this.now() - cached.checkedAt < 60_000) return structuredClone(cached);
+    if (cached && this.now() - cached.checkedAt < 45_000) return structuredClone(cached);
     const users = await this.api(`users?login=${encodeURIComponent(channel)}`);
     const user = users.data?.[0];
     if (!id(user?.id) || user.login !== channel) throw new Error('Twitch channel was not found.');
