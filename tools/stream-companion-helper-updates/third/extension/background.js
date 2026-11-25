@@ -506,6 +506,9 @@ async function pauseLocal(expectedGeneration) {
 
 async function controlBrowserState() {
   const s = await settings();
+  // Refresh native playback at the existing bridge cadence. A slow renderer
+  // must not delay Stop or heartbeats; the next heartbeat reports actual evidence.
+  if (!s.paused) void watch.poll().catch(e => setActivity('error', e.message));
   const [tracked, claims, stored, access] = await Promise.all([watch.state(), drops.state(), chrome.storage.local.get('sent'),
     chrome.permissions?.contains?.({ permissions: ['scripting'], origins: ['https://www.twitch.tv/*'] }) || false]);
   return { settings: s, chat: { ...chat, digest: digest(chat.messages) }, watch: tracked, activity, drops: claims,
