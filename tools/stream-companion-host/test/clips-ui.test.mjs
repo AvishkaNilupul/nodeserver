@@ -166,3 +166,46 @@ test('a definitive authorization start failure is shown without a pending lock e
   const v = view(); draw(v, f.c); assert.equal(v.nodes['clips-enable-primary'].disabled, false); assert.equal(v.nodes['clips-check-primary'].hidden, true);
   assert.match(f.c.getState().error, /not accepted/); assert.ok(!f.c.getState().error.includes('Unreadable'));
 });
+
+test('all seven finite clip creator subsets save and create with exact account identities', async () => {
+  const choices = { primary: ['primary'], test: ['test'], third: ['third'], both: ['primary', 'test'],
+    'primary-third': ['primary', 'third'], 'test-third': ['test', 'third'], all: ['primary', 'test', 'third'] };
+  for (const [selection, accountIds] of Object.entries(choices)) {
+    const f = fixture({ data: snapshot({ accounts: [account(), account('test'), account('third', { account: 'third_account' })] }) });
+    await f.c.refresh(); f.c.edit('selection', selection);
+    assert.equal(await f.c.save(), true); assert.equal(await f.c.create(), true);
+    const posts = f.calls.filter(call => call.options.method === 'POST');
+    assert.equal(posts.length, 2); assert.deepEqual(posts[0].body.accountIds, accountIds);
+    assert.deepEqual(posts[1].body.accountIds, accountIds); assert.ok(posts[1].path.endsWith('/api/clips/create'));
+    f.c.stop();
+  }
+});
+
+test('saved third pairs roundtrip without silently becoming the original two accounts', async () => {
+  for (const [accountIds, selection, label] of [
+    [['primary', 'third'], 'primary-third', 'Main + third'], [['third', 'test'], 'test-third', 'Second + third'],
+    [['primary', 'test'], 'both', 'Main + second'], [['primary', 'test', 'third'], 'all', 'All three']
+  ]) {
+    const f = fixture({ data: snapshot({ settings: { enabled: true, channel: 'aviskarex', accountIds }, accounts: [account(), account('test'), account('third')] }) });
+    await f.c.refresh(); assert.equal(f.c.getState().form.selection, selection);
+    const v = view(); draw(v, f.c); assert.match(v.nodes['clips-saved'].textContent, new RegExp(label.replace('+', '\\+')));
+    assert.equal(await f.c.save(), true);
+    assert.deepEqual(new Set(f.calls.find(call => call.options.method === 'POST').body.accountIds), new Set(accountIds));
+    f.c.stop();
+  }
+});
+
+test('third permission and clip history stay bound to the third account', async () => {
+  const data = snapshot({ accounts: [account(), account('test'), account('third', { account: 'third_account', authorized: false })],
+    jobs: [{ requestId: 'third-clip', accountId: 'third', channel: 'aviskarex', source: 'manual', createdAt: at, state: 'confirmed', url: 'https://clips.twitch.tv/ThirdClip' }] });
+  const f = fixture({ data, post: () => reply({ ok: true, pending: true, userCode: 'THIRD777', verificationUrl: 'https://www.twitch.tv/activate', pollAfterMs: 5000 }) });
+  await f.c.refresh(); const v = view(); draw(v, f.c);
+  assert.equal(v.nodes['clips-name-third'].textContent, '@third_account'); assert.equal(v.nodes['clips-enable-third'].disabled, false);
+  assert.match(v.nodes['clips-history'].textContent, /Third account/);
+  assert.equal(await f.c.authorize('third'), true);
+  const writes = f.calls.filter(call => call.options.method === 'POST'); assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].body, { accountId: 'third', action: 'start' });
+  draw(v, f.c); assert.match(v.nodes['clips-auth-third'].textContent, /third_account/); assert.match(v.nodes['clips-auth-third'].textContent, /THIRD777/);
+  assert.equal(v.nodes['clips-auth-primary'].textContent, ''); assert.equal(v.nodes['clips-auth-test'].textContent, '');
+  f.c.stop();
+});

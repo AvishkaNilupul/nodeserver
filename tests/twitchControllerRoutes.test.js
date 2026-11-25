@@ -467,3 +467,26 @@ test('clips retain CSRF masking, exact creator selection, finite authorization a
   for (const path of ['/api/clips/create/', '/api/clips/create?x=1', '/api/clips/%63reate', '/api/clips/delete']) assert.equal((await post(c, path, {}, token)).status, 404);
   assert.equal(f.seen.length, before);
 });
+
+test('third companion routes and all finite creator subsets preserve protected boundaries', async t => {
+  const f = await fixture(t), c = await f.client(), token = await nonce(c);
+  assert.equal((await c.request('/accounts/third')).status, 200);
+  for (const [path, body] of [
+    ['/api/accounts/third/browser', { requestId: 'third-browser' }],
+    ['/api/accounts/third/command', command('stop')],
+    ['/api/clips/settings', { enabled: false, channel: 'aviskarex', accountIds: ['primary', 'test', 'third'] }],
+    ['/api/clips/create', { requestId: 'third-moment', channel: 'aviskarex', accountIds: ['primary', 'third'] }],
+    ['/api/clips/authorization', { accountId: 'third', action: 'start' }]
+  ]) {
+    const before = f.seen.length;
+    assert.equal((await post(c, path, body, 'wrong')).status, 403);
+    assert.equal(f.seen.length, before);
+    assert.equal((await post(c, path, body, token)).status, 200);
+    assert.deepEqual(f.seen.at(-1).body, body);
+    assert.equal(f.seen.length, before + 1);
+  }
+  const before = f.seen.length;
+  for (const ids of [['primary', 'test', 'third', 'fourth'], ['third', 'third'], ['fourth']]) assert.equal((await post(c, '/api/clips/settings', { enabled: true, channel: 'aviskarex', accountIds: ids }, token)).status, 400);
+  assert.equal((await post(c, '/api/accounts/fourth/command', command('stop'), token)).status, 404);
+  assert.equal(f.seen.length, before);
+});

@@ -194,3 +194,18 @@ test('delivery history is newest first for numeric or ISO times regardless of so
   }
   assert.equal(records[0].text, 'newer numeric attempt', 'rendering does not reorder the source snapshot');
 });
+
+test('the third profile has a fixed path, separate card and separate detail identity', async () => {
+  for (const basePath of ['', '/admin/stream-companion']) assert.equal(accountFromPath(`${basePath}/accounts/third`, basePath), 'third');
+  assert.equal(accountFromPath('/accounts/third/extra'), null); assert.equal(accountFromPath('/accounts/%74hird'), null);
+  const third = instance({ id: 'third', name: 'Third companion', account: 'third_account' });
+  const c = controller(async () => reply(snapshot({ instances: [instance(), instance({ id: 'test', name: 'Second companion', account: 'second_account' }), third] })));
+  await c.refresh(); const v = view(); renderAccounts(v, c.getState(), { now: at, canCommand: c.canCommand });
+  assert.equal(v.nodes['account-cards'].children.length, 3); assert.match(v.nodes['account-cards'].textContent, /Third companion/);
+  const links = v.nodes['account-cards'].children.map(card => card.children.at(-1).attributes.href);
+  assert.deepEqual(links, ['/accounts/primary', '/accounts/test', '/accounts/third']);
+  renderAccounts(v, c.getState(), { id: 'third', now: at, canCommand: c.canCommand });
+  assert.equal(v.nodes['page-eyebrow'].textContent, 'Third profile'); assert.equal(v.nodes['page-title'].textContent, 'Third companion');
+  assert.match(v.nodes['page-description'].textContent, /third_account/);
+  assert.equal(v.nodes['accounts-overview'].hidden, true); assert.equal(v.nodes['account-detail'].hidden, false);
+});

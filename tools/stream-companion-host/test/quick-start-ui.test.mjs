@@ -9,8 +9,8 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const account = id => ({ id, name: id === 'primary' ? 'Main companion' : 'Second companion', account: `${id}_account`, available: true, authorized: true, connected: false,
   settings: { paused: true, autoReply: false, autoResume: id === 'test', chatMode: 'mentions', replySource: id === 'test' ? 'ai' : 'local' },
   browser: { online: true, lastSeenAt: new Date(at).toISOString() }, permissions: { playbackAccess: true }, controls: { pending: null, recent: [] } });
-function fixture({ before, post, directory, onState } = {}) {
-  const instances = [account('primary'), account('test')], calls = []; let paused = true, count = 0, reads = 0;
+function fixture({ before, post, directory, onState, third = false } = {}) {
+  const instances = [account('primary'), account('test'), ...(third ? [account('third')] : [])], calls = []; let paused = true, count = 0, reads = 0;
   const fetchImpl = async (path, options) => {
     const body = options.body ? JSON.parse(options.body) : undefined, call = { path, options, body }; calls.push(call);
     if (before) await before(call, { instances, reads: ++reads });
@@ -18,7 +18,7 @@ function fixture({ before, post, directory, onState } = {}) {
     if (options.method === 'GET' && path.endsWith('/api/accounts')) return response({ updatedAt: new Date(at).toISOString(), csrfToken: 'test-csrf', instances });
     if (options.method === 'GET' && path.endsWith('/api/status')) return response({ updatedAt: new Date(at).toISOString(), csrfToken: 'test-csrf', paused });
     if (path.endsWith('/api/control')) { paused = body.paused; return response({ ok: true, paused }); }
-    const match = /\/api\/accounts\/(primary|test)\/command$/.exec(path);
+    const match = /\/api\/accounts\/(primary|test|third)\/command$/.exec(path);
     if (match && options.method === 'POST') {
       const command = { ...body, id: `command-${++count}`, state: 'queued', createdAt: at, expiresAt: at + 90000 };
       const custom = post ? await post(call, command) : undefined;
@@ -175,4 +175,45 @@ test('a pending channel lookup blocks Start and unexpected shared diagnostics st
   const privateFailure = fixture({ before: call => { if (call.path.endsWith('/api/status')) throw Error('secret diagnostic must stay private'); } });
   assert.equal(await privateFailure.controller.quickStart(), false); assert.equal(privateFailure.posts().length, 0);
   assert.doesNotMatch(privateFailure.controller.getState().quick.error, /secret diagnostic/);
+});
+
+
+test('third and all quick choices target exactly their finite profiles while both keeps the original pair', async () => {
+  for (const [selection, expected] of [['third', ['third']], ['all', ['primary', 'test', 'third']], ['both', ['primary', 'test']]]) {
+    const f = fixture({ third: true }); await f.controller.refresh(); f.controller.editQuick('selection', selection);
+    assert.equal(await f.controller.quickStart(), true);
+    assert.deepEqual(f.posts().filter(call => call.body.action === 'start').map(call => call.path.split('/').at(-2)), expected);
+    assert.equal(f.posts().filter(call => call.path.endsWith('/api/control')).length, 1);
+    assert.deepEqual(f.controller.getState().quick.targetIds, expected);
+  }
+});
+
+test('an unselected third profile must be held and known before resuming the original pair', async () => {
+  for (const patch of [{ available: false }, { settings: { paused: false, autoReply: true } },
+    { controls: { pending: { action: 'start', state: 'running', expiresAt: at + 90000 }, recent: [] } }]) {
+    const f = fixture({ third: true }); Object.assign(f.instances[2], patch);
+    f.controller.editQuick('selection', 'both');
+    assert.equal(await f.controller.quickStart(), false); assert.equal(f.posts().length, 0);
+    assert.match(f.controller.getState().quick.error, /other account/);
+  }
+});
+
+test('an unavailable selected third prevents every all-three Start', async () => {
+  const f = fixture({ third: true }); f.instances[2].available = false;
+  f.controller.editQuick('selection', 'all'); assert.equal(await f.controller.quickStart(), false);
+  assert.equal(f.posts().length, 0);
+});
+
+test('Stop all cancels a third-profile sequence before later Starts or shared Resume', async () => {
+  const release = deferred(); let enteredResolve;
+  const entered = new Promise(resolve => { enteredResolve = resolve; });
+  const f = fixture({ third: true, post: async call => {
+    if (call.body.action === 'start' && call.path.endsWith('/primary/command')) { enteredResolve(); await release.promise; }
+  } });
+  await f.controller.refresh(); f.controller.editQuick('selection', 'all');
+  const start = f.controller.quickStart(); await entered;
+  const stopped = f.controller.quickStop(); release.resolve(); await stopped; assert.equal(await start, false);
+  assert.deepEqual(f.posts().filter(call => call.body.action === 'stop').map(call => call.path.split('/').at(-2)), ['primary', 'test', 'third']);
+  assert.equal(f.posts().some(call => call.body.action === 'start' && call.path.endsWith('/third/command')), false);
+  assert.equal(f.posts().some(call => call.path.endsWith('/api/control')), false);
 });

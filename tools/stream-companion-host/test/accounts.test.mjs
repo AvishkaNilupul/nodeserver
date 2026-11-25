@@ -151,3 +151,25 @@ test('clip adapter rejects mismatched creates, invalid status and foreign grant 
   await assert.rejects(f.manager.clipCreate('primary', { requestId: 'clip-1', channel: 'test_channel', streamId: '12345', source: 'manual' }), /did not confirm/);
   await assert.rejects(f.manager.clipAuthorization('primary', { action: 'start' }), /invalid authorization/);
 });
+
+test('third uses only its fixed paired helper and all three private values are redacted', async () => {
+  const configs3 = { ...configs, 'third.json': { extensionId: 'c'.repeat(32), pairingToken: 'third-pairing-secret-value', apiKey: 'third-private-api-value' } };
+  const calls = [], thirdSource = { id: 'third', configPath: 'third.json' };
+  const manager = createAccountManager({ sources: [...sources, thirdSource], now: () => NOW,
+    readFileImpl: async path => JSON.stringify(configs3[String(path)]), fetchImpl: async (url, init) => {
+      const parsed = new URL(url), config = parsed.port === '8796' ? configs3['third.json'] : parsed.port === '8793' ? configs3['test.json'] : configs3['primary.json'];
+      assert.equal(init.headers.Authorization, `Bearer ${config.pairingToken}`);
+      assert.equal(init.headers.Origin, `chrome-extension://${config.extensionId}`); calls.push({ url, input: JSON.parse(init.body) });
+      if (parsed.pathname.endsWith('/command')) return Response.json({ ok: true, command: job(JSON.parse(init.body)) });
+      const value = status(parsed.port === '8796' ? 'third_account' : parsed.port === '8793' ? 'second_account' : 'first_account');
+      value.error = Object.values(configs3).flatMap(x => Object.values(x)).join(' ');
+      return Response.json(value);
+    } });
+  const result = await manager.snapshot(); assert.deepEqual(result.instances.map(x => x.id), ['primary', 'test', 'third']);
+  assert.equal(result.instances[2].account, 'third_account');
+  for (const value of Object.values(configs3).flatMap(x => Object.values(x))) assert.equal(JSON.stringify(result).includes(value), false);
+  const command3 = { ...start, requestId: 'third-start-fixture' }; await manager.command('third', command3);
+  assert.equal(calls.at(-1).url, 'http://127.0.0.1:8796/api/control/command'); assert.deepEqual(calls.at(-1).input, command3);
+  assert.throws(() => createAccountManager({ sources: [{ ...thirdSource, port: 8793 }] }), /Unsupported account source/);
+  assert.throws(() => createAccountManager({ sources: [{ id: 'fourth', configPath: 'third.json', port: 8796 }] }), /Unsupported account source/);
+});

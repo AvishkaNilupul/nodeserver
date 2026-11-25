@@ -11,7 +11,7 @@ const LOCAL_ORIGIN = "http://127.0.0.1:8795";
 const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const STATIC = new Map([
   ["/", "text/html"], ["/accounts", "text/html"],
-  ["/accounts/primary", "text/html"], ["/accounts/test", "text/html"],
+  ["/accounts/primary", "text/html"], ["/accounts/test", "text/html"], ["/accounts/third", "text/html"],
   ["/app.js", "text/javascript"], ["/accounts.js", "text/javascript"],
   ["/controller-path.js", "text/javascript"],
   ["/clips.js", "text/javascript"], ["/clips.css", "text/css"],
@@ -19,8 +19,8 @@ const STATIC = new Map([
 ]);
 const DATA = new Set(["/api/status", "/api/accounts", "/api/channels", "/api/clips"]);
 const CHANNEL_LOOKUP = /^\/api\/channels\/[a-z0-9_]{3,25}$/;
-const COMMAND = /^\/api\/accounts\/(primary|test)\/command$/;
-const BROWSER = /^\/api\/accounts\/(primary|test)\/browser$/;
+const COMMAND = /^\/api\/accounts\/(primary|test|third)\/command$/;
+const BROWSER = /^\/api\/accounts\/(primary|test|third)\/browser$/;
 const CLIP = /^\/api\/clips\/(create|settings|authorization)$/;
 const object = (x) => !!x && typeof x === "object" && !Array.isArray(x);
 const exact = (x, keys) => object(x) && Object.keys(x).length === keys.length && keys.every((key) => Object.hasOwn(x, key));
@@ -51,8 +51,8 @@ function validCommand(body) {
 }
 
 function validClipAction(path, body) {
-  const ids = value => Array.isArray(value) && value.length >= 1 && value.length <= 2
-    && new Set(value).size === value.length && value.every(id => ["primary", "test"].includes(id));
+  const ids = value => Array.isArray(value) && value.length >= 1 && value.length <= 3
+    && new Set(value).size === value.length && value.every(id => ["primary", "test", "third"].includes(id));
   const channel = value => typeof value === "string" && /^[a-z0-9_]{3,25}$/.test(value);
   if (path.endsWith("/settings")) return exact(body, ["enabled", "channel", "accountIds"])
     && typeof body.enabled === "boolean" && channel(body.channel) && ids(body.accountIds);
@@ -60,7 +60,7 @@ function validClipAction(path, body) {
     && typeof body.requestId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(body.requestId)
     && channel(body.channel) && ids(body.accountIds);
   if (path.endsWith("/authorization")) return exact(body, ["accountId", "action"])
-    && ["primary", "test"].includes(body.accountId) && ["start", "poll"].includes(body.action);
+    && ["primary", "test", "third"].includes(body.accountId) && ["start", "poll"].includes(body.action);
   return false;
 }
 

@@ -1,20 +1,23 @@
 import { basePathFromModule, controllerBasePath, controllerPath, requestNetwork, networkTitle, bindControllerLifecycle } from './controller-path.js';
 
-const IDS = ['primary', 'test'];
+const IDS = ['primary', 'test', 'third'];
+const CREATORS = Object.freeze({ primary: ['primary'], test: ['test'], third: ['third'], both: ['primary', 'test'], 'primary-third': ['primary', 'third'], 'test-third': ['test', 'third'], all: ['primary', 'test', 'third'] });
+const CREATOR_LABELS = { primary: 'Main account', test: 'Second account', third: 'Third account', both: 'Main + second', 'primary-third': 'Main + third', 'test-third': 'Second + third', all: 'All three' };
+const accountLabel = id => CREATOR_LABELS[id] || 'Account';
 const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const LOGIN = /^[a-z0-9_]{3,25}$/;
 const array = value => Array.isArray(value) ? value : [];
 const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const stamp = value => Number.isFinite(value) ? value : typeof value === 'string' ? Date.parse(value) : NaN;
 const text = (value, max = 400) => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max) : '';
-const creatorIds = selection => selection === 'both' ? [...IDS] : IDS.includes(selection) ? [selection] : [];
-const selectionFor = ids => ids.length === 2 ? 'both' : ids[0] || 'primary';
+const creatorIds = selection => [...(CREATORS[selection] || [])];
+const selectionFor = ids => Object.keys(CREATORS).find(key => CREATORS[key].length === ids.length && CREATORS[key].every(id => ids.includes(id))) || '';
 
 export function clipUrl(value) {
   try {
     const url = new URL(value);
     return url.protocol === 'https:' && url.hostname === 'clips.twitch.tv' && !url.port && !url.username && !url.password
-      && !url.search && !url.hash && /^\/[A-Za-z0-9_-]{1,200}$/.test(url.pathname) ? url.href : '';
+      && !url.search && !url.hash && /^\/[A-Za-z0-9_-]{1,256}$/.test(url.pathname) ? url.href : '';
   } catch { return ''; }
 }
 export function clipAuthorizationUrl(value) {
@@ -56,8 +59,8 @@ export function createClipsController({ fetchImpl = globalThis.fetch, now = Date
         state.data = data; state.receivedAt = now(); state.network = stamp(data.updatedAt) < now() - 20000 || stamp(data.updatedAt) > now() + 5000 ? 'stale' : 'online';
         if (!state.form.dirty) {
           if (LOGIN.test(data.settings.channel || '')) state.form.channel = data.settings.channel;
-          const ids = array(data.settings.accountIds).filter(id => IDS.includes(id));
-          if (ids.length && new Set(ids).size === ids.length) state.form.selection = selectionFor(ids);
+          const ids = array(data.settings.accountIds);
+          if (ids.length && new Set(ids).size === ids.length && ids.every(id => IDS.includes(id))) state.form.selection = selectionFor(ids);
           state.form.enabled = data.settings.enabled === true;
         }
         for (const id of IDS) {
@@ -75,7 +78,7 @@ export function createClipsController({ fetchImpl = globalThis.fetch, now = Date
   }
   function edit(key, value) {
     if (key === 'channel') state.form.channel = String(value).trim().toLowerCase();
-    else if (key === 'selection' && ['primary', 'test', 'both'].includes(value)) state.form.selection = value;
+    else if (key === 'selection' && Object.hasOwn(CREATORS, value)) state.form.selection = value;
     else if (key === 'enabled' && typeof value === 'boolean') state.form.enabled = value;
     else return;
     state.form.dirty = true; state.form.revision++; emit();
@@ -187,13 +190,13 @@ export function renderClips(view, state, { now = Date.now(), canMutate = () => f
   n['clips-create'].disabled = !canCreate(); n['clips-save'].disabled = !canMutate();
   n['clips-create'].textContent = state.busy === 'create' ? 'Recording clip…' : 'Clip moment';
   n['clips-save'].textContent = state.busy === 'settings' ? 'Saving…' : 'Save clip settings';
-  n['clips-saved'].textContent = form.dirty ? 'Unsaved clip settings.' : data ? `${data.settings?.enabled ? 'Auto clips on' : 'Auto clips off'} · #${text(data.settings?.channel, 25)} · ${array(data.settings?.accountIds).length === 2 ? 'Either account' : data.settings?.accountIds?.[0] === 'test' ? 'Second account' : 'Main account'}` : 'Waiting for clip settings.';
+  n['clips-saved'].textContent = form.dirty ? 'Unsaved clip settings.' : data ? `${data.settings?.enabled ? 'Auto clips on' : 'Auto clips off'} · #${text(data.settings?.channel, 25)} · ${CREATOR_LABELS[selectionFor(array(data.settings?.accountIds))] || 'Unverified selection'}` : 'Waiting for clip settings.';
   n['clips-detector'].textContent = state.network !== 'online' ? 'Detector status is unverified until the controller reconnects.' : text(data?.detector?.reason) || 'Waiting for detector status.';
   n['clips-feedback'].textContent = state.feedback; n['clips-feedback'].hidden = !state.feedback;
   n['clips-error'].textContent = state.error || (state.network === 'offline' ? 'The clip controller is unavailable. Showing last reported values; no request will be replayed.' : ''); n['clips-error'].hidden = !n['clips-error'].textContent;
   for (const id of IDS) {
     const account = array(data?.accounts).find(value => value?.id === id), auth = state.authorizations[id];
-    n[`clips-name-${id}`].textContent = account?.account ? `@${text(account.account, 25)}` : id === 'primary' ? 'Main account' : 'Second account';
+    n[`clips-name-${id}`].textContent = account?.account ? `@${text(account.account, 25)}` : accountLabel(id);
     n[`clips-permission-${id}`].textContent = state.network !== 'online' ? 'Permission status unverified.' : account?.authorized ? 'Clip permission granted.' : account?.available !== true ? 'Account helper unavailable.' : account?.canAuthorize ? 'Clip permission required. Ready to enable.' : 'Stop this account before enabling clips.';
     n[`clips-enable-${id}`].disabled = !canAuthorize(id) || auth?.pending === true;
     n[`clips-enable-${id}`].textContent = state.busy === `authorize-${id}` ? 'Checking Twitch…' : account?.authorized ? 'Clips enabled' : 'Enable clips';
@@ -208,7 +211,7 @@ export function renderClips(view, state, { now = Date.now(), canMutate = () => f
         if (auth.error) parts.push(view.el('p', text(auth.error)));
       } else if (auth) {
         if (auth.userCode && clipAuthorizationUrl(auth.verificationUrl)) {
-          parts.push(view.el('p', `Approve clip creation for ${account?.account ? `@${text(account.account, 25)}` : id === 'primary' ? 'the main account' : 'the second account'} on Twitch using this code:`));
+          parts.push(view.el('p', `Approve clip creation for ${account?.account ? `@${text(account.account, 25)}` : accountLabel(id).toLowerCase()} on Twitch using this code:`));
           parts.push(view.el('code', text(auth.userCode, 32)));
         } else parts.push(view.el('p', 'Preparing Twitch approval details…'));
         const url = clipAuthorizationUrl(auth.verificationUrl);
@@ -228,7 +231,7 @@ export function renderClips(view, state, { now = Date.now(), canMutate = () => f
       heading.append(view.el('strong', `#${text(job.channel, 25) || 'channel'}`), view.el('span', jobState(job.state), 'pill'));
       row.append(heading);
       const at = stamp(job.createdAt), time = Number.isFinite(at) ? new Date(at).toLocaleString() : 'Time unavailable';
-      row.append(view.el('p', `${job.account ? `@${text(job.account, 25)}` : job.accountId === 'test' ? 'Second account' : 'Main account'} · ${job.source === 'automatic' ? 'Chat reaction detected' : 'Clip moment'} · ${time}`, 'clips-job-meta'));
+      row.append(view.el('p', `${job.account ? `@${text(job.account, 25)}` : accountLabel(job.accountId)} · ${job.source === 'automatic' ? 'Chat reaction detected' : 'Clip moment'} · ${time}`, 'clips-job-meta'));
       if (job.reason) row.append(view.el('p', text(job.reason), 'clips-job-meta'));
       if (job.error) row.append(view.el('p', text(job.error), 'clips-job-meta'));
       if (job.state === 'unknown') row.append(view.el('p', 'Twitch has not confirmed the outcome. This clip will not be created again automatically.', 'clips-job-meta'));

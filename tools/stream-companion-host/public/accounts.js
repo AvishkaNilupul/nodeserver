@@ -3,7 +3,12 @@ import { controllerBasePath, basePathFromModule, controllerPath, responseError, 
 const POLL_MS = 2500;
 const HOST_FRESH_MS = 10000;
 const BRIDGE_FRESH_MS = 45000;
-const IDS = new Set(['primary', 'test']);
+const IDS = new Set(['primary', 'test', 'third']);
+const QUICK_SELECTIONS = Object.freeze({ primary: ['primary'], test: ['test'], third: ['third'], both: ['primary', 'test'], all: ['primary', 'test', 'third'] });
+const quickIds = selection => [...(QUICK_SELECTIONS[selection] || [])];
+const companionName = id => ({ primary: 'Main companion', test: 'Second companion', third: 'Third companion' })[id] || 'Companion';
+const accountName = id => ({ primary: 'Main account', test: 'Second account', third: 'Third account' })[id] || 'Account';
+const ordinal = id => ({ primary: 'main', test: 'second', third: 'third' })[id] || 'selected';
 const ACTIONS = new Set(['start', 'stop', 'watch', 'settings', 'draft', 'send', 'drops-enable', 'drops-disable', 'drops-check']);
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'expired']);
 const ACTION_LABELS = { start: 'Start companion', stop: 'Stop companion', watch: 'Open stream', settings: 'Save settings', draft: 'Create draft', send: 'Send reviewed message', 'drops-enable': 'Enable drop claims', 'drops-disable': 'Disable drop claims', 'drops-check': 'Check drops' };
@@ -27,7 +32,7 @@ export function age(value, now = Date.now()) {
 export function accountFromPath(pathname, basePath = '') {
   const base = controllerBasePath(basePath);
   if (typeof pathname !== 'string' || base && !pathname.startsWith(`${base}/`)) return null;
-  const match = /^\/accounts\/(primary|test)\/?$/.exec(pathname.slice(base.length));
+  const match = /^\/accounts\/(primary|test|third)\/?$/.exec(pathname.slice(base.length));
   return match ? match[1] : null;
 }
 function hostFresh(state, now) { return state.network === 'online' && fresh(state.data?.updatedAt, HOST_FRESH_MS, now); }
@@ -55,7 +60,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     channelsAt: null, loading: false, busy: false, action: '', error: '', message: '', outcomes: {}, targetIds: [], targetChannel: ''
   } };
   let flight = null, timer = null, channelFlight = null, quickRun = 0;
-  const startVersions = { primary: 0, test: 0 };
+  const startVersions = { primary: 0, test: 0, third: 0 };
   const emit = () => onState(state);
   const formFor = id => state.forms[id] ||= { initialized: false, channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '', textRevision: 0, dirty: {} };
   function reconcile() {
@@ -156,7 +161,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
           if (stopped()) return false;
           if (ready(id) || launched.has(id) || instanceFor(state, id).browser?.canOpen !== true || initiallyFresh.get(id) && Math.max(waited, now() - capturedAt) < browserGraceMs) continue;
           launched.add(id);
-          progress(`Opening ${id === 'primary' ? 'the main' : 'the second'} account’s browser…`);
+          progress(`Opening the ${ordinal(id)} account’s browser…`);
           const response = await fetchImpl(controllerPath(basePath, `/api/accounts/${id}/browser`), { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(6000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify({ requestId: requestId() }) });
           if (stopped()) return false;
           if (!response.ok) throw quickFailure('The selected browser could not be opened. Check the Mac and try again; no companion was started.');
@@ -242,10 +247,10 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     if (key === 'text') form.textRevision++;
     emit();
   }
-  const selectedIds = () => state.quick.selection === 'both' ? ['primary', 'test'] : [state.quick.selection];
+  const selectedIds = () => quickIds(state.quick.selection);
   function editQuick(key, value) {
     if (state.quick.busy) return;
-    if (key === 'selection' && ['primary', 'test', 'both'].includes(value)) state.quick.selection = value;
+    if (key === 'selection' && Object.hasOwn(QUICK_SELECTIONS, value)) state.quick.selection = value;
     else if (key === 'channel' && validChannel(value)) state.quick.channel = value.toLowerCase();
     else if (key === 'lookup') state.quick.lookup = String(value).slice(0, 25);
     else return;
@@ -290,7 +295,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (typeof shared?.paused !== 'boolean' || !fresh(shared.updatedAt, HOST_FRESH_MS, now())) throw quickFailure('Shared coordination status is not current. Refresh and try again.');
       return shared;
     };
-    const resumeBlocked = () => ['primary', 'test'].filter(id => !ids.includes(id)).some(id => {
+    const resumeBlocked = () => [...IDS].filter(id => !ids.includes(id) && (id !== 'third' || instanceFor(state, id))).some(id => {
       const instance = instanceFor(state, id), pending = instance?.controls?.pending, local = state.operations[id];
       return instance?.available !== true || active(pending, now()) && pending.action === 'start'
         || local?.action === 'start' && (local.transport || active(local.command, now()))
@@ -302,7 +307,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (!hostFresh(state, now()) || ids.some(id => !canCommand(id, 'start'))) throw quickFailure('One of the selected accounts is not ready. Open its controls below to check the browser, access or pending operation.');
       let shared = await sharedStatus();
       if (generation !== quickRun) return false;
-      if (shared.paused && resumeBlocked()) throw quickFailure('The other account is running, starting or unavailable. Stop it first or select Both accounts before resuming shared coordination.');
+      if (shared.paused && resumeBlocked()) throw quickFailure('The other account is running, starting or unavailable. Stop it first or include it in your selection before resuming shared coordination.');
       if (!await prepareBrowsers(ids, { cancelled: () => generation !== quickRun, onProgress: message => { q.message = message; } })) {
         if (generation === quickRun) q.message = 'Browser startup was cancelled. No Start was sent.';
         return false;
@@ -312,7 +317,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       for (const id of ids) {
         if (generation !== quickRun) return false;
         const instance = instanceFor(state, id);
-        q.message = `Requesting ${instance?.name || (id === 'primary' ? 'the main account' : 'the second account')}…`; emit();
+        q.message = `Requesting ${instance?.name || accountName(id)}…`; emit();
         const accepted = await command(id, 'start', { channel, chatMode: 'participate', replySource: instance.settings?.replySource === 'ai' ? 'ai' : 'local', autoResume: instance.settings?.autoResume === true }, { prepared: true });
         if (generation !== quickRun) return false;
         const operation = state.operations[id];
@@ -324,7 +329,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       shared = await sharedStatus();
       if (generation !== quickRun) return false;
       if (!hostFresh(state, now()) || ids.some(id => !['queued', 'running', 'completed'].includes(state.operations[id]?.command?.state))) throw quickFailure('An account start is no longer confirmed. Shared coordination was not resumed; check the outcomes below.');
-      if (shared.paused && resumeBlocked()) throw quickFailure('The other account changed or became unavailable. Shared coordination was not resumed; check both accounts before trying again.');
+      if (shared.paused && resumeBlocked()) throw quickFailure('The other account changed or became unavailable. Shared coordination was not resumed; check all account states before trying again.');
       if (shared.paused) {
         q.message = 'Resuming shared coordination…'; emit();
         const response = await fetchImpl(controllerPath(basePath, '/api/control'), { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify({ paused: false }) });
@@ -367,7 +372,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     stop() { if (timer !== null) clearIntervalImpl(timer); timer = null; } };
 }
 
-const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed','quick-channel','quick-channel-status','quick-channel-detail','quick-refresh','quick-lookup','quick-find','quick-account-primary','quick-account-test','quick-account-both','quick-primary-label','quick-test-label','quick-start','quick-stop','quick-error','quick-message','quick-outcomes','quick-outcome-heading'];
+const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed','quick-channel','quick-channel-status','quick-channel-detail','quick-refresh','quick-lookup','quick-find','quick-account-primary','quick-account-test','quick-account-both','quick-account-third','quick-account-all','quick-primary-label','quick-test-label','quick-third-label','quick-start','quick-stop','quick-error','quick-message','quick-outcomes','quick-outcome-heading'];
 export function createAccountsView(document) {
   const nodes = Object.fromEntries(NODE_IDS.map(id => [id, document.getElementById(id)]));
   function el(tag, content, className) { const node = document.createElement(tag); if (content !== undefined) node.textContent = String(content); if (className) node.className = className; return node; }
@@ -421,12 +426,13 @@ function renderQuick(view, state, now, canCommand) {
   n['quick-channel-detail'].textContent = current?.title ? `${current.title}${current.game ? ` · ${current.game}` : ''}` : known && current?.isLive === false ? 'The stream will open in the selected profiles. Automatic chat waits until the channel is live.' : 'Choose aviskarex, another live channel, or enter a channel login below.';
   n['quick-primary-label'].textContent = text(instanceFor(state, 'primary')?.account, 'Main account');
   n['quick-test-label'].textContent = text(instanceFor(state, 'test')?.account, 'Second account');
-  for (const value of ['primary', 'test', 'both']) { n[`quick-account-${value}`].checked = q.selection === value; n[`quick-account-${value}`].disabled = q.busy; }
+  n['quick-third-label'].textContent = text(instanceFor(state, 'third')?.account, 'Third account');
+  for (const value of Object.keys(QUICK_SELECTIONS)) { n[`quick-account-${value}`].checked = q.selection === value; n[`quick-account-${value}`].disabled = q.busy; }
   for (const key of ['quick-channel', 'quick-lookup', 'quick-find', 'quick-refresh']) n[key].disabled = q.busy || q.loading;
   n['quick-refresh'].textContent = q.loading ? 'Checking channels…' : 'Refresh live channels';
-  const ids = q.selection === 'both' ? ['primary', 'test'] : [q.selection];
+  const ids = quickIds(q.selection);
   n['quick-start'].disabled = q.busy || q.loading || !validChannel(q.channel) || ids.some(id => !canCommand(id, 'start'));
-  n['quick-start'].textContent = q.busy && q.action === 'start' ? 'Starting selected accounts…' : q.selection === 'both' ? 'Open stream & start both' : 'Open stream & start chat';
+  n['quick-start'].textContent = q.busy && q.action === 'start' ? 'Starting selected accounts…' : q.selection === 'all' ? 'Open stream & start all three' : q.selection === 'both' ? 'Open stream & start main + second' : 'Open stream & start chat';
   n['quick-stop'].disabled = q.busy && q.action === 'stop' || !ids.some(id => state.browserPreparations?.[id] || canCommand(id, 'stop'));
   n['quick-stop'].textContent = q.busy && q.action === 'stop' ? 'Stopping…' : 'Stop selected';
   n['quick-error'].textContent = q.error || ''; n['quick-error'].hidden = !q.error;
@@ -435,7 +441,7 @@ function renderQuick(view, state, now, canCommand) {
   n['quick-outcome-heading'].hidden = !q.targetIds.length;
   n['quick-outcomes'].replaceChildren(...q.targetIds.map(id => {
     const outcome = q.outcomes[id] || {}, local = state.operations[id], current = local && local.requestId === outcome.requestId ? local.command : outcome;
-    const row = view.el('li'), name = text(instanceFor(state, id)?.account, id === 'primary' ? 'Main companion' : 'Second companion');
+    const row = view.el('li'), name = text(instanceFor(state, id)?.account, companionName(id));
     const status = current.state === 'not_requested' ? 'Not requested' : commandState(current);
     row.append(view.el('strong', name), pill(view, `${outcome.action === 'stop' ? 'Stop' : 'Start'} · ${status}`, commandTone(current)));
     if (current.state !== 'not_requested') row.append(view.el('p', commandReason(current), 'field-note'));
@@ -444,10 +450,10 @@ function renderQuick(view, state, now, canCommand) {
 }
 function renderCards(view, state, now) {
   const cards = [];
-  for (const id of ['primary', 'test']) {
+  for (const id of IDS) {
     const instance = instanceFor(state, id), stale = !hostFresh(state, now), playing = playback(instance, now, stale);
     const card = view.el('article', undefined, 'account-card'), heading = view.el('div', undefined, 'card-heading'), title = view.el('div');
-    title.append(view.el('h2', text(instance?.name, id === 'primary' ? 'Main companion' : 'Second companion')), view.el('p', text(instance?.account, 'Account not available'), 'account-login'));
+    title.append(view.el('h2', text(instance?.name, companionName(id))), view.el('p', text(instance?.account, 'Account not available'), 'account-login'));
     const session = sessionStatus(instance, state, now);
     heading.append(title, pill(view, session.title, session.tone));
     const details = view.el('dl', undefined, 'card-details');
@@ -539,8 +545,8 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n['accounts-overview'].hidden = !!id; n['account-detail'].hidden = !id;
   if (!id) { renderQuick(view, state, now, canCommand); renderCards(view, state, now); return; }
   const instance = instanceFor(state, id), form = state.forms[id] || { channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '' };
-  n['page-eyebrow'].textContent = id === 'primary' ? 'Primary profile' : 'Second profile';
-  n['page-title'].textContent = text(instance?.name, id === 'primary' ? 'Main companion' : 'Second companion');
+  n['page-eyebrow'].textContent = id === 'primary' ? 'Primary profile' : id === 'test' ? 'Second profile' : 'Third profile';
+  n['page-title'].textContent = text(instance?.name, companionName(id));
   n['page-description'].textContent = instance?.account ? `@${instance.account} · controls stay with this account’s browser profile.` : 'Waiting for this account to report its status.';
   const preparation = state.browserPreparations?.[id];
   const reason = preparation?.message || (online ? bridgeReason(instance, now) : connectionMessage(state.network, state.basePath, !!state.data) || 'Account data is not current. Waiting for the host.');
@@ -590,7 +596,7 @@ if (globalThis.document?.querySelector('[data-accounts-app]')) {
     n['quick-find'].addEventListener('click', () => void controller.channels(controller.getState().quick.lookup));
     n['quick-lookup'].addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void controller.channels(controller.getState().quick.lookup); } });
     n['quick-refresh'].addEventListener('click', () => void controller.channels());
-    for (const value of ['primary', 'test', 'both']) n[`quick-account-${value}`].addEventListener('change', () => { if (n[`quick-account-${value}`].checked) controller.editQuick('selection', value); });
+    for (const value of Object.keys(QUICK_SELECTIONS)) n[`quick-account-${value}`].addEventListener('change', () => { if (n[`quick-account-${value}`].checked) controller.editQuick('selection', value); });
     n['quick-start'].addEventListener('click', () => void controller.quickStart());
     n['quick-stop'].addEventListener('click', () => void controller.quickStop());
     void controller.channels();

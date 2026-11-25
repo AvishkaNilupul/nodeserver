@@ -162,13 +162,13 @@ test('transient status failure removes stale permission and holds automatic crea
   await assert.rejects(f.c.create(request()), { status: 409 }); assert.equal(f.calls.length, 0);
 });
 
-test('snapshot and both clip status reads run concurrently within one timeout window', async t => {
+test('snapshot and all fixed clip status reads run concurrently within one timeout window', async t => {
   const f = fixture(); t.after(() => f.cleanup());
   const barrier = deferred(), started = [], originalSnapshot = f.accounts.snapshot, originalStatus = f.accounts.clipStatus;
   f.accounts.snapshot = async () => { started.push('snapshot'); await barrier.promise; return originalSnapshot(); };
   f.accounts.clipStatus = async id => { started.push(id); await barrier.promise; return originalStatus(id); };
   const ticking = f.c.tick(); await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(started, ['snapshot', 'primary', 'test']);
+  assert.deepEqual(started, ['snapshot', 'primary', 'test', 'third']);
   barrier.resolve(); await ticking;
 });
 

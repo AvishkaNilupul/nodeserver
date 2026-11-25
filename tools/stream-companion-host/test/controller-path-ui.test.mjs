@@ -46,11 +46,13 @@ test('HTTP module paths derive only the local root or fixed trusted mount', () =
 test('account parsing and generated links stay beneath the selected mount', async () => {
   assert.equal(accountFromPath(`${basePath}/accounts/test`, basePath), 'test');
   assert.equal(accountFromPath(`${basePath}/accounts/primary`, basePath), 'primary');
+  assert.equal(accountFromPath(`${basePath}/accounts/third`, basePath), 'third');
+  assert.equal(accountFromPath(`${basePath}/accounts/fourth`, basePath), null);
   for (const path of ['/accounts/test', '/admin/stream-companion-other/accounts/test', `${basePath}/accounts/%74est`, `${basePath}/accounts/test/anything`]) assert.equal(accountFromPath(path, basePath), null);
   const controller = createAccountsController({ ...atNow, basePath, fetchImpl: async () => response(account()) }); await controller.refresh();
   const v = createAccountsView(documentStub()); renderAccounts(v, controller.getState(), { now });
   const links = descend(v.nodes['account-cards']).filter(node => node.tagName === 'a').map(node => node.attributes.href);
-  assert.deepEqual(links, [`${basePath}/accounts/primary`, `${basePath}/accounts/test`]);
+  assert.deepEqual(links, [`${basePath}/accounts/primary`, `${basePath}/accounts/test`, `${basePath}/accounts/third`]);
 });
 
 test('both controller factories use same-origin session credentials and prefixed exact APIs', async () => {

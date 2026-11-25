@@ -131,3 +131,17 @@ test('an expired request record can be opened again only by a later explicit req
   const f = fixture(); await f.launcher.open('primary', 'old-request'); f.advance(120000);
   assert.equal(f.calls.length, 1); await f.launcher.open('primary', 'old-request'); assert.equal(f.calls.length, 2);
 });
+
+test('third mapping is optional for old installations and only a distinct fixed third profile may open', async () => {
+  const old = fixture(); assert.equal(old.launcher.available('third'), false);
+  await assert.rejects(old.launcher.open('third', 'old-map-third'), sanitized); assert.equal(old.calls.length, 0);
+  const triple = { ...profiles, third: 'Profile 23' };
+  assert.deepEqual(await loadBrowserProfiles({ readFileImpl: async () => JSON.stringify(triple) }), triple);
+  const f = fixture({ profiles: triple }); assert.equal(f.launcher.available('third'), true);
+  await f.launcher.open('third', 'third-only');
+  assert.deepEqual(f.calls[0].args, ['--profile-directory=Profile 23', '--new-window', 'http://127.0.0.1:8795/accounts/third']);
+  assert.equal(f.calls[0].binary, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+  for (const mapping of [{ ...triple, third: profiles.primary }, { ...triple, third: profiles.test }, { ...triple, third: '../Profile 23' }, { ...triple, fourth: 'Profile 24' }]) {
+    assert.throws(() => createBrowserLauncher({ profiles: mapping }), /Browser profile setup is invalid/);
+  }
+});

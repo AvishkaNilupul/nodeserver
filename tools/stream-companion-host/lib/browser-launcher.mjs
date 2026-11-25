@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
-const IDS = new Set(['primary', 'test']);
+const IDS = new Set(['primary', 'test', 'third']);
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PROFILE = /^(?:Default|Profile [1-9][0-9]{0,2})$/;
 const REQUEST_ID = /^[A-Za-z0-9:_-]{1,160}$/;
@@ -12,13 +12,13 @@ const invalidConfig = () => Error('Browser profile setup is invalid.');
 
 function validatedProfiles(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).sort().join(',') !== 'primary,test'
-      || [...IDS].some(id => typeof value[id] !== 'string' || !PROFILE.test(value[id]))
-      || value.primary === value.test) throw invalidConfig();
-  return Object.freeze({ primary: value.primary, test: value.test });
+      || !['primary,test', 'primary,test,third'].includes(Object.keys(value).sort().join(','))
+      || Object.values(value).some(profile => typeof profile !== 'string' || !PROFILE.test(profile))
+      || new Set(Object.values(value)).size !== Object.keys(value).length) throw invalidConfig();
+  return Object.freeze({ primary: value.primary, test: value.test, ...(Object.hasOwn(value, 'third') ? { third: value.third } : {}) });
 }
 
-// This optional file is written from the two existing, verified Chrome profile
+// This optional file is written from the existing, verified Chrome profile
 // directories. No Chrome profile contents or credentials are read by this module.
 export async function loadBrowserProfiles({ file = new URL('../private/browser-profiles.json', import.meta.url), readFileImpl = readFile } = {}) {
   let source;
@@ -50,10 +50,10 @@ export function createBrowserLauncher({ profiles, spawnImpl = spawn, platform = 
       || !Number.isFinite(cooldownMs) || cooldownMs < 1 || cooldownMs > 60000
       || !Number.isFinite(spawnTimeoutMs) || spawnTimeoutMs < 1 || spawnTimeoutMs > 5000) throw Error('Invalid browser launcher configuration.');
   const recent = new Map(), flights = new Map(), lastAttempt = new Map();
-  const available = id => IDS.has(id) && platform === 'darwin' && !!mapping;
+  const available = id => IDS.has(id) && platform === 'darwin' && typeof mapping?.[id] === 'string';
   const prune = at => {
     for (const [key, entry] of recent) if (!entry.pending && at >= entry.at && at - entry.at >= CACHE_MS) recent.delete(key);
-    // Active per-account flights remain in their own two-entry map, so even
+    // Active per-account flights remain in their own fixed-size map, so even
     // evicting an old in-flight request alias cannot create another process.
     while (recent.size > CACHE_LIMIT) recent.delete(recent.keys().next().value);
   };

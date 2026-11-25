@@ -96,8 +96,11 @@ export class ExchangeEngine {
     return { streamId: x.streamId, checkedAt: x.checkedAt, lastHumanAt: x.lastHumanAt };
   }
   partners(channel) {
+    const originalPair = this.s.clients.has('primary') && this.s.clients.has('test');
     const active = this.db.prepare('SELECT * FROM host_clients WHERE channel=?').all(channel)
-      .filter(c => this.s.clients.has(c.client_id) && this.s.eligible(c));
+      // The original two-turn exchange stays with the original pair. A third
+      // companion shares ordinary pacing without cancelling or joining a run.
+      .filter(c => (!originalPair || ['primary', 'test'].includes(c.client_id)) && this.s.clients.has(c.client_id) && this.s.eligible(c));
     if (active.length !== 2 || active.some(c => !c.exchange_stream_id || c.exchange_checked_at <= 0 || c.exchange_checked_at < this.s.now() - EXCHANGE_POLICY.contextMs || c.exchange_checked_at > this.s.now() + 5000)
       || active[0].exchange_stream_id !== active[1].exchange_stream_id) return null;
     return active.sort((a, b) => a.account.localeCompare(b.account));

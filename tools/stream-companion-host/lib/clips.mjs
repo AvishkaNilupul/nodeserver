@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { detectHighlight } from './highlights.mjs';
 
-const IDS = new Set(['primary', 'test']), LOGIN = /^[a-z0-9_]{3,25}$/, REQUEST = /^[A-Za-z0-9_:-]{1,160}$/;
+const IDS = new Set(['primary', 'test', 'third']), LOGIN = /^[a-z0-9_]{3,25}$/, REQUEST = /^[A-Za-z0-9_:-]{1,160}$/;
 const STATES = new Set(['queued', 'submitting', 'pending', 'confirmed', 'failed', 'cancelled', 'unknown']);
 const TERMINAL = new Set(['confirmed', 'failed', 'cancelled']);
 const COOLDOWN = 600_000, HOUR = 3_600_000;
@@ -10,7 +10,7 @@ const exact = (x, keys) => record(x) && Object.keys(x).length === keys.length &&
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const stamp = x => typeof x === 'string' ? Date.parse(x) : x;
 const text = (x, max = 300) => typeof x === 'string' ? x.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max) : '';
-const selection = x => Array.isArray(x) && x.length > 0 && x.length <= 2 && x.every(id => IDS.has(id)) && new Set(x).size === x.length;
+const selection = x => Array.isArray(x) && x.length > 0 && x.length <= IDS.size && x.every(id => IDS.has(id)) && new Set(x).size === x.length;
 
 export function createClipController({ db, accounts, isPaused = () => true, now = Date.now,
   setIntervalImpl = setInterval, clearIntervalImpl = clearInterval, intervalMs = 5000, randomId = randomUUID } = {}) {
@@ -41,7 +41,7 @@ export function createClipController({ db, accounts, isPaused = () => true, now 
   const saveState = (id, state, error = '') => db.prepare('UPDATE clip_jobs SET state=?,updated_at=?,error=? WHERE request_id=?').run(state, now(), text(error), id);
   const paused = () => { try { return isPaused() !== false; } catch { return true; } };
   const fresh = (value, age) => { const at = stamp(value); return Number.isFinite(at) && at > 0 && at <= now() && now() - at <= age; };
-  const availableAccounts = () => ['primary', 'test'].map(id => {
+  const availableAccounts = () => [...IDS].map(id => {
     const a = instances.find(x => x.id === id), h = helperStates.get(id);
     return { id, account: LOGIN.test(h?.account || '') ? h.account : LOGIN.test(a?.account || '') ? a.account : '',
       available: a?.available === true && h?.available === true, authorized: h?.available === true && h.authorized === true,
@@ -92,7 +92,7 @@ export function createClipController({ db, accounts, isPaused = () => true, now 
   };
   const refresh = async () => {
     // These independent read calls share one timeout window, not three.
-    const ids = ['primary', 'test'];
+    const ids = [...IDS];
     const [accountResult, ...clipResults] = await Promise.allSettled([
       Promise.resolve().then(() => accounts.snapshot()), ...ids.map(id => Promise.resolve().then(() => accounts.clipStatus(id)))
     ]);
