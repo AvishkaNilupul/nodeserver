@@ -6,6 +6,7 @@ import { HostStore } from './lib/store.mjs';
 import { createAccountManager } from './lib/accounts.mjs';
 import { createChannelDirectory } from './lib/channels.mjs';
 import { createBrowserLauncher, loadBrowserProfiles } from './lib/browser-launcher.mjs';
+import { createClipController } from './lib/clips.mjs';
 
 const equal = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || '')); return x.length === y.length && timingSafeEqual(x, y); };
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -14,11 +15,12 @@ const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const STATIC = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/style.css', ['style.css', 'text/css; charset=utf-8']],
   ...['/accounts', '/accounts/primary', '/accounts/test'].map(path => [path, ['account.html', 'text/html; charset=utf-8']]),
   ['/accounts.js', ['accounts.js', 'text/javascript; charset=utf-8']], ['/accounts.css', ['accounts.css', 'text/css; charset=utf-8']],
-  ['/controller-path.js', ['controller-path.js', 'text/javascript; charset=utf-8']]]);
-const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels']);
+  ['/controller-path.js', ['controller-path.js', 'text/javascript; charset=utf-8']],
+  ['/clips.js', ['clips.js', 'text/javascript; charset=utf-8']], ['/clips.css', ['clips.css', 'text/css; charset=utf-8']]]);
+const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels', '/api/clips']);
 const CHANNEL_LOOKUP = /^\/api\/channels\/([a-z0-9_]{3,25})$/;
 const REMOTE_POST = new Set(['/api/control', '/api/accounts/primary/command', '/api/accounts/test/command',
-  '/api/accounts/primary/browser', '/api/accounts/test/browser']);
+  '/api/accounts/primary/browser', '/api/accounts/test/browser', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization']);
 const failure = (message, status) => Object.assign(new Error(message), { status });
 
 export async function loadRemoteToken({ file = new URL('./private/remote.json', import.meta.url), readFileImpl = readFile } = {}) {
@@ -42,7 +44,7 @@ async function bodyJSON(req) {
   return value;
 }
 
-export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), browserLauncher = createBrowserLauncher(), port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
+export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), browserLauncher = createBrowserLauncher(), clips, port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
   if (!store || !Array.isArray(clients) || !clients.length) throw Error('Host store and clients required.');
   for (const c of clients) if (typeof c.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(c.token) || store.client(c.id).account !== c.account) throw Error('Invalid coordination client pairing.');
   if (new Set(clients.map(c => c.token)).size !== clients.length) throw Error('Coordination clients require separate tokens.');
@@ -86,6 +88,10 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         if (req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined || req.headers['sec-fetch-dest'] !== undefined || req.headers['sec-fetch-user'] !== undefined) return send(res, 403, { error: 'Internal client required.' });
         const client = clients.find(c => c.id === req.headers['x-companion-id']);
         if (!client || !equal(req.headers.authorization, `Bearer ${client.token}`)) return send(res, 403, { error: 'Invalid coordination pairing.' });
+        if (path === '/internal/clips/permit') {
+          if (!clips) throw failure('Clip controls are unavailable.', 503);
+          return send(res, 200, clips.permit(client.id, await bodyJSON(req)));
+        }
         const routes = { '/internal/sync': 'sync', '/internal/reserve': 'reserve', '/internal/begin': 'begin', '/internal/finish': 'finish' };
         if (!Object.hasOwn(routes, path)) return send(res, 404, { error: 'Not found.' });
         const body = await bodyJSON(req);
@@ -103,6 +109,20 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         const value = await accounts.snapshot();
         return send(res, 200, { ...value, instances: value.instances.map(instance => ({ ...instance,
           browser: { ...instance.browser, canOpen: browserLauncher.available(instance.id) === true } })), csrfToken });
+      }
+      if (path === '/api/clips') {
+        if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
+        if (!sameOrigin(req)) return send(res, 403, { error: 'Open the controller to view clips.' });
+        if (!clips) throw failure('Clip controls are unavailable.', 503);
+        return send(res, 200, { ...clips.snapshot(), csrfToken });
+      }
+      const clipAction = /^\/api\/clips\/(create|settings|authorization)$/.exec(path);
+      if (clipAction) {
+        if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
+        if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the controller clip controls.' });
+        if (!clips) throw failure('Clip controls are unavailable.', 503);
+        const action = { create: 'create', settings: 'configure', authorization: 'authorize' }[clipAction[1]];
+        return send(res, 200, await clips[action](await bodyJSON(req)));
       }
       const channelLookup = CHANNEL_LOOKUP.exec(path);
       if (path === '/api/channels' || channelLookup) {
@@ -159,8 +179,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try { browserProfiles = await loadBrowserProfiles(); }
   catch { console.warn('Automatic browser opening is unavailable. Existing companion controls remain available.'); }
   const browserLauncher = createBrowserLauncher({ profiles: browserProfiles });
-  const server = createHostServer({ store, clients: config.clients, remoteToken, browserLauncher });
-  server.once('close', () => store.close());
-  server.listen(8795, '127.0.0.1', () => console.log('Stream Companion Host 1.0.0 listening on http://127.0.0.1:8795'));
+  const accounts = createAccountManager();
+  const clips = createClipController({ db: store.db, accounts, isPaused: () => store.paused });
+  const server = createHostServer({ store, clients: config.clients, remoteToken, browserLauncher, accounts, clips });
+  server.once('close', async () => { await clips.close(); store.close(); });
+  server.listen(8795, '127.0.0.1', () => { clips.start(); console.log('Stream Companion Host 1.0.0 listening on http://127.0.0.1:8795'); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => server.close());
 }

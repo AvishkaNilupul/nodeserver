@@ -13,6 +13,18 @@ const login = value => typeof value === 'string' && LOGIN.test(value) ? value : 
 const timestamp = value => Number.isFinite(value) ? value : typeof value === 'string' ? Date.parse(value) : NaN;
 const number = value => Number.isFinite(value) && value >= 0 ? value : 0;
 const keys = (value, expected) => record(value) && Object.keys(value).length === expected.length && expected.every(k => Object.hasOwn(value, k));
+const CLIP_STATES = new Set(['queued', 'submitting', 'pending', 'confirmed', 'failed', 'cancelled', 'unknown']);
+const opaque = value => typeof value === 'string' && /^[A-Za-z0-9:_-]{1,160}$/.test(value);
+
+function cleanClipJob(raw, clean) {
+  if (!record(raw) || !opaque(raw.requestId) || !login(raw.account) || !login(raw.channel)
+    || !/^\d{1,32}$/.test(raw.streamId || '') || !['manual', 'automatic'].includes(raw.source)
+    || !CLIP_STATES.has(raw.state) || !Number.isFinite(raw.createdAt) || !Number.isFinite(raw.updatedAt)) return null;
+  const clipId = typeof raw.clipId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(raw.clipId) ? raw.clipId : '';
+  return { requestId: raw.requestId, account: raw.account, channel: raw.channel, streamId: raw.streamId, source: raw.source,
+    createdAt: raw.createdAt, updatedAt: raw.updatedAt, state: raw.state, clipId,
+    url: raw.state === 'confirmed' && clipId && raw.url === `https://clips.twitch.tv/${clipId}` ? raw.url : '', error: clean(raw.error) };
+}
 
 export function validateCommand(value) {
   if (!keys(value, ['requestId', 'action', 'params']) || typeof value.requestId !== 'string'
@@ -174,5 +186,38 @@ export function createAccountManager({ sources = SOURCES, fetchImpl = fetch, rea
     const job = cleanCommand(raw.command, clean); if (!job) throw failure('The companion did not confirm the requested command.', 503);
     revision++; cached = null; return { ok: true, command: job };
   };
-  return { snapshot, command };
+  const clipRequest = async (id, path, body) => {
+    if (!selected.some(s => s.id === id)) throw failure('Unknown companion.', 404);
+    const entries = await configurations(), clean = cleaner(entries.flatMap(x => x.secrets));
+    try { return { raw: await request(entries.find(x => x.source.id === id), path, body), clean }; }
+    catch (e) { throw failure(clean(e.message), e.status || 503); }
+  };
+  const clipStatus = async id => {
+    const { raw, clean } = await clipRequest(id, '/api/clips/status', {});
+    if (typeof raw.authorized !== 'boolean' || !login(raw.account) || !Array.isArray(raw.jobs)) throw failure('The companion returned invalid clip status.', 503);
+    return { ok: true, account: raw.account, authorized: raw.authorized,
+      jobs: raw.jobs.slice(-100).map(x => cleanClipJob(x, clean)).filter(Boolean) };
+  };
+  const clipCreate = async (id, body) => {
+    if (!keys(body, ['requestId', 'channel', 'streamId', 'source']) || !opaque(body.requestId) || !login(body.channel)
+      || !/^\d{1,32}$/.test(body.streamId || '') || !['manual', 'automatic'].includes(body.source)) throw failure('Invalid clip request.');
+    const { raw, clean } = await clipRequest(id, '/api/clips/create', body), job = cleanClipJob(raw.job, clean);
+    if (!job || job.requestId !== body.requestId || job.channel !== body.channel || job.streamId !== body.streamId || job.source !== body.source) throw failure('The companion did not confirm the clip request.', 503);
+    return { ok: true, job };
+  };
+  const clipAuthorization = async (id, body) => {
+    if (!keys(body, ['action']) || !['start', 'poll'].includes(body.action)) throw failure('Invalid clip authorization request.');
+    const { raw, clean } = await clipRequest(id, '/api/clips/authorization', body);
+    if (raw.pending !== true && raw.authorized !== true && (typeof raw.userCode !== 'string' || typeof raw.verificationUrl !== 'string')) throw failure('Twitch did not confirm clip authorization.', 503);
+    const value = { ok: true, pending: raw.pending === true, authorized: raw.authorized === true, account: login(raw.account) };
+    if (raw.verificationUrl !== undefined) {
+      if (raw.verificationUrl !== 'https://www.twitch.tv/activate' || typeof raw.userCode !== 'string'
+        || !/^[A-Za-z0-9-]{4,32}$/.test(raw.userCode)) throw failure('Twitch returned invalid authorization details.', 503);
+      value.verificationUrl = raw.verificationUrl; value.userCode = clean(raw.userCode, 32);
+    }
+    if (Number.isFinite(raw.pollAfterMs)) value.pollAfterMs = Math.max(5000, Math.min(60000, raw.pollAfterMs));
+    if (Number.isFinite(raw.expiresAt)) value.expiresAt = raw.expiresAt;
+    revision++; cached = null; return value;
+  };
+  return { snapshot, command, clipStatus, clipCreate, clipAuthorization };
 }

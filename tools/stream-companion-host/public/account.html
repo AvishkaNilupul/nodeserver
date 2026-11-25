@@ -6,7 +6,9 @@
   <meta name="color-scheme" content="dark">
   <title>Accounts · Stream Companion</title>
   <link rel="stylesheet" href="__COMPANION_BASE__/accounts.css">
+  <link rel="stylesheet" href="__COMPANION_BASE__/clips.css">
   <script type="module" src="__COMPANION_BASE__/accounts.js"></script>
+  <script type="module" src="__COMPANION_BASE__/clips.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to account controls</a>
@@ -66,6 +68,23 @@
           <section class="panel" aria-labelledby="recent-heading"><p class="eyebrow">Recent control requests</p><h2 id="recent-heading">Command history</h2><ol class="message-list" id="command-history"></ol></section>
         </div>
       </div>
+      <section class="panel clips-panel" data-clips-app aria-labelledby="clips-heading">
+        <div class="section-heading"><div><p class="eyebrow">Save a stream moment</p><h2 id="clips-heading">Clips</h2></div><span class="pill" id="clips-network" role="status">Connecting</span></div>
+        <p class="section-description">Create a clip now, or let chat reactions identify possible highlights. Both accounts share one clip per moment.</p>
+        <div class="clips-fields"><label for="clips-channel">Channel<input id="clips-channel" value="aviskarex" type="text" maxlength="25" autocomplete="off" autocapitalize="none" spellcheck="false" pattern="[A-Za-z0-9_]{3,25}"></label><label for="clips-accounts">Create with<select id="clips-accounts"><option value="primary">Main account</option><option value="test">Second account</option><option value="both">Either account</option></select></label></div>
+        <div class="clips-actions"><button id="clips-create" class="primary" type="button" disabled>Clip moment</button><button id="clips-refresh" class="subtle" type="button">Refresh clips</button></div>
+        <label class="clips-check"><input id="clips-enabled" type="checkbox"><span>Auto clips<small>Watch for reactions in this channel using the selected accounts. Detection continues while this page is closed.</small></span></label>
+        <div class="clips-save"><button id="clips-save" type="button" disabled>Save clip settings</button><p id="clips-saved" class="field-note">Waiting for clip settings.</p></div>
+        <p class="field-note" id="clips-detector">Waiting for detector status.</p>
+        <p class="field-note">Clips need live playback and the streamer’s clip option. Automatic clips wait for a burst of reactions from other viewers, with a shared ten-minute cooldown and a maximum of three per hour. This detects chat activity, not events inside the video.</p>
+        <div class="clips-permissions" aria-label="Clip permissions">
+          <div class="clips-permission"><div><strong id="clips-name-primary">Main account</strong><p id="clips-permission-primary" class="field-note">Checking clip permission.</p></div><button id="clips-enable-primary" type="button" disabled>Enable clips</button><div class="clips-authorization" id="clips-auth-primary" role="status" aria-live="polite" hidden></div><button id="clips-check-primary" class="subtle" type="button" hidden>Check approval</button></div>
+          <div class="clips-permission"><div><strong id="clips-name-test">Second account</strong><p id="clips-permission-test" class="field-note">Checking clip permission.</p></div><button id="clips-enable-test" type="button" disabled>Enable clips</button><div class="clips-authorization" id="clips-auth-test" role="status" aria-live="polite" hidden></div><button id="clips-check-test" class="subtle" type="button" hidden>Check approval</button></div>
+        </div>
+        <p class="field-note">Enable clips adds Twitch’s clip-creation permission to that account. Stop the account first, then approve the request on Twitch. It stays stopped after approval.</p>
+        <p id="clips-feedback" class="clips-feedback" role="status" aria-live="polite" hidden></p><div id="clips-error" class="notice error" role="alert" hidden></div>
+        <h3 class="clips-history-heading">Recent clips</h3><ol class="clips-history" id="clips-history"><li class="empty">Waiting for clips.</li></ol>
+      </section>
     </main>
     <footer><span>Local host · Account logins stay in their profiles</span><a href="__COMPANION_BASE__/">Shared coordination & exchanges</a><span id="last-refreshed">Waiting for status</span></footer>
   </div>

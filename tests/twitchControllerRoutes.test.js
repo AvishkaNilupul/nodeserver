@@ -60,6 +60,7 @@ async function fixture(t, options = {}) {
     const record = { method: req.method, path: req.url, headers: { ...req.headers }, text, body }; seen.push(record);
     if (upstreamHandler) return upstreamHandler(record, res);
     if (req.url.endsWith('/api/status')) return respond(res, 200, { updatedAt: new Date().toISOString(), paused: true, csrfToken: UPSTREAM_TOKEN });
+    if (req.url.endsWith('/api/clips')) return respond(res, 200, { ok: true, settings: { enabled: false, channel: 'aviskarex', accountIds: ['primary'] }, accounts: [], jobs: [], csrfToken: UPSTREAM_TOKEN });
     if (req.url.endsWith('/api/accounts')) return respond(res, 200, { updatedAt: new Date().toISOString(), instances: [], csrfToken: UPSTREAM_TOKEN });
     if (/\/api\/channels(?:\/[a-z0-9_]{3,25})?$/.test(req.url)) return respond(res, 200, { updatedAt: new Date().toISOString(), channels: [{ login: req.url.split('/').at(-1) === 'channels' ? 'aviskarex' : req.url.split('/').at(-1), isLive: true }], csrfToken: UPSTREAM_TOKEN });
     if (/\/api\/accounts\/(primary|test)\/browser$/.test(req.url)) return respond(res, 200, { ok: true, state: 'opening' });
@@ -108,7 +109,7 @@ function post(client, path, body, csrf, headers = {}) {
 
 test('every page, asset and API uses the real superadmin and two-factor guards before reaching the Mac', async t => {
   const f = await fixture(t);
-  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex', '/api/accounts/primary/browser']) {
+  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex', '/api/accounts/primary/browser', '/clips.js', '/clips.css', '/api/clips', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization']) {
     assert.equal((await request(f.port, BASE + path)).status, 401);
     const normal = await f.client('admin'); assert.equal((await normal.request(path)).status, 403);
   }
@@ -431,4 +432,38 @@ test('a private host CSRF change requests refresh without replaying the original
   assert.equal((await post(c, '/api/accounts/primary/command', nextBody, browserNonce)).status, 200);
   assert.equal(f.seen.at(-1).headers['x-csrf-token'], rotated);
   assert.deepEqual(f.seen.at(-1).body, nextBody);
+});
+
+
+test('clips retain CSRF masking, exact creator selection, finite authorization and single-forward mutations', async t => {
+  const f = await fixture(t), c = await f.client(), token = await nonce(c, '/api/clips');
+  assert.equal(f.seen.at(-1).method, 'GET');
+  const actions = [
+    ['/api/clips/settings', { enabled: true, channel: 'aviskarex', accountIds: ['primary', 'test'] }],
+    ['/api/clips/create', { requestId: 'moment-1', channel: 'aviskarex', accountIds: ['test'] }],
+    ['/api/clips/authorization', { accountId: 'primary', action: 'start' }],
+    ['/api/clips/authorization', { accountId: 'primary', action: 'poll' }]
+  ];
+  for (const [path, body] of actions) {
+    const before = f.seen.length;
+    assert.equal((await c.request(path)).status, 405);
+    assert.equal((await post(c, path, body, 'wrong')).status, 403);
+    assert.equal((await post(c, path, body, token, { Origin: 'https://outside.example' })).status, 403);
+    assert.equal(f.seen.length, before);
+    assert.equal((await post(c, path, body, token)).status, 200);
+    assert.equal(f.seen.length, before + 1);
+    assert.deepEqual(f.seen.at(-1).body, body);
+    assert.equal(f.seen.at(-1).headers['x-csrf-token'], UPSTREAM_TOKEN);
+  }
+  const before = f.seen.length;
+  for (const [path, body] of [
+    ['/api/clips/settings', { enabled: true, channel: 'aviskarex', accountIds: ['primary', 'primary'] }],
+    ['/api/clips/settings', { enabled: true, channel: 'aviskarex', accountIds: [] }],
+    ['/api/clips/create', { requestId: 'x', channel: 'aviskarex', accountIds: ['foreign'] }],
+    ['/api/clips/create', { requestId: 'x', channel: 'aviskarex', accountIds: ['primary'], streamId: '123' }],
+    ['/api/clips/authorization', { accountId: 'primary', action: 'start', scopes: ['whatever'] }],
+    ['/api/clips/authorization', { accountId: 'primary', action: 'approve' }]
+  ]) assert.equal((await post(c, path, body, token)).status, 400);
+  for (const path of ['/api/clips/create/', '/api/clips/create?x=1', '/api/clips/%63reate', '/api/clips/delete']) assert.equal((await post(c, path, {}, token)).status, 404);
+  assert.equal(f.seen.length, before);
 });

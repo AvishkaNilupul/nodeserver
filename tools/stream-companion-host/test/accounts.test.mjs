@@ -119,3 +119,35 @@ test('helper pending arrays and ISO times normalize to the public single-operati
   assert.equal(s.controls.pending.action, 'stop'); assert.equal(s.controls.pending.createdAt, NOW);
   assert.equal(s.drops.lastCheckAt, NOW); assert.equal(s.drops.history[0].name, 'Test drop'); assert.match(s.drops.history[0].reason, /redacted/);
 });
+
+test('clip adapter accepts only fixed paired routes and sanitized matching jobs', async () => {
+  const clip = { requestId: 'clip-1', account: 'first_account', channel: 'test_channel', streamId: '12345', source: 'manual',
+    createdAt: NOW, updatedAt: NOW, state: 'confirmed', clipId: 'ExampleClipId', url: 'https://clips.twitch.tv/ExampleClipId', error: '' };
+  const f = fixture((url, init) => {
+    if (url.pathname === '/api/clips/status') return Response.json({ ok: true, account: 'first_account', authorized: true, jobs: [{ ...clip, error: configs['test.json'].apiKey, accessToken: 'must-not-pass' }] });
+    if (url.pathname === '/api/clips/create') return Response.json({ ok: true, job: clip });
+    return Response.json({ ok: true, pending: true, verificationUrl: 'https://www.twitch.tv/activate', userCode: 'ABC-DEF', pollAfterMs: 5000, accessToken: 'must-not-pass' });
+  });
+  const s = await f.manager.clipStatus('primary'); assert.equal(s.authorized, true); assert.equal(s.jobs[0].url, clip.url);
+  assert.match(s.jobs[0].error, /redacted/); assert.doesNotMatch(JSON.stringify(s), /must-not-pass/);
+  const input = { requestId: 'clip-1', channel: 'test_channel', streamId: '12345', source: 'manual' };
+  assert.equal((await f.manager.clipCreate('primary', input)).job.requestId, input.requestId);
+  assert.deepEqual(f.calls.at(-1).body, input);
+  const auth = await f.manager.clipAuthorization('test', { action: 'start' });
+  assert.equal(auth.userCode, 'ABC-DEF'); assert.doesNotMatch(JSON.stringify(auth), /must-not-pass/);
+  const before = f.calls.length;
+  await assert.rejects(f.manager.clipCreate('primary', { ...input, url: 'https://outside.example' }));
+  await assert.rejects(f.manager.clipAuthorization('foreign', { action: 'start' }));
+  await assert.rejects(f.manager.clipAuthorization('primary', { action: 'start', scopes: ['other'] }));
+  assert.equal(f.calls.length, before);
+});
+
+test('clip adapter rejects mismatched creates, invalid status and foreign grant URLs', async () => {
+  const f = fixture(url => Response.json(url.pathname.endsWith('/authorization')
+    ? { ok: true, verificationUrl: 'https://outside.example/activate', userCode: 'ABC-DEF' }
+    : url.pathname.endsWith('/create') ? { ok: true, job: { requestId: 'other-request' } }
+    : { ok: true, account: 'bad account', authorized: true, jobs: [] }));
+  await assert.rejects(f.manager.clipStatus('primary'), /invalid clip status/);
+  await assert.rejects(f.manager.clipCreate('primary', { requestId: 'clip-1', channel: 'test_channel', streamId: '12345', source: 'manual' }), /did not confirm/);
+  await assert.rejects(f.manager.clipAuthorization('primary', { action: 'start' }), /invalid authorization/);
+});
