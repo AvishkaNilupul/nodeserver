@@ -14,6 +14,21 @@ const login = value => typeof value === 'string' && LOGIN.test(value) ? value : 
 const timestamp = value => Number.isFinite(value) ? value : typeof value === 'string' ? Date.parse(value) : NaN;
 const number = value => Number.isFinite(value) && value >= 0 ? value : 0;
 const keys = (value, expected) => record(value) && Object.keys(value).length === expected.length && expected.every(k => Object.hasOwn(value, k));
+
+export function activationUrl(value, userCode) {
+  if (typeof value !== 'string' || value.length > 200 || !/^https:\/\/www\.twitch\.tv\/activate(?:\?|$)/.test(value)
+    || value.includes('#') || /[\u0000-\u0020\u007f]/.test(value)
+    || typeof userCode !== 'string' || !/^[A-Za-z0-9-]{4,32}$/.test(userCode)) return '';
+  try {
+    const url = new URL(value), keys = [...url.searchParams.keys()];
+    if (url.protocol !== 'https:' || url.hostname !== 'www.twitch.tv' || url.port || url.username || url.password
+      || url.pathname !== '/activate' || url.hash || keys.length !== new Set(keys).size
+      || keys.some(key => !['public', 'device-code'].includes(key))
+      || url.searchParams.has('public') && url.searchParams.get('public') !== 'true'
+      || url.searchParams.has('device-code') && url.searchParams.get('device-code') !== userCode) return '';
+    return url.href;
+  } catch { return ''; }
+}
 const CLIP_STATES = new Set(['queued', 'submitting', 'pending', 'confirmed', 'failed', 'cancelled', 'unknown']);
 const opaque = value => typeof value === 'string' && /^[A-Za-z0-9:_-]{1,160}$/.test(value);
 
@@ -212,9 +227,9 @@ export function createAccountManager({ sources = SOURCES, fetchImpl = fetch, rea
     if (raw.pending !== true && raw.authorized !== true && (typeof raw.userCode !== 'string' || typeof raw.verificationUrl !== 'string')) throw failure('Twitch did not confirm clip authorization.', 503);
     const value = { ok: true, pending: raw.pending === true, authorized: raw.authorized === true, account: login(raw.account) };
     if (raw.verificationUrl !== undefined) {
-      if (raw.verificationUrl !== 'https://www.twitch.tv/activate' || typeof raw.userCode !== 'string'
-        || !/^[A-Za-z0-9-]{4,32}$/.test(raw.userCode)) throw failure('Twitch returned invalid authorization details.', 503);
-      value.verificationUrl = raw.verificationUrl; value.userCode = clean(raw.userCode, 32);
+      const url = activationUrl(raw.verificationUrl, raw.userCode);
+      if (!url) throw failure('Twitch returned invalid authorization details.', 503);
+      value.verificationUrl = url; value.userCode = clean(raw.userCode, 32);
     }
     if (Number.isFinite(raw.pollAfterMs)) value.pollAfterMs = Math.max(5000, Math.min(60000, raw.pollAfterMs));
     if (Number.isFinite(raw.expiresAt)) value.expiresAt = raw.expiresAt;

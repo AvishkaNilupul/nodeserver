@@ -209,3 +209,50 @@ test('third permission and clip history stay bound to the third account', async 
   assert.equal(v.nodes['clips-auth-primary'].textContent, ''); assert.equal(v.nodes['clips-auth-test'].textContent, '');
   f.c.stop();
 });
+
+test('Twitch activation accepts only the fixed page and unique public/device-code parameters', () => {
+  const base = 'https://www.twitch.tv/activate', code = 'ABCD1234';
+  for (const value of [base, `${base}?public=true`, `${base}?device-code=${code}`, `${base}?public=true&device-code=${code}`, `${base}?device-code=${code}&public=true`]) {
+    assert.equal(clipAuthorizationUrl(value, code), value);
+  }
+  for (const value of [
+    `${base}?public=false`, `${base}?public=`, `${base}?public=true&public=true`, `${base}?device-code=${code}&device-code=${code}`,
+    `${base}?%64evice-code=${code}&device-code=${code}`, `${base}?device-code=ABC`, `${base}?device-code=${'A'.repeat(33)}`,
+    `${base}?device-code=ABCD%26redirect%3Dhttps%3A%2F%2Fevil.example`, `${base}?device-code=https%3A%2F%2Fevil.example`,
+    `${base}?device-code=${code}&redirect_uri=https%3A%2F%2Fevil.example`, `${base}?device-code=${code}&public=true&scope=anything`,
+    `${base}?device-code=${code}#`, `${base}?device-code=${code}#fragment`, 'https://www.twitch.tv:443/activate',
+    'https://user@www.twitch.tv/activate', 'https://www.twitch.tv.evil/activate', 'https://evil.example@www.twitch.tv/activate',
+    'https://www.twitch.tv/%61ctivate?device-code=ABCD1234', 'https://%77ww.twitch.tv/activate?device-code=ABCD1234',
+    'https://www.twitch.tv/activate%3Fdevice-code%3DABCD1234', 'https://www.twitch.tv/activate?device-code=%252F%252Fevil'
+  ]) assert.equal(clipAuthorizationUrl(value, code), '', value);
+  assert.equal(clipAuthorizationUrl(`${base}?device-code=${code}`, 'OTHER123'), '');
+  assert.equal(clipAuthorizationUrl(`${base}?device-code=${code}`), `${base}?device-code=${code}`);
+});
+
+test('prefilled Twitch activation is verified against the displayed user code during authorization and rendering', async () => {
+  const code = 'CODE1234', verificationUrl = `https://www.twitch.tv/activate?public=true&device-code=${code}`;
+  const f = fixture({ data: snapshot({ accounts: [account('primary', { authorized: false })] }),
+    post: () => reply({ ok: true, pending: true, verificationUrl, userCode: code, pollAfterMs: 5000 }) });
+  await f.c.refresh(); assert.equal(await f.c.authorize('primary'), true);
+  const v = view(); draw(v, f.c);
+  assert.equal(f.c.getState().authorizations.primary.verificationUrl, verificationUrl);
+  assert.match(v.nodes['clips-auth-primary'].textContent, /CODE1234/);
+  assert.deepEqual(descend(v.nodes['clips-auth-primary']).filter(node => node.tagName === 'a').map(node => node.href), [verificationUrl]);
+  f.c.getState().authorizations.primary.userCode = 'DIFFERENT'; draw(v, f.c);
+  assert.equal(descend(v.nodes['clips-auth-primary']).filter(node => node.tagName === 'a').length, 0);
+  f.c.stop();
+});
+
+test('a malformed or mismatched fresh activation URL never falls back to an earlier approval link', async () => {
+  const base = 'https://www.twitch.tv/activate';
+  for (const bad of [`${base}?device-code=WRONG123`, `${base}?device-code=OLDCODE&redirect=https://evil.example`]) {
+    let calls = 0;
+    const f = fixture({ data: snapshot({ accounts: [account('primary', { authorized: false })] }), post: () => reply({ ok: true, pending: true,
+      verificationUrl: ++calls === 1 ? `${base}?device-code=OLDCODE` : bad, userCode: 'OLDCODE', pollAfterMs: 5000 }) });
+    await f.c.refresh(); assert.equal(await f.c.authorize('primary'), true);
+    assert.equal(await f.c.authorize('primary', 'poll'), false);
+    const auth = f.c.getState().authorizations.primary; assert.equal(auth.pending, false); assert.equal(auth.verificationUrl, undefined);
+    const v = view(); draw(v, f.c); assert.equal(descend(v.nodes['clips-auth-primary']).filter(node => node.tagName === 'a').length, 0);
+    assert.equal(f.c.canAuthorize('primary'), true); f.c.stop();
+  }
+});

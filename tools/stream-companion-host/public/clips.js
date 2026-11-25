@@ -20,11 +20,23 @@ export function clipUrl(value) {
       && !url.search && !url.hash && /^\/[A-Za-z0-9_-]{1,256}$/.test(url.pathname) ? url.href : '';
   } catch { return ''; }
 }
-export function clipAuthorizationUrl(value) {
+export function clipAuthorizationUrl(value, expectedUserCode) {
+  if (typeof value !== 'string' || value.length > 512 || !/^https:\/\/www\.twitch\.tv\/activate(?:\?|$)/.test(value)
+    || /[\u0000-\u0020\u007f\\#]/.test(value)
+    || expectedUserCode !== undefined && (typeof expectedUserCode !== 'string' || !/^[A-Za-z0-9-]{4,32}$/.test(expectedUserCode))) return '';
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === 'www.twitch.tv' && url.pathname === '/activate'
-      && !url.port && !url.username && !url.password && !url.search && !url.hash ? url.href : '';
+    if (url.protocol !== 'https:' || url.hostname !== 'www.twitch.tv' || url.pathname !== '/activate'
+      || url.port || url.username || url.password || url.hash) return '';
+    const seen = new Set();
+    for (const [key, entry] of url.searchParams) {
+      if (seen.has(key) || !['public', 'device-code'].includes(key)) return '';
+      seen.add(key);
+      if (key === 'public' && entry !== 'true' || key === 'device-code'
+        && (!/^[A-Za-z0-9-]{4,32}$/.test(entry) || expectedUserCode !== undefined && entry !== expectedUserCode)) return '';
+    }
+    if (!seen.size) url.search = '';
+    return url.href;
   } catch { return ''; }
 }
 
@@ -157,8 +169,13 @@ export function createClipsController({ fetchImpl = globalThis.fetch, now = Date
       state.authorizations[id] = { ...previous, authorized: true, pending: false, error: '' };
       state.feedback = 'Clip permission granted. The account stays stopped until you start it.';
     } else {
-      const verificationUrl = clipAuthorizationUrl(result.verificationUrl) || previous.verificationUrl || '';
-      const userCode = /^[A-Za-z0-9-]{1,32}$/.test(result.userCode || '') ? result.userCode : previous.userCode || '';
+      const freshCode = Object.hasOwn(result, 'userCode'), freshUrl = Object.hasOwn(result, 'verificationUrl');
+      const userCode = freshCode ? /^[A-Za-z0-9-]{4,32}$/.test(result.userCode || '') ? result.userCode : '' : previous.userCode || '';
+      const verificationUrl = userCode ? clipAuthorizationUrl(freshUrl ? result.verificationUrl : previous.verificationUrl, userCode) : '';
+      if (freshCode && !userCode || freshUrl && (!userCode || !verificationUrl)) {
+        state.error = 'Twitch returned invalid approval details. Enable clips again.';
+        state.authorizations[id] = { authorized: false, pending: false, error: state.error }; emit(); return false;
+      }
       if ((!verificationUrl || !userCode) && result.pending !== true) { state.error = 'Twitch did not return a usable approval code. Enable clips again.'; emit(); return false; }
       const expires = stamp(result.expiresAt);
       state.authorizations[id] = { verificationUrl, userCode, authorized: false, pending: true,
@@ -210,11 +227,11 @@ export function renderClips(view, state, { now = Date.now(), canMutate = () => f
         parts.push(view.el('p', 'Approval was not completed. Enable clips to request a new code.'));
         if (auth.error) parts.push(view.el('p', text(auth.error)));
       } else if (auth) {
-        if (auth.userCode && clipAuthorizationUrl(auth.verificationUrl)) {
+        if (auth.userCode && clipAuthorizationUrl(auth.verificationUrl, auth.userCode)) {
           parts.push(view.el('p', `Approve clip creation for ${account?.account ? `@${text(account.account, 25)}` : accountLabel(id).toLowerCase()} on Twitch using this code:`));
           parts.push(view.el('code', text(auth.userCode, 32)));
         } else parts.push(view.el('p', 'Preparing Twitch approval details…'));
-        const url = clipAuthorizationUrl(auth.verificationUrl);
+        const url = clipAuthorizationUrl(auth.verificationUrl, auth.userCode);
         if (url) { const link = view.el('a', 'Open Twitch approval'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; const line = view.el('p'); line.append(link); parts.push(line); }
         if (auth.pending && auth.userCode) parts.push(view.el('p', 'Waiting for Twitch approval. Approve using this same account.'));
         if (auth.error) parts.push(view.el('p', text(auth.error)));

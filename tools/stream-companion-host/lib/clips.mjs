@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { detectHighlight } from './highlights.mjs';
+import { activationUrl } from './accounts.mjs';
 
 const IDS = new Set(['primary', 'test', 'third']), LOGIN = /^[a-z0-9_]{3,25}$/, REQUEST = /^[A-Za-z0-9_:-]{1,160}$/;
 const STATES = new Set(['queued', 'submitting', 'pending', 'confirmed', 'failed', 'cancelled', 'unknown']);
@@ -174,7 +175,11 @@ export function createClipController({ db, accounts, isPaused = () => true, now 
     if (!record(raw) || raw.ok !== true) throw fail('The companion did not confirm clip authorization.', 503);
     const result = { ok: true };
     for (const key of ['verificationUrl', 'userCode', 'account']) if (typeof raw?.[key] === 'string') result[key] = text(raw[key], key === 'verificationUrl' ? 200 : 80);
-    if (result.verificationUrl && result.verificationUrl !== 'https://www.twitch.tv/activate') throw fail('The companion returned an invalid Twitch activation page.', 503);
+    if (result.verificationUrl) {
+      const url = activationUrl(result.verificationUrl, result.userCode);
+      if (!url) throw fail('The companion returned an invalid Twitch activation page.', 503);
+      result.verificationUrl = url;
+    }
     for (const key of ['pollAfterMs', 'expiresAt']) if (Number.isFinite(raw?.[key]) && raw[key] >= 0) result[key] = raw[key];
     for (const key of ['pending', 'authorized']) if (typeof raw?.[key] === 'boolean') result[key] = raw[key];
     return result;

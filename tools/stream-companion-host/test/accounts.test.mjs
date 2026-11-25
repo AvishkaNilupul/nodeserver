@@ -173,3 +173,15 @@ test('third uses only its fixed paired helper and all three private values are r
   assert.throws(() => createAccountManager({ sources: [{ ...thirdSource, port: 8793 }] }), /Unsupported account source/);
   assert.throws(() => createAccountManager({ sources: [{ id: 'fourth', configPath: 'third.json', port: 8796 }] }), /Unsupported account source/);
 });
+
+test('Twitch device links preserve only documented activation parameters bound to the same user code', async () => {
+  const code = 'ABCD1234';
+  for (const verificationUrl of ['https://www.twitch.tv/activate', `https://www.twitch.tv/activate?device-code=${code}`, `https://www.twitch.tv/activate?public=true&device-code=${code}`]) {
+    const f = fixture(() => Response.json({ ok: true, pending: true, verificationUrl, userCode: code }));
+    assert.equal((await f.manager.clipAuthorization('primary', { action: 'poll' })).verificationUrl, verificationUrl);
+  }
+  for (const verificationUrl of ['https://www.twitch.tv:443/activate', 'https://www.twitch.tv/activate#', `https://www.twitch.tv/activate?device-code=DIFFERENT`, `https://www.twitch.tv/activate?device-code=${code}&device-code=${code}`, `https://www.twitch.tv/activate?public=false&device-code=${code}`, `https://www.twitch.tv/activate?redirect_uri=https://outside.example&device-code=${code}`, `https://www.twitch.tv/activate?device-code=${code}#fragment`, `https://www.twitch.tv:8443/activate?device-code=${code}`, `https://www.twitch.tv@outside.example/activate?device-code=${code}`]) {
+    const f = fixture(() => Response.json({ ok: true, pending: true, verificationUrl, userCode: code }));
+    await assert.rejects(f.manager.clipAuthorization('primary', { action: 'poll' }), /invalid authorization details/);
+  }
+});

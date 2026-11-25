@@ -229,3 +229,12 @@ test('automatic final permit is single-use, bound to creator and invalidated by 
   assert.equal(stale.c.permit('primary', { requestId: staleId }).ok, false);
   assert.throws(() => stale.c.permit('primary', { requestId: staleId, source: 'manual' }));
 });
+
+test('authorization forwards documented prefilled links and refuses code substitutions before the browser', async t => {
+  const f = fixture(); t.after(() => f.cleanup());
+  const verificationUrl = 'https://www.twitch.tv/activate?public=true&device-code=ABCD1234';
+  f.accounts.clipAuthorization = async () => ({ ok: true, pending: true, verificationUrl, userCode: 'ABCD1234' });
+  assert.equal((await f.c.authorize({ accountId: 'third', action: 'poll' })).verificationUrl, verificationUrl);
+  f.accounts.clipAuthorization = async () => ({ ok: true, pending: true, verificationUrl, userCode: 'MISMATCH' });
+  await assert.rejects(f.c.authorize({ accountId: 'third', action: 'poll' }), /invalid Twitch activation page/);
+});
