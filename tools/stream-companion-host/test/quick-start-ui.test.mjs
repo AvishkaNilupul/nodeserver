@@ -9,7 +9,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const account = id => ({ id, name: id === 'primary' ? 'Main companion' : 'Second companion', account: `${id}_account`, available: true, authorized: true, connected: false,
   settings: { paused: true, autoReply: false, autoResume: id === 'test', chatMode: 'mentions', replySource: id === 'test' ? 'ai' : 'local' },
   browser: { online: true, lastSeenAt: new Date(at).toISOString() }, permissions: { playbackAccess: true }, controls: { pending: null, recent: [] } });
-function fixture({ before, post, directory } = {}) {
+function fixture({ before, post, directory, onState } = {}) {
   const instances = [account('primary'), account('test')], calls = []; let paused = true, count = 0, reads = 0;
   const fetchImpl = async (path, options) => {
     const body = options.body ? JSON.parse(options.body) : undefined, call = { path, options, body }; calls.push(call);
@@ -29,7 +29,7 @@ function fixture({ before, post, directory } = {}) {
     throw Error('Unexpected fixture request');
   };
   let rid = 0;
-  const controller = createAccountsController({ basePath, fetchImpl, now: () => at, requestId: () => `request-${++rid}` });
+  const controller = createAccountsController({ basePath, fetchImpl, now: () => at, requestId: () => `request-${++rid}`, ...(onState ? { onState } : {}) });
   return { controller, calls, instances, posts: () => calls.filter(c => c.options.method === 'POST') };
 }
 
@@ -43,6 +43,26 @@ class Node {
   setAttribute(name, value) { this.attributes[name] = String(value); }
 }
 const view = () => { const nodes = new Map(); return createAccountsView({ getElementById: id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); }, createElement: tag => new Node(tag) }); };
+
+test('real state rendering handles initial and reconciled outcomes throughout quick Start and Stop', async () => {
+  for (const action of ['quickStart', 'quickStop']) {
+    const v = view(); let f, initialRendered = false;
+    f = fixture({ onState: state => {
+      renderAccounts(v, state, { now: at, canCommand: f.controller.canCommand });
+      if (state.quick.targetIds.length === 2 && state.quick.targetIds.every(id => state.quick.outcomes[id].state === 'not_requested')) {
+        initialRendered = true;
+        assert.match(v.nodes['quick-outcomes'].textContent, /Not requested/);
+      }
+    } });
+    await f.controller.refresh(); f.controller.editQuick('selection', 'both');
+    assert.equal(await f.controller[action](), true);
+    assert.equal(initialRendered, true, `${action} renders before any operation exists`);
+    assert.match(v.nodes['quick-outcomes'].textContent, /primary_account/);
+    assert.match(v.nodes['quick-outcomes'].textContent, /test_account/);
+    assert.match(v.nodes['quick-outcomes'].textContent, /Queued/);
+    assert.equal(f.controller.getState().quick.busy, false);
+  }
+});
 
 test('quick start uses only the chosen account and resumes shared coordination after its accepted request', async () => {
   const f = fixture(); await f.controller.refresh();

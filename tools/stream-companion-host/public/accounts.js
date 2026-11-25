@@ -333,7 +333,7 @@ function renderQuick(view, state, now, canCommand) {
   n['quick-outcome-heading'].textContent = q.targetIds.length ? `Latest action${q.action === 'start' && q.targetChannel ? ` · #${q.targetChannel}` : ''}` : '';
   n['quick-outcome-heading'].hidden = !q.targetIds.length;
   n['quick-outcomes'].replaceChildren(...q.targetIds.map(id => {
-    const outcome = q.outcomes[id] || {}, local = state.operations[id], current = local?.requestId === outcome.requestId ? local.command : outcome;
+    const outcome = q.outcomes[id] || {}, local = state.operations[id], current = local && local.requestId === outcome.requestId ? local.command : outcome;
     const row = view.el('li'), name = text(instanceFor(state, id)?.account, id === 'primary' ? 'Main companion' : 'Second companion');
     const status = current.state === 'not_requested' ? 'Not requested' : commandState(current);
     row.append(view.el('strong', name), pill(view, `${outcome.action === 'stop' ? 'Stop' : 'Start'} · ${status}`, commandTone(current)));
