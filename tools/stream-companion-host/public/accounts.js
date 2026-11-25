@@ -103,7 +103,8 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
   function startEligible(id, preparation = null, requireFresh = false) {
     if (!IDS.has(id) || !hostFresh(state, now()) || typeof state.data?.csrfToken !== 'string' || !state.data.csrfToken || state.data.csrfToken.length > 256) return false;
     const instance = instanceFor(state, id), local = state.operations[id], pending = state.browserPreparations[id];
-    return instance?.available === true && instance.authorized === true && instance.permissions?.playbackAccess === true
+    return instance?.available === true && instance.authorized === true
+      && (instance.permissions?.playbackAccess === true || !requireFresh && (!bridgeFresh(instance, now()) && instance.browser?.canOpen === true || preparation?.permissionPending?.has(id) === true))
       && (!pending || pending === preparation) && !(local && (local.transport || active(local.command, now())))
       && !active(instance.controls?.pending, now())
       && (bridgeFresh(instance, now()) || !requireFresh && instance.browser?.canOpen === true);
@@ -119,7 +120,8 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     // An ordinary Start on older installations keeps its existing fresh-bridge
     // path. Configured profiles need a heartbeat after this explicit request.
     if (ids.every(id => bridgeFresh(instanceFor(state, id), now()) && instanceFor(state, id).browser?.canOpen !== true)) return true;
-    const preparation = { ids: [...ids], cancelled: false, message: 'Checking browser connections…' };
+    const preparation = { ids: [...ids], cancelled: false, message: 'Checking browser connections…',
+      permissionPending: new Set(ids.filter(id => { const instance = instanceFor(state, id); return !bridgeFresh(instance, now()) && instance.browser?.canOpen === true && instance.permissions?.playbackAccess !== true; })) };
     for (const id of ids) state.browserPreparations[id] = preparation;
     const stopped = () => preparation.cancelled || cancelled();
     const progress = message => { preparation.message = message; onProgress(message); emit(); };
@@ -139,7 +141,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       const launched = new Set();
       const ready = id => {
         const instance = instanceFor(state, id);
-        return bridgeFresh(instance, now()) && (!proofRequired.has(id)
+        return bridgeFresh(instance, now()) && instance.permissions?.playbackAccess === true && (!proofRequired.has(id)
           || !Number.isFinite(baseline.get(id)) || timestamp(instance.browser.lastSeenAt) > baseline.get(id));
       };
       while (true) {
@@ -147,7 +149,9 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         if (ids.some(id => !startEligible(id, preparation))) throw quickFailure('A selected account is no longer ready. Check its access or pending operation; no further start will be sent.');
         if (ids.every(ready)) return true;
         const elapsed = Math.max(waited, now() - began);
-        if (elapsed >= browserWaitMs) throw quickFailure('The browser did not connect in time. Check the selected Chrome profile on the Mac, then try again. No companion was started.');
+        if (elapsed >= browserWaitMs) throw quickFailure(ids.some(id => bridgeFresh(instanceFor(state, id), now()) && instanceFor(state, id).permissions?.playbackAccess !== true)
+          ? 'The browser connected, but playback access is still unavailable. Check playback access in the account’s extension; Start was not sent.'
+          : 'The browser did not connect in time. Check the selected Chrome profile on the Mac, then try again. No companion was started.');
         for (const id of ids) {
           if (stopped()) return false;
           if (ready(id) || launched.has(id) || instanceFor(state, id).browser?.canOpen !== true || initiallyFresh.get(id) && Math.max(waited, now() - capturedAt) < browserGraceMs) continue;

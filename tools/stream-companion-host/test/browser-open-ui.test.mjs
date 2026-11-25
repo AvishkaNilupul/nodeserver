@@ -111,10 +111,51 @@ test('failed or ambiguous browser opening stops the sequence and keeps private d
 });
 
 test('all selected access gates are checked before any profile opening request', async () => {
-  for (const change of [instance => { instance.available = false; }, instance => { instance.authorized = false; }, instance => { instance.permissions.playbackAccess = false; }, instance => { instance.controls.pending = { action: 'start', state: 'queued' }; }]) {
+  for (const change of [instance => { instance.available = false; }, instance => { instance.authorized = false; }, instance => { instance.permissions.playbackAccess = false; instance.browser.online = true; }, instance => { instance.controls.pending = { action: 'start', state: 'queued' }; }]) {
     const f = fixture({ closed: ['primary', 'test'] }); change(f.instances[1]); f.controller.editQuick('selection', 'both');
     assert.equal(await f.controller.quickStart(), false); assert.equal(f.posts().length, 0);
   }
+});
+
+test('closed profiles with unknown cached playback access can open, then fresh permission allows Start', async () => {
+  const f = fixture({ sleep: ({ instances }) => { instances[0].permissions.playbackAccess = true; } });
+  f.instances[0].permissions.playbackAccess = false;
+  await f.controller.refresh();
+  assert.equal(f.controller.canCommand('primary', 'start'), true);
+  assert.equal(f.view.nodes['quick-start'].disabled, false, 'actual rendering enables browser preparation');
+  assert.equal(await f.controller.quickStart(), true);
+  assert.equal(f.opens().length, 1); assert.deepEqual(f.commands().map(call => call.body.action), ['start']);
+  assert.ok(f.commands()[0].at > f.opens()[0].at);
+});
+
+test('a newly connected profile reporting denied playback access never receives Start', async () => {
+  const f = fixture(); f.instances[0].permissions.playbackAccess = false;
+  await f.controller.refresh();
+  assert.equal(f.view.nodes['quick-start'].disabled, false, 'unknown offline permission permits opening only');
+  assert.equal(await f.controller.quickStart(), false);
+  assert.equal(f.opens().length, 1); assert.equal(f.commands().length, 0);
+  assert.equal(f.posts().filter(call => call.path.endsWith('/api/control')).length, 0);
+  assert.equal(f.view.nodes['quick-start'].disabled, true, 'fresh denied permission blocks another Start');
+  assert.match(f.controller.getState().quick.error, /playback access is still unavailable/);
+  const denied = fixture({ closed: [] }); denied.instances[0].permissions.playbackAccess = false;
+  await denied.controller.refresh();
+  assert.equal(denied.controller.canCommand('primary', 'start'), false);
+  assert.equal(denied.view.nodes['quick-start'].disabled, true);
+  assert.equal(await denied.controller.quickStart(), false); assert.equal(denied.posts().length, 0);
+  const revoked = fixture({ sleep: ({ instances }) => { instances[0].permissions.playbackAccess = false; } });
+  await revoked.controller.refresh();
+  assert.equal(await revoked.controller.quickStart(), false); assert.equal(revoked.opens().length, 1); assert.equal(revoked.commands().length, 0);
+  assert.match(revoked.controller.getState().quick.error, /no longer ready/);
+});
+
+test('cold startup waits through the first handshake heartbeat until playback permission is reported', async () => {
+  let heartbeatCount = 0;
+  const f = fixture({ sleep: ({ instances }) => { if (++heartbeatCount >= 2) instances[0].permissions.playbackAccess = true; } });
+  f.instances[0].permissions.playbackAccess = false;
+  await f.controller.refresh();
+  assert.equal(await f.controller.quickStart(), true);
+  assert.equal(f.opens().length, 1); assert.equal(f.commands().length, 1);
+  assert.ok(f.commands()[0].at >= START + 20, 'first online heartbeat with false permission cannot Start');
 });
 
 test('Quick Stop cancels browser waiting before any Start or Resume can follow', async () => {
