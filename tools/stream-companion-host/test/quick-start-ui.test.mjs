@@ -6,16 +6,29 @@ const at = Date.parse('2026-11-25T06:00:00Z');
 const basePath = '/admin/stream-companion';
 const response = data => ({ ok: true, status: 200, json: async () => structuredClone(data) });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
-const account = id => ({ id, name: id === 'primary' ? 'Main companion' : 'Second companion', account: `${id}_account`, available: true, authorized: true, connected: false,
+const account = id => ({ id, name: { primary: 'Main companion', test: 'Second companion', third: 'Third companion' }[id], account: `${id}_account`, available: true, authorized: true, connected: false,
   settings: { paused: true, autoReply: false, autoResume: id === 'test', chatMode: 'mentions', replySource: id === 'test' ? 'ai' : 'local' },
   browser: { online: true, lastSeenAt: new Date(at).toISOString() }, permissions: { playbackAccess: true }, controls: { pending: null, recent: [] } });
-function fixture({ before, post, directory, onState, third = false } = {}) {
-  const instances = [account('primary'), account('test'), ...(third ? [account('third')] : [])], calls = []; let paused = true, count = 0, reads = 0;
+function fixture({ before, post, directory, onState, third = false, complete = true, sleep, controllerOptions = {} } = {}) {
+  const instances = [account('primary'), account('test'), ...(third ? [account('third')] : [])], calls = []; let paused = true, count = 0, reads = 0, sleeps = 0;
+  const finish = (id, state = 'completed', reason = 'Automatic chat is waiting for channel access.') => {
+    const instance = instances.find(value => value.id === id), command = instance.controls.pending;
+    assert.equal(command?.action, 'start');
+    command.state = state; command.result = { ok: state === 'completed', reason }; instance.controls.pending = null;
+    if (state === 'completed') {
+      instance.connected = true; instance.channel = command.params.channel;
+      Object.assign(instance.settings, command.params, { allowedChannel: command.params.channel, paused: false, autoReply: true });
+      instance.activity = { state: 'waiting', reason, at };
+    }
+  };
   const fetchImpl = async (path, options) => {
     const body = options.body ? JSON.parse(options.body) : undefined, call = { path, options, body }; calls.push(call);
-    if (before) await before(call, { instances, reads: ++reads });
+    if (before) await before(call, { instances, reads: ++reads, finish });
     if (path.endsWith('/api/channels') || /\/api\/channels\/[a-z0-9_]+$/.test(path)) return directory ? directory(call) : response({ updatedAt: new Date(at).toISOString(), channels: [{ login: 'aviskarex', displayName: 'aviskarex', isLive: false, checkedAt: at }, { login: 'live_channel', displayName: 'Live Channel', isLive: true, checkedAt: at }] });
-    if (options.method === 'GET' && path.endsWith('/api/accounts')) return response({ updatedAt: new Date(at).toISOString(), csrfToken: 'test-csrf', instances });
+    if (options.method === 'GET' && path.endsWith('/api/accounts')) {
+      if (complete) for (const instance of instances) if (instance.controls.pending?.action === 'start' && instance.controls.pending.params?.channel && ['queued', 'running'].includes(instance.controls.pending.state)) finish(instance.id);
+      return response({ updatedAt: new Date(at).toISOString(), csrfToken: 'test-csrf', instances });
+    }
     if (options.method === 'GET' && path.endsWith('/api/status')) return response({ updatedAt: new Date(at).toISOString(), csrfToken: 'test-csrf', paused });
     if (path.endsWith('/api/control')) { paused = body.paused; return response({ ok: true, paused }); }
     const match = /\/api\/accounts\/(primary|test|third)\/command$/.exec(path);
@@ -29,8 +42,9 @@ function fixture({ before, post, directory, onState, third = false } = {}) {
     throw Error('Unexpected fixture request');
   };
   let rid = 0;
-  const controller = createAccountsController({ basePath, fetchImpl, now: () => at, requestId: () => `request-${++rid}`, ...(onState ? { onState } : {}) });
-  return { controller, calls, instances, posts: () => calls.filter(c => c.options.method === 'POST') };
+  const controller = createAccountsController({ basePath, fetchImpl, now: () => at, requestId: () => `request-${++rid}`, startWaitMs: 5000,
+    sleepImpl: async ms => { sleeps++; await sleep?.(ms, { instances, finish, sleeps }); }, ...(onState ? { onState } : {}), ...controllerOptions });
+  return { controller, calls, instances, finish, sleeps: () => sleeps, posts: () => calls.filter(c => c.options.method === 'POST') };
 }
 
 class Node {
@@ -59,20 +73,20 @@ test('real state rendering handles initial and reconciled outcomes throughout qu
     assert.equal(initialRendered, true, `${action} renders before any operation exists`);
     assert.match(v.nodes['quick-outcomes'].textContent, /primary_account/);
     assert.match(v.nodes['quick-outcomes'].textContent, /test_account/);
-    assert.match(v.nodes['quick-outcomes'].textContent, /Queued/);
+    assert.match(v.nodes['quick-outcomes'].textContent, action === 'quickStart' ? /Completed/ : /Queued/);
     assert.equal(f.controller.getState().quick.busy, false);
   }
 });
 
-test('quick start uses only the chosen account and resumes shared coordination after its accepted request', async () => {
+test('quick start uses only the chosen account and resumes shared coordination after its confirmed completion', async () => {
   const f = fixture(); await f.controller.refresh();
   assert.equal(f.controller.getState().quick.channel, 'aviskarex');
   assert.equal(await f.controller.quickStart(), true);
   assert.deepEqual(f.posts().map(c => c.path), [`${basePath}/api/accounts/primary/command`, `${basePath}/api/control`]);
   assert.deepEqual(f.posts()[0].body.params, { channel: 'aviskarex', chatMode: 'participate', replySource: 'local', autoResume: false });
   assert.deepEqual(f.posts()[1].body, { paused: false });
-  assert.equal(f.controller.getState().operations.primary.command.state, 'queued');
-  assert.match(f.controller.getState().quick.message, /accepted/);
+  assert.equal(f.controller.getState().operations.primary.command.state, 'completed');
+  assert.match(f.controller.getState().quick.message, /completed Start/);
   assert.ok(f.calls.every(c => c.options.credentials === 'same-origin'));
   assert.ok(f.posts().every(c => c.options.headers['X-CSRF-Token'] === 'test-csrf'));
 });
@@ -106,7 +120,7 @@ test('ambiguous first Start sends neither the second Start nor shared Resume and
 test('a second-account timeout preserves the first outcome and cannot Resume shared coordination', async () => {
   const f = fixture({ post: async call => { if (call.path.endsWith('/test/command')) throw Error('private second-account diagnostic'); } });
   f.controller.editQuick('selection', 'both'); assert.equal(await f.controller.quickStart(), false);
-  assert.equal(f.posts().length, 2); assert.equal(f.controller.getState().quick.outcomes.primary.state, 'queued');
+  assert.equal(f.posts().length, 2); assert.equal(f.controller.getState().quick.outcomes.primary.state, 'completed');
   assert.equal(f.controller.getState().quick.outcomes.test.state, 'unknown');
   assert.doesNotMatch(f.controller.getState().quick.error, /private second-account diagnostic/);
 });
@@ -140,6 +154,129 @@ test('Stop selected cancels an in-flight sequence before later Starts or Resume'
   assert.equal(await f.controller.quickStop(), true); held.resolve(); assert.equal(await starting, false);
   assert.deepEqual(f.posts().map(c => c.body.action || 'resume'), ['start', 'stop', 'stop']);
   assert.equal(f.controller.getState().quick.action, 'stop'); assert.equal(f.controller.getState().quick.busy, false);
+});
+
+test('all three must complete their matching Starts before shared Resume, including a waiting chat session', async () => {
+  const v = view(); let f;
+  f = fixture({ third: true, complete: false, onState: state => renderAccounts(v, state, { now: at, canCommand: f.controller.canCommand }),
+    sleep: async (_ms, { finish, sleeps }) => {
+      assert.equal(f.posts().some(call => call.path.endsWith('/api/control')), false, 'queued or partial completion cannot Resume');
+      if (sleeps === 1) { finish('primary'); finish('test'); }
+      else if (sleeps === 2) finish('third', 'completed', 'Watching the stream. Chat is waiting for channel access.');
+    } });
+  await f.controller.refresh(); f.controller.editQuick('selection', 'all');
+  assert.equal(await f.controller.quickStart(), true);
+  assert.equal(f.sleeps(), 2);
+  assert.deepEqual(f.posts().filter(call => call.body.action === 'start').map(call => call.path.split('/').at(-2)), ['primary', 'test', 'third']);
+  assert.equal(f.posts().filter(call => call.path.endsWith('/api/control')).length, 1);
+  assert.ok(Object.values(f.controller.getState().quick.outcomes).every(outcome => outcome.state === 'completed'));
+  assert.match(v.nodes['account-cards'].textContent, /Chat connection/);
+  assert.match(v.nodes['account-cards'].textContent, /Chat is waiting for channel access/);
+  assert.match(v.nodes['quick-message'].textContent, /channel access/);
+});
+
+test('a delayed third-account failure after all Starts were accepted cannot Resume or retry', async () => {
+  const f = fixture({ third: true, complete: false, sleep: async (_ms, { finish }) => {
+    finish('primary'); finish('test'); finish('third', 'failed', 'Channel access could not be confirmed.');
+  } });
+  await f.controller.refresh(); f.controller.editQuick('selection', 'all');
+  assert.equal(await f.controller.quickStart(), false);
+  assert.equal(f.controller.getState().quick.outcomes.third.state, 'failed');
+  assert.match(f.controller.getState().quick.error, /did not complete Start successfully/);
+  await f.controller.refresh(); await f.controller.refresh();
+  assert.equal(f.posts().length, 3, 'only the three original Starts were posted');
+  assert.equal(f.posts().some(call => call.path.endsWith('/api/control')), false);
+});
+
+test('pending Starts time out with their last reported outcomes and no shared Resume or retry', async () => {
+  let waited = 0;
+  const f = fixture({ complete: false, controllerOptions: { startWaitMs: 2500 }, sleep: async ms => { waited += ms; } });
+  assert.equal(await f.controller.quickStart(), false);
+  assert.equal(waited, 2500); assert.equal(f.sleeps(), 3);
+  assert.equal(f.controller.getState().quick.outcomes.primary.state, 'queued');
+  assert.equal(f.controller.getState().operations.primary.command.state, 'queued');
+  assert.equal(f.controller.getState().quick.busy, false);
+  assert.match(f.controller.getState().quick.error, /did not finish in time/);
+  await f.controller.refresh();
+  assert.equal(f.posts().length, 1);
+});
+
+test('a completed POST without the matching status record is insufficient for shared Resume', async () => {
+  const f = fixture({ complete: false, post: async (_call, command) => response({ ok: true, command: { ...command, state: 'completed', result: { ok: true } } }) });
+  assert.equal(await f.controller.quickStart(), false);
+  assert.match(f.controller.getState().quick.error, /did not finish in time/);
+  assert.equal(f.posts().length, 1);
+});
+
+test('queued and running commands cannot remain eligible after their original expiry', async () => {
+  for (const state of ['queued', 'running']) {
+    const f = fixture({ complete: false, sleep: async (_ms, { instances }) => {
+      Object.assign(instances[0].controls.pending, { state, expiresAt: at - 1 });
+    } });
+    assert.equal(await f.controller.quickStart(), false);
+    assert.match(f.controller.getState().quick.error, /expired before completion/);
+    assert.equal(f.sleeps(), 1); assert.equal(f.posts().length, 1);
+  }
+});
+
+test('a completed outcome remains valid when its original pending-command expiry has passed', async () => {
+  const f = fixture({ complete: false, sleep: async (_ms, { instances, finish }) => {
+    finish('primary'); instances[0].controls.recent[0].expiresAt = at - 1;
+  } });
+  assert.equal(await f.controller.quickStart(), true);
+  assert.equal(f.posts().filter(call => call.path.endsWith('/api/control')).length, 1);
+});
+
+test('an unknown status read during completion waiting holds Resume and hides private diagnostics', async () => {
+  let unavailable = false;
+  const f = fixture({ complete: false, sleep: async () => { unavailable = true; }, before: async call => {
+    if (unavailable && call.path.endsWith('/api/accounts')) throw Error('private status failure');
+  } });
+  assert.equal(await f.controller.quickStart(), false);
+  assert.match(f.controller.getState().quick.error, /status is not current/);
+  assert.doesNotMatch(f.controller.getState().quick.error, /private status failure/);
+  assert.equal(f.posts().length, 1);
+});
+
+test('Stop all cancels completion waiting and late successful outcomes cannot Resume', async () => {
+  const began = deferred(), release = deferred();
+  const f = fixture({ third: true, complete: false, sleep: async () => { began.resolve(); await release.promise; } });
+  await f.controller.refresh(); f.controller.editQuick('selection', 'all');
+  const starting = f.controller.quickStart(); await began.promise;
+  const starts = f.instances.map(instance => instance.controls.pending);
+  assert.equal(await f.controller.quickStop(), true);
+  for (const command of starts) { command.state = 'completed'; command.result = { ok: true }; }
+  release.resolve(); assert.equal(await starting, false);
+  assert.deepEqual(f.posts().map(call => call.body.action), ['start', 'start', 'start', 'stop', 'stop', 'stop']);
+  assert.equal(f.controller.getState().quick.action, 'stop'); assert.equal(f.controller.getState().quick.busy, false);
+});
+
+test('an unselected account arming during completion waiting prevents shared Resume', async () => {
+  const f = fixture({ complete: false, sleep: async (_ms, { instances, finish }) => {
+    finish('primary'); Object.assign(instances[1].settings, { paused: false, autoReply: true });
+  } });
+  assert.equal(await f.controller.quickStart(), false);
+  assert.match(f.controller.getState().quick.error, /other account changed/);
+  assert.equal(f.posts().length, 1);
+});
+
+test('completion must retain the original command identity, channel and selected session', async () => {
+  for (const change of [
+    instance => { instance.controls.recent[0].id = 'different-command'; },
+    instance => { instance.controls.recent[0].params.channel = 'other_channel'; },
+    instance => { instance.controls.recent[0].params.replySource = 'ai'; },
+    instance => { instance.controls.recent[0].params = {}; },
+    instance => { instance.settings.paused = true; instance.settings.autoReply = false; },
+    instance => { instance.settings.replySource = 'ai'; },
+    instance => { instance.settings.autoResume = true; },
+    instance => { instance.settings.chatMode = 'mentions'; },
+    instance => { instance.browser.lastSeenAt = new Date(at - 46000).toISOString(); }
+  ]) {
+    const f = fixture({ complete: false, sleep: async (_ms, { instances, finish }) => { finish('primary'); change(instances[0]); } });
+    assert.equal(await f.controller.quickStart(), false);
+    assert.equal(f.posts().length, 1);
+    assert.match(f.controller.getState().quick.error, /not resumed/);
+  }
 });
 
 test('channel refresh and lookup preserve choices and edits without issuing mutations', async () => {

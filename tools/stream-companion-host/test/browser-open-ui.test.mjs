@@ -26,7 +26,16 @@ function fixture({ closed = ['primary'], cachedClosed = [], connect = true, brow
   const fetchImpl = async (path, options) => {
     const call = { path, options, body: options.body ? JSON.parse(options.body) : undefined, at: time }; calls.push(call);
     await before?.(call, { instances, time, heartbeat });
-    if (options.method === 'GET' && path.endsWith('/api/accounts')) return response({ updatedAt: new Date(time).toISOString(), csrfToken: 'fixture-browser-csrf', instances });
+    if (options.method === 'GET' && path.endsWith('/api/accounts')) {
+      for (const instance of instances) {
+        const command = instance.controls.pending;
+        if (command?.action !== 'start' || !command.params?.channel) continue;
+        command.state = 'completed'; command.result = { ok: true }; instance.controls.pending = null;
+        instance.connected = true; instance.channel = command.params.channel;
+        Object.assign(instance.settings, command.params, { allowedChannel: command.params.channel, paused: false, autoReply: true });
+      }
+      return response({ updatedAt: new Date(time).toISOString(), csrfToken: 'fixture-browser-csrf', instances });
+    }
     if (options.method === 'GET' && path.endsWith('/api/status')) return response({ updatedAt: new Date(time).toISOString(), csrfToken: 'fixture-browser-csrf', paused });
     const opening = /\/api\/accounts\/(primary|test|third)\/browser$/.exec(path);
     if (opening) {

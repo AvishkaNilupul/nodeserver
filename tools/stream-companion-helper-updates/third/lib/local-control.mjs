@@ -226,10 +226,11 @@ export class LocalControl {
   status() {
     this.expire();
     const raw = this.twitch?.status?.() || {}, state = this.browserState;
+    const sendHold = this.twitch?.sendHold?.(raw.account, state.settings?.allowedChannel || raw.channel);
     return { ok: true, updatedAt: new Date(this.now()).toISOString(), account: login(raw.account) ? raw.account : '', authorized: raw.authorized === true,
       connected: !this.stopped && raw.connected === true, channel: login(raw.channel) ? raw.channel : '', error: this.storageError ? 'Local control safety state could not be saved; sending is held.' : this.diagnostic(raw.error),
       settings: this.settings(state.settings), browser: { online: this.online(), lastSeenAt: iso(this.lastSeen) },
-      watch: state.watch || this.cleanState().watch, activity: state.activity || this.cleanState().activity, streamContext: state.streamContext || this.cleanState().streamContext,
+      watch: state.watch || this.cleanState().watch, activity: sendHold?.held ? { state: 'waiting', reason: this.diagnostic(sendHold.reason), at: stamp(sendHold.at) } : state.activity || this.cleanState().activity, streamContext: state.streamContext || this.cleanState().streamContext,
       chat: { messages: this.messages(raw.messages), digest: digest(this.messages(raw.messages)) }, sent: this.sent(raw.sent), drops: state.drops || this.cleanState().drops,
       coordination: this.coordination(raw.coordination), permissions: state.permissions || { playbackAccess: false },
       controls: { pending: this.commands.filter(c => !terminal.has(c.state)).map(c => this.publicCommand(c)), recent: this.commands.slice(-20).reverse().map(c => this.publicCommand(c)) } };

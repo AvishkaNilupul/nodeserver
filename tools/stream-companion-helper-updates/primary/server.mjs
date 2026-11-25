@@ -4,6 +4,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { composeRequest, generate } from './lib/composer.mjs';
 import { TwitchChat } from './lib/twitch.mjs';
+import { ChatSendHolds } from './lib/chat-holds.mjs';
 import { HostCoordinator } from './lib/host-coordinator.mjs';
 import { LocalControl } from './lib/local-control.mjs';
 import { ViewerClips } from './lib/clips.mjs';
@@ -71,7 +72,14 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
           const permitted = intent ? { ...input, controlGeneration: intent.generation } : input;
           let result;
           try {
-            result = await twitch.connect(input.account, input.channel); control.guard(permitted, { action: 'start' });
+            const explicit = !!intent || control.commands?.some(c => c.id === input.controlCommandId && c.action === 'start' && c.params.channel === input.channel);
+            result = await twitch.connect(input.account, input.channel, { beforeConnect: () => {
+              control.guard(permitted, { action: 'start' });
+              if (explicit) {
+                try { twitch.clearSendHold?.(input.account, input.channel); }
+                catch { /* Failed clearing keeps chat held; read and playback may still connect. */ }
+              }
+            } }); control.guard(permitted, { action: 'start' });
             if (intent) control.nativeConnected(intent.generation);
           } catch (e) { if (intent) control.nativeFailed(intent.generation); twitch.disconnect(); throw e; }
           return { ...result, ...(intent ? { intent: control.intent() } : {}) };
@@ -81,6 +89,8 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
       };
       if (Object.hasOwn(actions, req.url)) return respond(res, 200, await locked(actions[req.url]));
       if (req.url !== '/api/compose') return respond(res, 404, { error: 'Not found.' });
+      const sendHold = twitch.sendHold?.(input.account, input.channel);
+      if (sendHold?.held) return respond(res, 409, { error: sendHold.reason });
       calls = calls.filter(at => at > Date.now() - 3_600_000);
       if (modelBusy || calls.length >= 30) return respond(res, 429, { error: 'The helper is busy or the hourly model budget is exhausted.' });
       let composeInput; try { composeInput = composeRequest(input); } catch (e) { e.status = 400; throw e; }
@@ -108,7 +118,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     outboxFile: new URL('./private/host-completions.json', import.meta.url),
     getConnection: () => ({ channel: twitch?.channel || '', connected: twitch?.connected === true }) });
   coordinator.register(credentials.account); coordinator.seed(history);
-  twitch = new TwitchChat({ credentials, history, coordinator, saveCredentials: value => savePrivate(credentialsUrl, value), saveHistory: value => savePrivate(historyUrl, value) });
+  const sendHolds = new ChatSendHolds({ file: new URL('./private/chat-send-holds.json', import.meta.url) });
+  twitch = new TwitchChat({ credentials, history, coordinator, sendHolds, saveCredentials: value => savePrivate(credentialsUrl, value), saveHistory: value => savePrivate(historyUrl, value) });
   void coordinator.refresh().catch(() => {});
   const server = createHelper({ config, twitch, intentFile: new URL('./private/control-intent.json', import.meta.url), clipFile: new URL('./private/clip-jobs.json', import.meta.url) });
   server.once('close', () => coordinator.close());

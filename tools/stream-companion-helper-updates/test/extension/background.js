@@ -123,7 +123,17 @@ async function refreshChannelInfo(s) {
   try { return await metadataFlight; } finally { metadataFlight = null; }
 }
 
+function sendHoldReason(s) {
+  const hold = chat.sendHold;
+  return hold?.held === true && hold.account === s.account && hold.channel === s.allowedChannel ? hold.reason || 'Chat is held for this account and channel.' : '';
+}
+
 async function watchSendGate(s, automatic = false) {
+  const held = sendHoldReason(s); if (held) return held;
+  return playbackGate(s, automatic);
+}
+
+async function playbackGate(s, automatic = false) {
   if (watchTransition) return 'Waiting for chat to align with the stream tab.';
   const w = await watch.state();
   if (!w.enabled) return '';
@@ -196,7 +206,7 @@ async function refreshChat() {
   const epoch = operationEpoch;
   const before = await settings();
   const playback = await watch.state();
-  const context = before.chatMode === 'participate' && before.autoReply && !before.paused
+  const context = !sendHoldReason(before) && before.chatMode === 'participate' && before.autoReply && !before.paused
     && playback.enabled && playback.account === before.account && playback.channel === before.allowedChannel
     && ['playing', 'ad'].includes(playback.status) && chat.channel === before.allowedChannel
     ? exchangeContext({ messages: chat.messages, account: before.account, channel: before.allowedChannel,
@@ -219,6 +229,7 @@ async function refreshChat() {
 }
 
 async function compose(mode, s, target) {
+  const held = sendHoldReason(s); if (held) throw new Error(held);
   const recent = (await chrome.storage.local.get('sent')).sent || [];
   if (mode === 'summary' && s.replySource === 'local') return localSummary(chat.messages, chat.channel);
   if (mode === 'reply' && s.replySource === 'local') return localReply({ messages: chat.messages, account: s.account, channel: chat.channel, target, recent, streamContext: chat.streamContext, excludedKeys: chat.coordination?.textKeys || [] });
@@ -286,9 +297,10 @@ async function submit(text, target, category, participation, binding = controlBr
     submittedToHelper = true;
     result = await helper('/api/twitch/send', { account: s.account, channel: s.allowedChannel, text, replyTo: target?.id || '', replyAuthor: target?.author || '', category: category || '', ...intent }, s, binding);
     Object.assign(attempt, { delivery: result.delivery, messageId: result.messageId, reason: result.reason });
+    if (result.sendHold) chat.sendHold = result.sendHold;
     // Explicit suppression certifies that no Twitch send request was made.
     if (result.suppressed === true && result.submitted === false) { submittedToHelper = false; attempt.suppressed = true; }
-    setActivity(attempt.suppressed ? 'waiting' : result.delivery === 'confirmed' ? 'sent' : 'error', attempt.suppressed ? result.reason : result.delivery === 'confirmed' ? 'Twitch confirmed the latest reply.' : `Message ${result.delivery}${result.reason ? `: ${result.reason}` : '.'}`);
+    setActivity(chat.sendHold?.held ? 'waiting' : attempt.suppressed ? 'waiting' : result.delivery === 'confirmed' ? 'sent' : 'error', chat.sendHold?.held ? chat.sendHold.reason : attempt.suppressed ? result.reason : result.delivery === 'confirmed' ? 'Twitch confirmed the latest reply.' : `Message ${result.delivery}${result.reason ? `: ${result.reason}` : '.'}`);
   } catch (e) { attempt.delivery = submittedToHelper ? 'unknown' : 'cancelled'; attempt.reason = e.message; throw e; }
   finally {
     const entries = (await chrome.storage.local.get('sent')).sent || [];
@@ -410,6 +422,7 @@ function requestAutoReply() {
     const s = await settings();
     prunePreparedDrafts(s);
     if (!s.autoReply || s.paused || !chat.connected || chat.account !== s.account || chat.channel !== s.allowedChannel) return;
+    const held = sendHoldReason(s); if (held) { setActivity('waiting', held); return; }
     if (chat.coordination?.available === false || chat.coordination?.paused) { setActivity('waiting', chat.coordination.reason || 'Central host is holding automatic chat.'); return; }
     const watchReason = await watchSendGate(s, true);
     if (watchReason) { setActivity('waiting', watchReason); return; }
@@ -467,7 +480,7 @@ function requestRecovery() {
   const binding = controlBridge?.binding();
   locked(async () => {
     const s = await settings();
-    if (await watchSendGate(s)) return;
+    if (await playbackGate(s)) return;
     if (s.paused || !(s.autoResume || s.autoReply) || chat.connected || chat.channel || chat.recoverable === false) return;
     if (!s.account || !s.allowedChannel || chat.account !== s.account) return;
     const recovery = (await chrome.storage.session.get('recovery')).recovery || {};

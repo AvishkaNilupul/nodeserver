@@ -1,3 +1,4 @@
+import { ChatSendHolds } from './chat-holds.mjs';
 import { mergeMessages, sendGate, validateReply } from '../extension/core.js';
 import { exchangeOffer } from '../extension/exchange.js';
 import { humanMessages } from '../extension/participation.js';
@@ -26,11 +27,12 @@ export function reconnectUrl(raw) {
 // Tokens stay in the paired loopback helper. No browser cookies, playback,
 // follows, browser input, or public-page navigation are used by this transport.
 export class TwitchChat {
-  constructor({ credentials = {}, history = [], coordinator = null, saveCredentials = async () => {}, saveHistory = async () => {}, fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
-    Object.assign(this, { credentials, history, coordinator, saveCredentials, saveHistory, fetch: fetchImpl, WebSocket: WebSocketImpl, now, setTimer, clearTimer });
+  constructor({ credentials = {}, history = [], coordinator = null, saveCredentials = async () => {}, saveHistory = async () => {}, fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sendHolds = new ChatSendHolds({ now }) } = {}) {
+    Object.assign(this, { credentials, history, coordinator, saveCredentials, saveHistory, fetch: fetchImpl, WebSocket: WebSocketImpl, now, setTimer, clearTimer, sendHolds });
     this.messages = []; this.connected = false; this.error = ''; this.generation = 0; this.validatedAt = null;
     this.sockets = new Set(); this.timers = new Map(); this.chain = Promise.resolve();
     this.channelCache = new Map();
+    this.sendHolds.recover(history);
   }
 
   async request(url, options = {}) {
@@ -209,11 +211,11 @@ export class TwitchChat {
     const stream = streams.data.find(x => x.user_id === user.id && x.user_login === channel);
     const reason = !stream ? 'The stream is offline.' : shared.data.length ? 'Sending is paused during shared chat.'
       : modes.emote_mode ? 'This channel is in emote-only mode.' : modes.subscriber_mode ? 'This channel is in subscriber-only mode.'
-      : modes.follower_mode ? 'This channel is in followers-only mode.' : '';
+      : '';
     const checkedAt = this.now();
     const result = { channel, broadcasterId: user.id, checkedAt, canReply: !reason, reason, sharedChat: !!shared.data.length,
       streamContext: { channel, streamId: id(stream?.id) ? stream.id : '', title: String(stream?.title || '').slice(0, 300), gameName: String(stream?.game_name || '').slice(0, 100), isLive: !!stream, checkedAt },
-      chatSettings: { followersOnly: modes.follower_mode, subscribersOnly: modes.subscriber_mode, emoteOnly: modes.emote_mode, slowSeconds: modes.slow_mode ? Number(modes.slow_mode_wait_time) || 0 : 0 } };
+      chatSettings: { followersOnly: modes.follower_mode, followerMinutes: modes.follower_mode && Number.isInteger(modes.follower_mode_duration) && modes.follower_mode_duration >= 0 && modes.follower_mode_duration <= 129600 ? modes.follower_mode_duration : null, subscribersOnly: modes.subscriber_mode, emoteOnly: modes.emote_mode, slowSeconds: modes.slow_mode ? Number(modes.slow_mode_wait_time) || 0 : 0 } };
     this.channelCache.set(key, result);
     if (this.channelCache.size > 12) this.channelCache.delete(this.channelCache.keys().next().value);
     return structuredClone(result);
@@ -229,7 +231,7 @@ export class TwitchChat {
     this.sockets.clear();
   }
 
-  async connect(account, channel) {
+  async connect(account, channel, { beforeConnect = () => {} } = {}) {
     if (!login(account) || !login(channel)) throw new Error('Enter one account and one channel login.');
     this.disconnect(); this.error = ''; this.recoverable = true;
     const generation = this.generation;
@@ -240,6 +242,7 @@ export class TwitchChat {
     const user = users.data?.[0];
     if (!id(user?.id) || user.login !== channel) throw new Error('Twitch channel was not found.');
     if (generation !== this.generation) return;
+    beforeConnect();
     this.channel = channel; this.broadcasterId = user.id;
     this.openSocket('wss://eventsub.wss.twitch.tv/ws', generation);
     this.validateLater(account, generation);
@@ -330,9 +333,13 @@ export class TwitchChat {
     });
   }
 
+  sendHold(account = this.credentials.account, channel = this.channel) { return this.sendHolds.status(account, channel); }
+  clearSendHold(account, channel) { this.sendHolds.clear(account, channel); }
+
   async refreshCoordination(observation) {
     if (!this.coordinator?.refresh) return;
     this.coordinator.seed?.(this.history);
+    if (this.sendHold().held) observation = { ...(observation || this.coordinator.observation || {}), channel: this.channel || '', autoReply: false, exchangeContext: null };
     await this.coordinator.refresh({ channel: this.channel || '', connected: this.connected, observation });
   }
 
@@ -346,16 +353,21 @@ export class TwitchChat {
 
   status() {
     return { authorized: !!this.credentials.accessToken, account: this.credentials.account || '', channel: this.channel || '', connected: this.connected, error: this.error, recoverable: this.recoverable !== false,
-      messages: mergeMessages(this.messages, [], this.now()), sent: this.history.filter(x => x.at > this.now() - 3_600_000),
+      sendHold: this.sendHold(), messages: mergeMessages(this.messages, [], this.now()), sent: this.history.filter(x => x.at > this.now() - 3_600_000),
       ...(this.coordinator ? { coordination: this.coordinator.snapshot(this.channel || '') } : {}) };
   }
 
   async send({ account, channel, text, replyTo = '', replyAuthor = '', category = '', participationKey = '', kind = '', streamId = '', exchangeId, beforeSubmit }) {
     if (!this.connected || channel !== this.channel) throw new Error('Connect chat to the configured channel first.');
+    const hold = this.sendHold(account, channel);
+    if (hold.held) return { submitted: false, suppressed: true, delivery: 'cancelled', retryable: false, code: hold.code, reason: hold.reason, sendHold: hold };
+    const holdRevision = this.sendHolds.revision(account, channel);
     const generation = this.generation;
     const message = validateReply(text);
     await this.ensureIdentity(account);
     if (generation !== this.generation || !this.connected) throw new Error('Chat disconnected before submission.');
+    const currentHold = this.sendHold(account, channel);
+    if (currentHold.held) return { submitted: false, suppressed: true, delivery: 'cancelled', retryable: false, code: currentHold.code, reason: currentHold.reason, sendHold: currentHold };
     let exchange;
     if (kind === 'exchange' || exchangeId !== undefined) {
       if (kind !== 'exchange' || !participationKey || !exchangeId || replyTo || replyAuthor
@@ -442,7 +454,11 @@ export class TwitchChat {
       return { ...attempt, suppressed: true, submitted: false,
         code: exchangeHuman ? 'exchange_quiet' : exchange ? 'exchange_expired' : 'target_expired', retryable: false };
     }
-    try { await beforeSubmit?.(); }
+    try {
+      await beforeSubmit?.();
+      const finalHold = this.sendHold(account, channel);
+      if (finalHold.held) throw new Error(finalHold.reason);
+    }
     catch (e) {
       attempt.delivery = 'cancelled'; attempt.submitted = false;
       attempt.reason = e?.message || 'The local control command expired or was cancelled before submission.';
@@ -457,10 +473,18 @@ export class TwitchChat {
       attempt.delivery = result?.is_sent === true && result.message_id ? 'confirmed' : result?.is_sent === false ? 'rejected' : 'unknown';
       if (attempt.delivery === 'confirmed') attempt.messageId = result.message_id;
       if (attempt.delivery === 'rejected') attempt.reason = String(result.drop_reason?.code || 'twitch_rejected').slice(0, 100);
+      if (attempt.delivery === 'rejected' && attempt.reason === 'followers_only_mode') {
+        try { if (this.sendHolds.hold(account, channel, holdRevision)) attempt.sendHoldAt = this.now(); } catch { /* Storage failure itself holds every further send. */ }
+        await this.refreshCoordination().catch(() => {});
+      }
       await this.saveHistory(this.history);
       await this.finishCoordination(reservation?.reservationId, attempt.delivery);
-      return { submitted: attempt.delivery === 'confirmed', ...attempt };
+      return { submitted: attempt.delivery === 'confirmed', ...attempt, sendHold: this.sendHold(account, channel) };
     } catch (e) {
+      if (attempt.delivery === 'rejected' && attempt.reason === 'followers_only_mode') {
+        await this.finishCoordination(reservation?.reservationId, 'rejected');
+        return { submitted: false, ...attempt, sendHold: this.sendHold(account, channel) };
+      }
       attempt.delivery = 'unknown';
       await this.saveHistory(this.history);
       await this.finishCoordination(reservation?.reservationId, 'unknown'); throw e;

@@ -151,7 +151,7 @@ test('known Twitch rejection releases shared reservation while uncertain deliver
   const h = harness(t, async url => {
     if (url.endsWith('/chat/messages')) {
       if (uncertain) throw Error('network result unavailable');
-      return response({ data: [{ is_sent: false, drop_reason: { code: 'followers_only_mode' } }] });
+      return response({ data: [{ is_sent: false, drop_reason: { code: 'automod_held' } }] });
     }
   });
   await h.connect();
@@ -407,7 +407,7 @@ test('channel inspection returns fresh bounded metadata and gates restricted des
   const count = h.calls.length; await h.client.inspectChannel('companion_test', 'friend_channel'); assert.equal(h.calls.length, count, 'one-minute metadata cache');
   h.advance(61000); restricted = true;
   info = await h.client.inspectChannel('companion_test', 'friend_channel');
-  assert.equal(info.canReply, false); assert.match(info.reason, /followers-only/);
+  assert.equal(info.canReply, true); assert.equal(info.chatSettings.followersOnly, true); assert.equal(info.reason, '');
   assert.ok(!JSON.stringify(info).includes('secret-access'));
 });
 

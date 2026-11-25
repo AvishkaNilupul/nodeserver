@@ -53,7 +53,7 @@ function commandParams(action, params = {}) {
   return null;
 }
 
-export function createAccountsController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, sleepImpl = ms => new Promise(resolve => setTimeout(resolve, ms)), browserWaitMs = 30000, browserGraceMs = 7500, browserPollMs = 1000, basePath = '' } = {}) {
+export function createAccountsController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, sleepImpl = ms => new Promise(resolve => setTimeout(resolve, ms)), browserWaitMs = 30000, browserGraceMs = 7500, browserPollMs = 1000, startWaitMs = 90000, startPollMs = 1000, basePath = '' } = {}) {
   basePath = controllerBasePath(basePath);
   const state = { basePath, data: null, network: 'loading', error: '', operations: {}, forms: {}, browserPreparations: {}, quick: {
     channel: 'aviskarex', selection: 'primary', lookup: '', channels: [{ login: 'aviskarex', displayName: 'aviskarex', isLive: null }],
@@ -285,7 +285,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
   async function quickStart() {
     const q = state.quick;
     if (q.busy || q.loading || !validChannel(q.channel)) return false;
-    const generation = ++quickRun, ids = selectedIds(), channel = q.channel;
+    const generation = ++quickRun, ids = selectedIds(), channel = q.channel, starts = new Map();
     q.busy = true; q.action = 'start'; q.error = ''; q.message = 'Checking the selected accounts…';
     q.targetIds = [...ids]; q.targetChannel = channel; q.outcomes = Object.fromEntries(ids.map(id => [id, { state: 'not_requested', action: 'start' }])); emit();
     const sharedStatus = async () => {
@@ -301,6 +301,36 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         || local?.action === 'start' && (local.transport || active(local.command, now()))
         || instance.settings?.paused !== true || instance.settings?.autoReply === true;
     });
+    const startsComplete = () => {
+      if (!hostFresh(state, now())) throw quickFailure('Account status is not current. Shared coordination was not resumed. Check the outcomes before trying again; no request will be retried automatically.');
+      let complete = true;
+      for (const id of ids) {
+        const expected = starts.get(id), instance = instanceFor(state, id), local = state.operations[id];
+        if (!expected || local?.requestId !== expected.requestId || local.action !== 'start'
+          || !bridgeFresh(instance, now()) || instance.authorized !== true || instance.account !== expected.account
+          || instance.permissions?.playbackAccess !== true) throw quickFailure('A selected account changed or became unavailable. Shared coordination was not resumed. Check each account’s outcome below; no request will be retried automatically.');
+        const pending = instance.controls?.pending;
+        if (active(pending, now()) && pending.requestId !== expected.requestId) throw quickFailure('A selected account has another operation. Shared coordination was not resumed. Check its outcome before trying again.');
+        const result = [pending, ...list(instance.controls?.recent)].find(item => item?.requestId === expected.requestId);
+        if (!result) { complete = false; continue; }
+        q.outcomes[id] = { requestId: expected.requestId, state: result.state, action: 'start' };
+        if (result.id !== expected.id || result.action !== 'start'
+          || Object.entries(expected.params).some(([key, value]) => result.params?.[key] !== value)
+          || !['queued', 'running', 'completed'].includes(result.state) || result.result?.ok === false) {
+          throw quickFailure('A selected account did not complete Start successfully. Shared coordination was not resumed. Check each account’s outcome below; no request will be retried automatically.');
+        }
+        if (result.state !== 'completed') {
+          if (!Number.isFinite(timestamp(result.expiresAt)) || timestamp(result.expiresAt) <= now()) throw quickFailure('A selected Start expired before completion. Shared coordination was not resumed. Check the outcomes before trying again; no request will be retried automatically.');
+          complete = false; continue;
+        }
+        if (instance.connected !== true || instance.channel !== channel || instance.settings?.allowedChannel !== channel
+          || instance.settings?.paused !== false || instance.settings?.autoReply !== true
+          || ['chatMode', 'replySource', 'autoResume'].some(key => instance.settings[key] !== expected.params[key])) {
+          throw quickFailure('A completed Start no longer matches the selected session. Shared coordination was not resumed. Check the account before trying again.');
+        }
+      }
+      return complete;
+    };
     try {
       await refresh();
       if (generation !== quickRun) return false;
@@ -323,12 +353,25 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         const operation = state.operations[id];
         q.outcomes[id] = operation ? { requestId: operation.requestId, state: operation.command.state, action: 'start' } : { state: 'not_requested', action: 'start' };
         if (!accepted || !['queued', 'running', 'completed'].includes(operation?.command?.state) || operation.command?.result?.ok === false) throw quickFailure('The start sequence stopped. Check each account’s outcome below; shared coordination was not resumed and no request will be retried automatically.');
+        starts.set(id, { requestId: operation.requestId, id: operation.command.id, account: instance.account, params: { ...operation.params } });
       }
-      if (generation !== quickRun) return false;
-      await refresh();
+      const began = now(); let waited = 0;
+      while (true) {
+        if (generation !== quickRun) return false;
+        if (flight) await flight;
+        if (generation !== quickRun) return false;
+        await refresh();
+        if (generation !== quickRun) return false;
+        if (startsComplete()) break;
+        const elapsed = Math.max(waited, now() - began);
+        if (elapsed >= startWaitMs) throw quickFailure('Start did not finish in time for every selected account. Shared coordination was not resumed. Check the last reported outcomes before trying again; no request will be retried automatically.');
+        q.message = 'Waiting for the selected accounts to finish starting…'; emit();
+        const pause = Math.max(1, Math.min(startPollMs, startWaitMs - elapsed));
+        await sleepImpl(pause); waited += pause;
+      }
       shared = await sharedStatus();
       if (generation !== quickRun) return false;
-      if (!hostFresh(state, now()) || ids.some(id => !['queued', 'running', 'completed'].includes(state.operations[id]?.command?.state))) throw quickFailure('An account start is no longer confirmed. Shared coordination was not resumed; check the outcomes below.');
+      if (!startsComplete()) throw quickFailure('An account Start is no longer confirmed complete. Shared coordination was not resumed; check the outcomes below.');
       if (shared.paused && resumeBlocked()) throw quickFailure('The other account changed or became unavailable. Shared coordination was not resumed; check all account states before trying again.');
       if (shared.paused) {
         q.message = 'Resuming shared coordination…'; emit();
@@ -338,7 +381,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         if (result?.ok !== true) throw quickFailure('The shared coordination outcome is unconfirmed. Check Shared coordination before trying another action; this request will not be retried.');
       }
       if (generation !== quickRun) return false;
-      q.message = 'Start requests accepted. Each account’s outcome is shown below; automatic chat waits for live playback and an eligible turn.';
+      q.message = 'The selected accounts completed Start. Automatic chat waits for channel access, live playback and an eligible turn; check each account’s status below.';
       return true;
     } catch (error) {
       if (generation === quickRun) { q.error = error.quickPublic ? error.message : 'Could not finish the start sequence. Check account status before trying another action; no request will be retried automatically.'; q.message = ''; }
@@ -457,7 +500,7 @@ function renderCards(view, state, now) {
     const session = sessionStatus(instance, state, now);
     heading.append(title, pill(view, session.title, session.tone));
     const details = view.el('dl', undefined, 'card-details');
-    details.append(pair(view, 'Channel', instance?.channel ? `#${instance.channel}` : 'No channel'), pair(view, 'Playback', playing.title), pair(view, 'Chat', stale ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected'), pair(view, 'Browser bridge', stale ? 'Unverified' : bridgeFresh(instance, now) ? 'Current' : 'Unavailable'));
+    details.append(pair(view, 'Channel', instance?.channel ? `#${instance.channel}` : 'No channel'), pair(view, 'Playback', playing.title), pair(view, 'Chat connection', stale ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected'), pair(view, 'Browser bridge', stale ? 'Unverified' : bridgeFresh(instance, now) ? 'Current' : 'Unavailable'));
     const reason = view.el('p', stale ? 'Showing last known account data. Waiting for a fresh host response.' : bridgeReason(instance, now) || text(instance?.activity?.reason, 'Ready for account controls.'), 'card-reason');
     const link = view.el('a', 'Open account controls', 'open-account'); link.setAttribute('href', controllerPath(state.basePath || '', `/accounts/${id}`));
     card.append(heading, details, reason, link); cards.push(card);
