@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { HostStore } from './lib/store.mjs';
 import { createAccountManager } from './lib/accounts.mjs';
 import { createChannelDirectory } from './lib/channels.mjs';
+import { createBrowserLauncher, loadBrowserProfiles } from './lib/browser-launcher.mjs';
 
 const equal = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || '')); return x.length === y.length && timingSafeEqual(x, y); };
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -16,7 +17,8 @@ const STATIC = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/ap
   ['/controller-path.js', ['controller-path.js', 'text/javascript; charset=utf-8']]]);
 const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels']);
 const CHANNEL_LOOKUP = /^\/api\/channels\/([a-z0-9_]{3,25})$/;
-const REMOTE_POST = new Set(['/api/control', '/api/accounts/primary/command', '/api/accounts/test/command']);
+const REMOTE_POST = new Set(['/api/control', '/api/accounts/primary/command', '/api/accounts/test/command',
+  '/api/accounts/primary/browser', '/api/accounts/test/browser']);
 const failure = (message, status) => Object.assign(new Error(message), { status });
 
 export async function loadRemoteToken({ file = new URL('./private/remote.json', import.meta.url), readFileImpl = readFile } = {}) {
@@ -40,7 +42,7 @@ async function bodyJSON(req) {
   return value;
 }
 
-export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
+export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), browserLauncher = createBrowserLauncher(), port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
   if (!store || !Array.isArray(clients) || !clients.length) throw Error('Host store and clients required.');
   for (const c of clients) if (typeof c.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(c.token) || store.client(c.id).account !== c.account) throw Error('Invalid coordination client pairing.');
   if (new Set(clients.map(c => c.token)).size !== clients.length) throw Error('Coordination clients require separate tokens.');
@@ -98,7 +100,9 @@ export function createHostServer({ store, clients, accounts = createAccountManag
       if (path === '/api/accounts') {
         if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
         if (!sameOrigin(req)) return send(res, 403, { error: 'Open the local account pages to view status.' });
-        return send(res, 200, { ...await accounts.snapshot(), csrfToken });
+        const value = await accounts.snapshot();
+        return send(res, 200, { ...value, instances: value.instances.map(instance => ({ ...instance,
+          browser: { ...instance.browser, canOpen: browserLauncher.available(instance.id) === true } })), csrfToken });
       }
       const channelLookup = CHANNEL_LOOKUP.exec(path);
       if (path === '/api/channels' || channelLookup) {
@@ -108,6 +112,15 @@ export function createHostServer({ store, clients, accounts = createAccountManag
           ? { updatedAt: new Date().toISOString(), channels: [await channels.lookup(channelLookup[1])] }
           : await channels.snapshot();
         return send(res, 200, { ...value, csrfToken });
+      }
+      const browserOpen = /^\/api\/accounts\/(primary|test)\/browser$/.exec(path);
+      if (browserOpen) {
+        if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
+        if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the account controls to open a browser.' });
+        const body = await bodyJSON(req);
+        if (Object.keys(body).length !== 1 || typeof body.requestId !== 'string'
+          || !/^[A-Za-z0-9:_-]{1,160}$/.test(body.requestId)) throw failure('Invalid browser request.', 400);
+        return send(res, 200, await browserLauncher.open(browserOpen[1], body.requestId));
       }
       const accountCommand = /^\/api\/accounts\/(primary|test)\/command$/.exec(path);
       if (accountCommand) {
@@ -142,7 +155,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const config = JSON.parse(await readFile(new URL('./private/config.json', import.meta.url), 'utf8'));
   const store = new HostStore({ clients: config.clients });
   const remoteToken = await loadRemoteToken();
-  const server = createHostServer({ store, clients: config.clients, remoteToken });
+  let browserProfiles;
+  try { browserProfiles = await loadBrowserProfiles(); }
+  catch { console.warn('Automatic browser opening is unavailable. Existing companion controls remain available.'); }
+  const browserLauncher = createBrowserLauncher({ profiles: browserProfiles });
+  const server = createHostServer({ store, clients: config.clients, remoteToken, browserLauncher });
   server.once('close', () => store.close());
   server.listen(8795, '127.0.0.1', () => console.log('Stream Companion Host 1.0.0 listening on http://127.0.0.1:8795'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => server.close());

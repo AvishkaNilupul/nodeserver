@@ -23,7 +23,7 @@
       <section id="accounts-overview" aria-label="Companion accounts">
         <section class="quick-start panel" aria-labelledby="quick-heading">
           <div class="section-heading"><div><p class="eyebrow">Quick start</p><h2 id="quick-heading">Pick a stream. Choose your accounts.</h2></div><span class="pill" id="quick-channel-status" role="status">Checking channel</span></div>
-          <p class="quick-intro">One click opens the stream in the selected profiles and starts their automatic chat.</p>
+          <p class="quick-intro">One click opens the selected Chrome profiles if needed, then opens the stream and starts their automatic chat.</p>
           <div class="quick-channel-row"><label for="quick-channel">Channel<select id="quick-channel"><option value="aviskarex">aviskarex · Favorite</option></select></label><button class="subtle" id="quick-refresh" type="button">Refresh live channels</button></div>
           <p class="field-note quick-channel-detail" id="quick-channel-detail">aviskarex is pinned here for quick access.</p>
           <details class="quick-other-channel"><summary>Find another channel</summary><div class="quick-lookup-row"><label for="quick-lookup">Channel login<input id="quick-lookup" type="text" placeholder="Twitch channel login" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="25" pattern="[A-Za-z0-9_]{3,25}"></label><button id="quick-find" type="button">Find channel</button></div></details>
@@ -37,7 +37,7 @@
           <div class="notice error" id="quick-error" role="alert" hidden></div><p class="quick-message" id="quick-message" role="status" aria-live="polite" hidden></p>
           <h3 class="quick-outcome-heading" id="quick-outcome-heading" hidden></h3><ol class="quick-outcomes" id="quick-outcomes" aria-live="polite"></ol>
         </section>
-        <div class="account-grid" id="account-cards"><p class="empty">Waiting for account status.</p></div><aside class="quiet-note">Each account keeps its own browser profile. These controls use the existing extension; the profile must be open to start watching. <a href="__COMPANION_BASE__/">Manage shared turns and bot exchanges</a></aside>
+        <div class="account-grid" id="account-cards"><p class="empty">Waiting for account status.</p></div><aside class="quiet-note">Start opens the selected account profiles on your Mac. Keep the Mac awake and signed in. <a href="__COMPANION_BASE__/">Manage shared turns and bot exchanges</a></aside>
       </section>
       <div id="account-detail" hidden>
         <a class="back-link" href="__COMPANION_BASE__/accounts">All accounts</a>
@@ -53,7 +53,7 @@
             <label class="check-label"><input id="auto-resume" name="autoResume" type="checkbox"><span>Recover this session automatically<small>Applies after Start. Saving settings does not restart a stopped session.</small></span></label>
           </form>
           <p class="field-note" id="settings-current">Waiting for current settings.</p>
-          <p class="field-note">Start opens the ordinary Twitch watch page in this account’s browser. Chat connection alone does not confirm video playback.</p>
+          <p class="field-note">Start opens this account’s Chrome profile if needed, waits for it to connect, then opens the Twitch watch page. Chat connection alone does not confirm video playback.</p>
         </section>
         <section class="status-grid" aria-label="Independent account checks" id="status-checks"></section>
         <section class="panel command-panel" aria-labelledby="operation-heading"><div class="section-heading"><div><p class="eyebrow">Control feedback</p><h2 id="operation-heading">Current operation</h2></div><span class="pill" id="operation-state" role="status" aria-live="polite">No pending operation</span></div><div id="operation-detail"><p class="empty">Commands will appear here.</p></div></section>

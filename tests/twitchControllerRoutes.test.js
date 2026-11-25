@@ -62,6 +62,7 @@ async function fixture(t, options = {}) {
     if (req.url.endsWith('/api/status')) return respond(res, 200, { updatedAt: new Date().toISOString(), paused: true, csrfToken: UPSTREAM_TOKEN });
     if (req.url.endsWith('/api/accounts')) return respond(res, 200, { updatedAt: new Date().toISOString(), instances: [], csrfToken: UPSTREAM_TOKEN });
     if (/\/api\/channels(?:\/[a-z0-9_]{3,25})?$/.test(req.url)) return respond(res, 200, { updatedAt: new Date().toISOString(), channels: [{ login: req.url.split('/').at(-1) === 'channels' ? 'aviskarex' : req.url.split('/').at(-1), isLive: true }], csrfToken: UPSTREAM_TOKEN });
+    if (/\/api\/accounts\/(primary|test)\/browser$/.test(req.url)) return respond(res, 200, { ok: true, state: 'opening' });
     if (req.method === 'POST') return respond(res, 200, { ok: true, command: { id: 'fixture-command', state: 'queued' } });
     return respond(res, 200, '<!doctype html><html lang="en"><head><title>Fixture controller</title></head><body><main id="main">Fixture content</main></body></html>', { 'Content-Type': req.url.endsWith('.js') ? 'text/javascript' : req.url.endsWith('.css') ? 'text/css' : 'text/html' });
   });
@@ -107,7 +108,7 @@ function post(client, path, body, csrf, headers = {}) {
 
 test('every page, asset and API uses the real superadmin and two-factor guards before reaching the Mac', async t => {
   const f = await fixture(t);
-  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex']) {
+  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex', '/api/accounts/primary/browser']) {
     assert.equal((await request(f.port, BASE + path)).status, 401);
     const normal = await f.client('admin'); assert.equal((await normal.request(path)).status, 403);
   }
@@ -234,6 +235,24 @@ test('live channel reads share session CSRF masking and cannot mutate account st
   assert.ok(f.seen.every(x => x.method === 'GET'));
 });
 
+test('browser opening is a bounded explicit CSRF mutation with no client-selected executable, profile or URL', async t => {
+  const f = await fixture(t), c = await f.client(), token = await nonce(c);
+  for (const id of ['primary', 'test']) {
+    const path = `/api/accounts/${id}/browser`, before = f.seen.length;
+    assert.equal((await c.request(path)).status, 405);
+    assert.equal((await post(c, path, { requestId: 'open-fixed-profile' }, token, { Origin: 'https://outside.example' })).status, 403);
+    assert.equal((await post(c, path, { requestId: 'open-fixed-profile' }, 'wrong')).status, 403);
+    for (const body of [{}, { requestId: '../unsafe' }, { requestId: 'x', profile: 'Default' }, { requestId: 'x', url: 'https://outside.example' }, { requestId: 'x', args: ['--remote-debugging-port=9222'] }]) assert.equal((await post(c, path, body, token)).status, 400);
+    assert.equal(f.seen.length, before);
+    const result = await post(c, path, { requestId: 'open-fixed-profile' }, token);
+    assert.equal(result.status, 200); assert.deepEqual(result.data, { ok: true, state: 'opening' });
+    assert.deepEqual(f.seen.at(-1).body, { requestId: 'open-fixed-profile' });
+    assert.equal(f.seen.at(-1).path, BASE + path);
+    assert.equal(f.seen.at(-1).headers['x-csrf-token'], UPSTREAM_TOKEN);
+  }
+  for (const path of ['/api/accounts/foreign/browser', '/api/accounts/primary/browser/', '/api/accounts/primary/browser?x=1']) assert.equal((await post(c, path, { requestId: 'x' }, token)).status, 404);
+});
+
 test('only exact one-key boolean controls and typed account commands are forwarded unchanged once', async t => {
   const f = await fixture(t), c = await f.client(), token = await nonce(c);
   const valid = [
@@ -337,7 +356,7 @@ const hostSource = resolve(__dirname, '../tools/stream-companion-host/server.mjs
 test('real prefixed Mac host and production gateway complete authenticated page/status/control roundtrips without helper calls',
   { skip: Number(process.versions.node.split('.')[0]) < 22 || !existsSync(hostSource) }, async t => {
     const { createHostServer } = await import(pathToFileURL(hostSource).href);
-    const commandCalls = []; let paused = true, pauseCalls = 0;
+    const commandCalls = [], browserCalls = []; let paused = true, pauseCalls = 0;
     const clients = [{ id: 'fixture-client', account: 'fixture_account', token: 'p'.repeat(48) }];
     const store = { client: () => ({ account: 'fixture_account' }), status: () => ({ updatedAt: new Date().toISOString(), paused }),
       setPaused(value) { pauseCalls++; paused = value; return { ok: true, paused }; },
@@ -346,7 +365,9 @@ test('real prefixed Mac host and production gateway complete authenticated page/
       command: async (id, body) => { commandCalls.push({ id, body }); return { ok: true, command: { ...body, id: 'fixture-host-command', state: 'queued' } }; } };
     const channels = { snapshot: async () => ({ updatedAt: new Date().toISOString(), channels: [{ login: 'aviskarex', isLive: false }] }),
       lookup: async login => ({ login, isLive: true, checkedAt: Date.now() }) };
-    const upstream = createHostServer({ store, clients, accounts, channels, remoteToken: REMOTE_TOKEN, csrfToken: UPSTREAM_TOKEN });
+    const browserLauncher = { available: id => id === 'primary', open: async (id, requestId) => {
+      browserCalls.push({ id, requestId }); return { ok: true, state: 'opening' }; } };
+    const upstream = createHostServer({ store, clients, accounts, channels, browserLauncher, remoteToken: REMOTE_TOKEN, csrfToken: UPSTREAM_TOKEN });
     const f = await fixture(t, { upstreamServer: upstream }), c = await f.client();
     const page = await c.request('/accounts/primary'); assert.equal(page.status, 200);
     assert.doesNotMatch(page.text, /__COMPANION_BASE__/);
@@ -354,6 +375,7 @@ test('real prefixed Mac host and production gateway complete authenticated page/
     assert.match(page.text, /\/admin\/stream-companion\/accounts\.js/);
     const data = await c.request('/api/accounts'); assert.equal(data.status, 200);
     assert.equal(data.data.instances[0].account, 'fixture_account');
+    assert.equal(data.data.instances[0].browser.canOpen, true);
     const csrf = data.data.csrfToken; assert.notEqual(csrf, UPSTREAM_TOKEN);
     assert.doesNotMatch(data.text, new RegExp(REMOTE_TOKEN + '|' + UPSTREAM_TOKEN));
     const directory = await c.request('/api/channels');
@@ -362,6 +384,10 @@ test('real prefixed Mac host and production gateway complete authenticated page/
     const lookup = await c.request('/api/channels/live_friend');
     assert.equal(lookup.status, 200); assert.equal(lookup.data.channels[0].login, 'live_friend');
     assert.equal(lookup.data.csrfToken, csrf);
+    const opened = await post(c, '/api/accounts/primary/browser', { requestId: 'fixture-open-primary' }, csrf);
+    assert.equal(opened.status, 200); assert.deepEqual(opened.data, { ok: true, state: 'opening' });
+    assert.deepEqual(browserCalls, [{ id: 'primary', requestId: 'fixture-open-primary' }]);
+    assert.deepEqual(commandCalls, []); assert.equal(paused, true, 'opening a browser cannot start chat or resume coordination');
     const body = command('settings', { chatMode: 'mentions', replySource: 'local', autoResume: false });
     assert.equal((await post(c, '/api/accounts/primary/command', body, csrf)).status, 200);
     assert.deepEqual(commandCalls, [{ id: 'primary', body }]);

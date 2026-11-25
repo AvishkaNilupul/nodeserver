@@ -48,13 +48,14 @@ function commandParams(action, params = {}) {
   return null;
 }
 
-export function createAccountsController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, basePath = '' } = {}) {
+export function createAccountsController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, sleepImpl = ms => new Promise(resolve => setTimeout(resolve, ms)), browserWaitMs = 30000, browserGraceMs = 7500, browserPollMs = 1000, basePath = '' } = {}) {
   basePath = controllerBasePath(basePath);
-  const state = { basePath, data: null, network: 'loading', error: '', operations: {}, forms: {}, quick: {
+  const state = { basePath, data: null, network: 'loading', error: '', operations: {}, forms: {}, browserPreparations: {}, quick: {
     channel: 'aviskarex', selection: 'primary', lookup: '', channels: [{ login: 'aviskarex', displayName: 'aviskarex', isLive: null }],
     channelsAt: null, loading: false, busy: false, action: '', error: '', message: '', outcomes: {}, targetIds: [], targetChannel: ''
   } };
   let flight = null, timer = null, channelFlight = null, quickRun = 0;
+  const startVersions = { primary: 0, test: 0 };
   const emit = () => onState(state);
   const formFor = id => state.forms[id] ||= { initialized: false, channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '', textRevision: 0, dirty: {} };
   function reconcile() {
@@ -99,6 +100,79 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     })();
     return flight;
   }
+  function startEligible(id, preparation = null, requireFresh = false) {
+    if (!IDS.has(id) || !hostFresh(state, now()) || typeof state.data?.csrfToken !== 'string' || !state.data.csrfToken || state.data.csrfToken.length > 256) return false;
+    const instance = instanceFor(state, id), local = state.operations[id], pending = state.browserPreparations[id];
+    return instance?.available === true && instance.authorized === true && instance.permissions?.playbackAccess === true
+      && (!pending || pending === preparation) && !(local && (local.transport || active(local.command, now())))
+      && !active(instance.controls?.pending, now())
+      && (bridgeFresh(instance, now()) || !requireFresh && instance.browser?.canOpen === true);
+  }
+  function cancelPreparation(id) {
+    const preparation = state.browserPreparations[id];
+    if (!preparation) return;
+    preparation.cancelled = true;
+    for (const target of preparation.ids) if (state.browserPreparations[target] === preparation) delete state.browserPreparations[target];
+  }
+  async function prepareBrowsers(ids, { cancelled = () => false, onProgress = () => {} } = {}) {
+    if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || ids.some(id => !startEligible(id))) throw quickFailure('One of the selected accounts is not ready. Check its browser access or pending operation.');
+    // An ordinary Start on older installations keeps its existing fresh-bridge
+    // path. Configured profiles need a heartbeat after this explicit request.
+    if (ids.every(id => bridgeFresh(instanceFor(state, id), now()) && instanceFor(state, id).browser?.canOpen !== true)) return true;
+    const preparation = { ids: [...ids], cancelled: false, message: 'Checking browser connections…' };
+    for (const id of ids) state.browserPreparations[id] = preparation;
+    const stopped = () => preparation.cancelled || cancelled();
+    const progress = message => { preparation.message = message; onProgress(message); emit(); };
+    const began = now(); let waited = 0;
+    try {
+      progress(preparation.message);
+      // A read already underway can predate the click; capture the comparison
+      // heartbeat only after it and a new explicit status read have finished.
+      if (flight) await flight;
+      if (stopped()) return false;
+      await refresh();
+      if (stopped()) return false;
+      if (ids.some(id => !startEligible(id, preparation))) throw quickFailure('One of the selected accounts became unavailable before its browser opened. No companion was started.');
+      const baseline = new Map(ids.map(id => [id, timestamp(instanceFor(state, id).browser?.lastSeenAt)]));
+      const initiallyFresh = new Map(ids.map(id => [id, bridgeFresh(instanceFor(state, id), now())]));
+      const proofRequired = new Set(ids.filter(id => instanceFor(state, id).browser?.canOpen === true)), capturedAt = now();
+      const launched = new Set();
+      const ready = id => {
+        const instance = instanceFor(state, id);
+        return bridgeFresh(instance, now()) && (!proofRequired.has(id)
+          || !Number.isFinite(baseline.get(id)) || timestamp(instance.browser.lastSeenAt) > baseline.get(id));
+      };
+      while (true) {
+        if (stopped()) return false;
+        if (ids.some(id => !startEligible(id, preparation))) throw quickFailure('A selected account is no longer ready. Check its access or pending operation; no further start will be sent.');
+        if (ids.every(ready)) return true;
+        const elapsed = Math.max(waited, now() - began);
+        if (elapsed >= browserWaitMs) throw quickFailure('The browser did not connect in time. Check the selected Chrome profile on the Mac, then try again. No companion was started.');
+        for (const id of ids) {
+          if (stopped()) return false;
+          if (ready(id) || launched.has(id) || instanceFor(state, id).browser?.canOpen !== true || initiallyFresh.get(id) && Math.max(waited, now() - capturedAt) < browserGraceMs) continue;
+          launched.add(id);
+          progress(`Opening ${id === 'primary' ? 'the main' : 'the second'} account’s browser…`);
+          const response = await fetchImpl(controllerPath(basePath, `/api/accounts/${id}/browser`), { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(6000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify({ requestId: requestId() }) });
+          if (stopped()) return false;
+          if (!response.ok) throw quickFailure('The selected browser could not be opened. Check the Mac and try again; no companion was started.');
+          const result = await response.json();
+          if (stopped()) return false;
+          if (result?.ok !== true || result.state !== 'opening') throw quickFailure('The browser opening outcome is unconfirmed. Check the Mac before trying again; no companion was started.');
+        }
+        progress(launched.size ? 'Waiting for the selected browsers to connect…' : 'Checking the selected browsers are still connected…');
+        const pause = Math.min(browserPollMs, browserWaitMs - Math.max(waited, now() - began));
+        await sleepImpl(Math.max(1, pause)); waited += Math.max(1, pause);
+        if (stopped()) return false;
+        if (flight) await flight;
+        if (stopped()) return false;
+        await refresh();
+      }
+    } finally {
+      for (const id of ids) if (state.browserPreparations[id] === preparation) delete state.browserPreparations[id];
+      emit();
+    }
+  }
   function canCommand(id, action) {
     if (!IDS.has(id) || !ACTIONS.has(action) || !hostFresh(state, now()) || typeof state.data?.csrfToken !== 'string' || !state.data.csrfToken || state.data.csrfToken.length > 256) return false;
     const instance = instanceFor(state, id);
@@ -107,16 +181,30 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     const localPending = local && (local.transport || active(local.command, now()));
     const serverPending = active(instance.controls?.pending, now());
     if (action === 'stop') return !(localPending && local.action === 'stop') && !(serverPending && instance.controls.pending.action === 'stop');
+    if (action === 'start') return startEligible(id);
+    if (state.browserPreparations[id]) return false;
     if (localPending || serverPending || !bridgeFresh(instance, now())) return false;
     if (instance.settings?.paused === true && !['start', 'watch', 'settings', 'drops-disable'].includes(action)) return false;
-    if (action === 'start') return instance.authorized === true && instance.permissions?.playbackAccess === true;
     if (['draft', 'send'].includes(action)) return instance.authorized === true && instance.connected === true && !!instance.channel;
     return true;
   }
-  async function command(id, action, params = {}) {
-    if (!canCommand(id, action)) return false;
+  async function command(id, action, params = {}, { prepared = false } = {}) {
+    const wasPreparing = action === 'stop' && !!state.browserPreparations[id];
+    if (action === 'stop' && IDS.has(id)) { startVersions[id]++; cancelPreparation(id); }
+    if (!canCommand(id, action)) {
+      if (wasPreparing) { state.error = 'Browser startup was cancelled. The Mac could not confirm Stop; check account status before another action.'; emit(); }
+      return false;
+    }
     const exactParams = commandParams(action, params);
     if (!exactParams) { state.error = action === 'send' ? 'Use 1–300 characters on one line, without links or chat commands. Remove spaces at the start and end.' : 'Check the channel and selected settings.'; emit(); return false; }
+    if (action === 'start') {
+      const version = ++startVersions[id];
+      if (!prepared && (!bridgeFresh(instanceFor(state, id), now()) || instanceFor(state, id).browser?.canOpen === true)) {
+        try { if (!await prepareBrowsers([id])) return false; }
+        catch (error) { if (version === startVersions[id]) { state.error = error.quickPublic ? error.message : 'Could not connect the selected browser. No companion was started; check the Mac before trying again.'; emit(); } return false; }
+      }
+      if (version !== startVersions[id] || !startEligible(id, null, true)) return false;
+    }
     const rid = requestId(), at = now();
     const operation = { requestId: rid, action, params: exactParams, transport: true, textRevision: formFor(id).textRevision,
       command: { requestId: rid, action, state: 'submitting', createdAt: at, expiresAt: at + 90000 } };
@@ -211,11 +299,17 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       let shared = await sharedStatus();
       if (generation !== quickRun) return false;
       if (shared.paused && resumeBlocked()) throw quickFailure('The other account is running, starting or unavailable. Stop it first or select Both accounts before resuming shared coordination.');
+      if (!await prepareBrowsers(ids, { cancelled: () => generation !== quickRun, onProgress: message => { q.message = message; } })) {
+        if (generation === quickRun) q.message = 'Browser startup was cancelled. No Start was sent.';
+        return false;
+      }
+      if (generation !== quickRun) return false;
+      if (ids.some(id => !startEligible(id, null, true))) throw quickFailure('A selected browser has not connected. No companion was started.');
       for (const id of ids) {
         if (generation !== quickRun) return false;
         const instance = instanceFor(state, id);
         q.message = `Requesting ${instance?.name || (id === 'primary' ? 'the main account' : 'the second account')}…`; emit();
-        const accepted = await command(id, 'start', { channel, chatMode: 'participate', replySource: instance.settings?.replySource === 'ai' ? 'ai' : 'local', autoResume: instance.settings?.autoResume === true });
+        const accepted = await command(id, 'start', { channel, chatMode: 'participate', replySource: instance.settings?.replySource === 'ai' ? 'ai' : 'local', autoResume: instance.settings?.autoResume === true }, { prepared: true });
         if (generation !== quickRun) return false;
         const operation = state.operations[id];
         q.outcomes[id] = operation ? { requestId: operation.requestId, state: operation.command.state, action: 'start' } : { state: 'not_requested', action: 'start' };
@@ -246,6 +340,8 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     const q = state.quick;
     if (q.busy && q.action === 'stop') return false;
     const ids = q.busy ? [...q.targetIds] : selectedIds(), generation = ++quickRun;
+    const cancelledStartup = ids.some(id => !!state.browserPreparations[id]);
+    for (const id of ids) cancelPreparation(id);
     q.busy = true; q.action = 'stop'; q.error = ''; q.message = 'Stopping the selected accounts…'; q.targetIds = [...ids];
     q.outcomes = Object.fromEntries(ids.map(id => [id, { state: 'not_requested', action: 'stop' }])); emit();
     let allAccepted = true;
@@ -258,7 +354,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         allAccepted &&= accepted && ['queued', 'running', 'completed'].includes(operation?.command?.state);
       }
       q.message = allAccepted ? 'Stop requests accepted. Check each account’s confirmation below.' : '';
-      if (!allAccepted) q.error = 'Some stops are unconfirmed. Check the account controls below before taking another action.';
+      if (!allAccepted) q.error = `${cancelledStartup ? 'Browser startup was cancelled. ' : ''}Some stops are unconfirmed. Check the account controls below before taking another action.`;
       return allAccepted;
     } finally { if (generation === quickRun) { q.busy = false; emit(); } }
   }
@@ -278,6 +374,7 @@ function setPill(node, content, tone = 'muted') { node.textContent = content; no
 function empty(view, content, tag = 'p') { return view.el(tag, content, 'empty'); }
 function bridgeReason(instance, now) {
   if (!instance || instance.available !== true) return text(instance?.error, 'Account helper is unavailable. Open the account profile and check its extension.');
+  if (!bridgeFresh(instance, now) && instance.browser?.canOpen === true) return 'Browser connection is unavailable. Start will open this account’s Chrome profile and wait for it to connect.';
   if (!bridgeFresh(instance, now)) return instance.browser?.online === true ? 'Browser check-in is stale. Reopen the account profile and its extension. Start and other browser controls are held; Stop can still hold the helper.' : 'Browser profile is closed or its extension is unavailable. Open this account’s profile to use browser controls. Stop can still hold the helper.';
   if (!instance.authorized) return text(instance.error, 'This account needs to sign in again in its extension.');
   if (instance.permissions?.playbackAccess !== true) return 'Playback access is missing. Open the extension’s fallback controls in this profile to grant access before Start.';
@@ -326,7 +423,7 @@ function renderQuick(view, state, now, canCommand) {
   const ids = q.selection === 'both' ? ['primary', 'test'] : [q.selection];
   n['quick-start'].disabled = q.busy || q.loading || !validChannel(q.channel) || ids.some(id => !canCommand(id, 'start'));
   n['quick-start'].textContent = q.busy && q.action === 'start' ? 'Starting selected accounts…' : q.selection === 'both' ? 'Open stream & start both' : 'Open stream & start chat';
-  n['quick-stop'].disabled = q.busy && q.action === 'stop' || !ids.some(id => canCommand(id, 'stop'));
+  n['quick-stop'].disabled = q.busy && q.action === 'stop' || !ids.some(id => state.browserPreparations?.[id] || canCommand(id, 'stop'));
   n['quick-stop'].textContent = q.busy && q.action === 'stop' ? 'Stopping…' : 'Stop selected';
   n['quick-error'].textContent = q.error || ''; n['quick-error'].hidden = !q.error;
   n['quick-message'].textContent = q.message || ''; n['quick-message'].hidden = !q.message;
@@ -441,7 +538,8 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n['page-eyebrow'].textContent = id === 'primary' ? 'Primary profile' : 'Second profile';
   n['page-title'].textContent = text(instance?.name, id === 'primary' ? 'Main companion' : 'Second companion');
   n['page-description'].textContent = instance?.account ? `@${instance.account} · controls stay with this account’s browser profile.` : 'Waiting for this account to report its status.';
-  const reason = online ? bridgeReason(instance, now) : connectionMessage(state.network, state.basePath, !!state.data) || 'Account data is not current. Waiting for the host.';
+  const preparation = state.browserPreparations?.[id];
+  const reason = preparation?.message || (online ? bridgeReason(instance, now) : connectionMessage(state.network, state.basePath, !!state.data) || 'Account data is not current. Waiting for the host.');
   n['account-reason'].textContent = reason; n['account-reason'].hidden = !reason;
   const session = sessionStatus(instance, state, now);
   setPill(n['session-state'], session.title, session.tone);
@@ -451,11 +549,11 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n['draft-result'].hidden = !form.draftResult;
   n['draft-result'].replaceChildren(...(form.draftResult ? [view.el('strong', form.draftResult.title), view.el('p', form.draftResult.text, 'message-body')] : []));
   n.start.disabled = !canCommand(id, 'start') || !validChannel(form.channel);
-  n.stop.disabled = !canCommand(id, 'stop'); n.watch.disabled = !canCommand(id, 'watch'); n['save-settings'].disabled = !canCommand(id, 'settings');
+  n.stop.disabled = !preparation && !canCommand(id, 'stop'); n.watch.disabled = !canCommand(id, 'watch'); n['save-settings'].disabled = !canCommand(id, 'settings');
   n.draft.disabled = !canCommand(id, 'draft'); n.summary.disabled = !canCommand(id, 'draft'); n.send.disabled = !canCommand(id, 'send') || !validMessage(form.text);
   for (const action of ['drops-enable', 'drops-disable', 'drops-check']) n[action].disabled = !canCommand(id, action) || (action === 'drops-enable' && instance?.drops?.enabled === true) || (action === 'drops-disable' && instance?.drops?.enabled === false);
   const operation = state.operations[id];
-  n.start.textContent = operation?.action === 'start' && (operation.transport || active(operation.command, now)) ? `${commandState(operation.command)}…` : 'Start companion';
+  n.start.textContent = preparation ? 'Connecting browser…' : operation?.action === 'start' && (operation.transport || active(operation.command, now)) ? `${commandState(operation.command)}…` : 'Start companion';
   n.stop.textContent = operation?.action === 'stop' && (operation.transport || active(operation.command, now)) ? `${commandState(operation.command)}…` : 'Stop';
   const settings = instance?.settings;
   const currentBridge = online && bridgeFresh(instance, now);

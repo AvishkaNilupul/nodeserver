@@ -16,7 +16,7 @@ const prefixed = path => `${REMOTE_PREFIX}${path}`;
 
 async function harness(t, options = {}) {
   const store = new HostStore({ file: ':memory:', clients });
-  const calls = { snapshots: 0, commands: [], assets: [], sync: 0, channels: [] };
+  const calls = { snapshots: 0, commands: [], assets: [], sync: 0, channels: [], browsers: [] };
   const sync = store.sync.bind(store); store.sync = (...args) => { calls.sync++; return sync(...args); };
   const accounts = {
     async snapshot() { calls.snapshots++; return { updatedAt: new Date().toISOString(), instances: [] }; },
@@ -27,7 +27,9 @@ async function harness(t, options = {}) {
     async snapshot() { calls.channels.push('directory'); return { updatedAt: new Date().toISOString(), channels: [{ login: 'aviskarex', isLive: false }] }; },
     async lookup(login) { calls.channels.push(login); return { login, isLive: true }; }
   };
-  const server = createHostServer({ store, clients, accounts, channels, remoteToken, csrfToken: 'host-only-csrf',
+  const browserLauncher = { available: id => ['primary', 'test'].includes(id),
+    async open(id, requestId) { calls.browsers.push({ id, requestId }); return { ok: true, state: 'opening' }; } };
+  const server = createHostServer({ store, clients, accounts, channels, browserLauncher, remoteToken, csrfToken: 'host-only-csrf',
     readFileImpl: async file => { calls.assets.push(file.pathname);
       return Buffer.from(file.pathname.endsWith('.html')
         ? '<link href="__COMPANION_BASE__/style.css"><a href="__COMPANION_BASE__/accounts">Accounts</a>'
@@ -167,6 +169,29 @@ test('channel directory and exact lookup are read-only, paired and same-origin i
   }
   assert.deepEqual(calls.channels, ['directory', 'live_friend', 'directory', 'live_friend']);
   assert.equal(calls.commands.length, 0); assert.equal(store.paused, before);
+});
+
+test('only explicit paired CSRF browser requests launch the fixed selected account and never start chat', async t => {
+  const { request, calls, store } = await harness(t, { accounts: { snapshot: async () => ({ updatedAt: new Date().toISOString(), instances: [{ id: 'primary', browser: { online: false } }] }) } });
+  for (const prefix of ['', REMOTE_PREFIX]) {
+    const headers = prefix ? remote : local;
+    const state = await request(prefix + '/api/accounts', { headers });
+    assert.equal(state.data.instances[0].browser.canOpen, true);
+    assert.equal(state.data.instances[0].browser.online, false);
+    assert.equal(calls.browsers.length, prefix ? 1 : 0, 'reads must never launch a browser');
+    const path = prefix + '/api/accounts/test/browser';
+    assert.equal((await request(path, { headers })).status, 405);
+    for (const invalidHeaders of [headers, { ...headers, 'X-CSRF-Token': 'wrong' }, { ...mutation, Origin: 'https://foreign.example' }]) {
+      assert.equal((await request(path, { method: 'POST', body: { requestId: 'open-test' }, headers: invalidHeaders })).status, 403);
+    }
+    for (const body of [{ requestId: 'x', profile: 'Default' }, { requestId: 'x', url: 'https://outside.example' }, {}, { requestId: '../unsafe' }]) {
+      assert.equal((await request(path, { method: 'POST', body, headers: mutation })).status, 400);
+    }
+    const result = await request(path, { method: 'POST', body: { requestId: 'open-test' }, headers: mutation });
+    assert.equal(result.status, 200); assert.deepEqual(result.data, { ok: true, state: 'opening' });
+  }
+  assert.deepEqual(calls.browsers, [{ id: 'test', requestId: 'open-test' }, { id: 'test', requestId: 'open-test' }]);
+  assert.equal(calls.commands.length, 0); assert.equal(calls.sync, 0); assert.equal(store.paused, false);
 });
 
 test('unsupported methods and upgrade headers never reach a prefixed public action', async t => {

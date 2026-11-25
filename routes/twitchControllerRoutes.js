@@ -19,6 +19,7 @@ const STATIC = new Map([
 const DATA = new Set(["/api/status", "/api/accounts", "/api/channels"]);
 const CHANNEL_LOOKUP = /^\/api\/channels\/[a-z0-9_]{3,25}$/;
 const COMMAND = /^\/api\/accounts\/(primary|test)\/command$/;
+const BROWSER = /^\/api\/accounts\/(primary|test)\/browser$/;
 const object = (x) => !!x && typeof x === "object" && !Array.isArray(x);
 const exact = (x, keys) => object(x) && Object.keys(x).length === keys.length && keys.every((key) => Object.hasOwn(x, key));
 const equal = (a, b) => {
@@ -148,8 +149,8 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
     if (suffix === null || /[?%\\\u0000-\u0020\u007f]/.test(suffix)) return errorResponse(res, 404, "not_found", "Controller route not found.");
     if (suffix === "" && req.method === "GET") return res.redirect(302, `${MOUNT}/accounts`);
     req.controllerPath = suffix;
-    const isData = DATA.has(suffix) || CHANNEL_LOOKUP.test(suffix), isControl = suffix === "/api/control", isCommand = COMMAND.test(suffix);
-    const mutation = isControl || isCommand;
+    const isData = DATA.has(suffix) || CHANNEL_LOOKUP.test(suffix), isControl = suffix === "/api/control", isCommand = COMMAND.test(suffix), isBrowser = BROWSER.test(suffix);
+    const mutation = isControl || isCommand || isBrowser;
     if (!STATIC.has(suffix) && !isData && !mutation) return errorResponse(res, 404, "not_found", "Controller route not found.");
     if (req.method !== (mutation ? "POST" : "GET") || req.get("upgrade")) return errorResponse(res, 405, "method_not_allowed", "This controller method is not supported.");
     if (!configured) return unavailable(req, res, false);
@@ -162,7 +163,8 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
       let valid = false;
       try {
         if (Buffer.byteLength(JSON.stringify(req.body)) > MAX_BODY) return errorResponse(res, 413, "request_too_large", "Controller request is too large.");
-        valid = isControl ? object(req.body) && Object.keys(req.body).length === 1
+        valid = isBrowser ? exact(req.body, ["requestId"]) && typeof req.body.requestId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(req.body.requestId)
+          : isControl ? object(req.body) && Object.keys(req.body).length === 1
           && ["paused", "exchangesEnabled"].includes(Object.keys(req.body)[0]) && typeof Object.values(req.body)[0] === "boolean" : validCommand(req.body);
       } catch { /* Invalid bodies are rejected before contacting the Mac. */ }
       if (!valid) return errorResponse(res, 400, "invalid_control", "Choose one supported controller action and its exact settings.");
