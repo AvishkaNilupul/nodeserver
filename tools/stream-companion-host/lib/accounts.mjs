@@ -139,7 +139,7 @@ function project(source, raw, time, clean) {
     permissions: { playbackAccess: raw.permissions?.playbackAccess === true }, controls: { pending: pending[0] || null, recent } };
 }
 
-export function createAccountManager({ sources = SOURCES, fetchImpl = fetch, readFileImpl = readFile, now = Date.now } = {}) {
+export function createAccountManager({ sources = SOURCES, fetchImpl = fetch, readFileImpl = readFile, now = Date.now, onSnapshot = () => {} } = {}) {
   const selected = sources.map(s => {
     const fixed = SOURCES.find(x => x.id === s.id);
     if (!fixed || s.port !== undefined && s.port !== fixed.port) throw Error('Unsupported account source.');
@@ -187,7 +187,12 @@ export function createAccountManager({ sources = SOURCES, fetchImpl = fetch, rea
         catch (e) { return empty(entry.source, now(), clean(e.message)); }
       }));
       const at = now(), value = { updatedAt: new Date(at).toISOString(), instances };
-      if (expected === revision) { cachedAt = at; cached = value; }
+      if (expected === revision) {
+        cachedAt = at; cached = value;
+        // Only a completed current read is an observation. Cache hits and an
+        // older read superseded by an explicit command cannot create history.
+        try { onSnapshot(value); } catch { /* Diagnostics never change controls. */ }
+      }
       return value;
     })().finally(() => { if (inflight === flight) inflight = null; });
     inflightRevision = expected; inflight = flight; return flight;

@@ -56,6 +56,20 @@ test('chat, playback, bridge and playback permission remain independent checks',
   assert.equal(v.nodes.stop.disabled, false);
 });
 
+test('a revoked disconnected chat cannot be masked by a stale participation reason or enabled session pill', () => {
+  const error = 'Twitch revoked the chat subscription’s authorization (authorization_revoked). Reauthorize Twitch before reconnecting.';
+  const data = snapshot({ instances: [instance({ connected: false, error,
+    watch: { enabled: true, status: 'playing', checkedAt: at, channel: 'example_channel' },
+    activity: { state: 'ready', reason: 'Old ready decision must not mask the chat error.', at: at - 60_000 } })] });
+  const v = view(); renderAccounts(v, { data, network: 'online', error: '', operations: {}, forms: {} }, { id: 'primary', now: at });
+  assert.equal(v.nodes['session-state'].textContent, 'Chat disconnected'); assert.equal(v.nodes['session-state'].attributes['data-tone'], 'warn');
+  assert.match(v.nodes['account-reason'].textContent, /authorization_revoked/); assert.match(v.nodes.broadcast.textContent, /authorization_revoked/);
+  assert.doesNotMatch(v.nodes.broadcast.textContent, /Old ready decision/); assert.match(v.nodes['status-checks'].textContent, /Playing/);
+  assert.match(v.nodes['status-checks'].textContent, /Disconnected/);
+  data.instances[0].settings.paused = true; renderAccounts(v, { data, network: 'online', error: '', operations: {}, forms: {} }, { id: 'primary', now: at });
+  assert.equal(v.nodes['session-state'].textContent, 'Stopped');
+});
+
 test('failed or stale host status preserves last data, labels it and blocks commands without leaking errors', async () => {
   let fail = false; const c = controller(async () => { if (fail) throw Error('credential-like secret diagnostic'); return reply(snapshot()); });
   await c.refresh(); fail = true; await c.refresh(); const v = view(); renderAccounts(v, c.getState(), { id: 'primary', now: at, canCommand: c.canCommand });

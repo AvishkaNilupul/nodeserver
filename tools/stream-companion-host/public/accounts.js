@@ -444,6 +444,7 @@ function sessionStatus(instance, state, now) {
   if (!hostFresh(state, now)) return { title: 'Status stale', tone: 'warn' };
   if (!bridgeFresh(instance, now)) return { title: 'Session unverified', tone: 'warn' };
   if (instance?.settings?.paused === true) return { title: 'Stopped', tone: 'muted' };
+  if (instance?.connected !== true) return { title: 'Chat disconnected', tone: 'warn' };
   if (instance?.settings?.paused === false) return { title: 'Session enabled', tone: 'good' };
   return { title: 'Unavailable', tone: 'muted' };
 }
@@ -540,8 +541,9 @@ function renderBroadcast(view, instance, now, current) {
   const verified = current && fresh(stream?.checkedAt, BRIDGE_FRESH_MS, now);
   fragment.append(pill(view, !verified ? 'Broadcast unverified · last known context' : stream?.isLive === true ? 'Live broadcast reported' : stream?.isLive === false ? 'Channel offline' : 'Broadcast unverified', verified && stream?.isLive === true ? 'good' : 'muted'));
   fragment.append(view.el('p', text(stream?.title, 'No broadcast title available.'), 'broadcast-title'));
-  const details = view.el('dl', undefined, 'detail-pair'); details.append(pair(view, 'Category', text(stream?.gameName, 'Unknown')), pair(view, 'Context checked', age(stream?.checkedAt, now)), pair(view, 'Participation', text(activity?.state, 'No activity reported')), pair(view, 'Shared coordination', instance?.coordination?.available === false ? 'Unavailable' : instance?.coordination?.paused === true ? 'Paused' : instance?.coordination ? 'Available' : 'Unverified'));
-  fragment.append(details, view.el('p', text(activity?.reason, 'No recent participation decision.'), 'broadcast-reason'));
+  const disconnected = current && instance?.connected !== true;
+  const details = view.el('dl', undefined, 'detail-pair'); details.append(pair(view, 'Category', text(stream?.gameName, 'Unknown')), pair(view, 'Context checked', age(stream?.checkedAt, now)), pair(view, 'Participation', disconnected ? 'Chat disconnected' : text(activity?.state, 'No activity reported')), pair(view, 'Shared coordination', instance?.coordination?.available === false ? 'Unavailable' : instance?.coordination?.paused === true ? 'Paused' : instance?.coordination ? 'Available' : 'Unverified'));
+  fragment.append(details, view.el('p', disconnected ? text(instance.error, 'Chat is disconnected. Previous participation decisions do not establish a current connection.') : text(activity?.reason, 'No recent participation decision.'), 'broadcast-reason'));
   if (instance?.coordination?.reason) fragment.append(view.el('p', instance.coordination.reason, 'broadcast-reason'));
   view.nodes.broadcast.replaceChildren(fragment);
 }

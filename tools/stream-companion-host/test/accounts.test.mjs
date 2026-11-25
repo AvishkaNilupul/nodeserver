@@ -58,6 +58,29 @@ test('one unavailable helper is isolated and the short snapshot cache avoids rep
   f.advance(1500); await f.manager.snapshot(); assert.equal(f.calls.length, 4);
 });
 
+test('status observation hook runs only for accepted uncached reads and failures cannot change account controls', async () => {
+  const observations = [], f = fixture(undefined, { onSnapshot: value => { observations.push(value); throw Error('diagnostic failure'); } });
+  const first = await f.manager.snapshot(); await f.manager.snapshot(); assert.equal(observations.length, 1);
+  assert.equal(observations[0], first); assert.equal(first.instances[0].connected, true);
+  f.advance(1500); await f.manager.snapshot(); assert.equal(observations.length, 2);
+  const unavailable = fixture(() => { throw Error('offline'); }, { onSnapshot: value => observations.push(value) });
+  await unavailable.manager.snapshot(); assert.equal(observations.at(-1).instances.every(x => !x.available), true);
+});
+
+test('an in-flight read superseded by a command never enters retained observations', async () => {
+  let enter, release, reads = 0;
+  const entered = new Promise(resolve => { enter = resolve; }), delayed = new Promise(resolve => { release = resolve; }), observations = [];
+  const f = fixture(async url => {
+    if (url.pathname.endsWith('/command')) return Response.json({ ok: true, command: job() });
+    const s = status(); s.connected = ++reads > 1;
+    if (reads === 1) { enter(); await delayed; }
+    return Response.json(s);
+  }, { sources: [sources[0]], onSnapshot: value => observations.push(value) });
+  const old = f.manager.snapshot(); await entered; await f.manager.command('primary', start);
+  const current = await f.manager.snapshot(); release(); await old;
+  assert.equal(observations.length, 1); assert.equal(observations[0], current); assert.equal(current.instances[0].connected, true);
+});
+
 test('strict actions cannot mutate identities, forward arbitrary messages, or target another service', async () => {
   const f = fixture();
   for (const input of [{ ...start, params: { ...start.params, account: 'other_account' } }, { ...start, action: 'authorize' },

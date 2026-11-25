@@ -63,6 +63,8 @@ npm run service:restart
 
 Stop preserves installation/data and causes updated helpers to wait for coordination. Auto-start works after Mac login; the Mac and Chrome still need to remain awake/online for playback and chat. No cloud service or spending is introduced.
 
+The host retains sanitized status baselines, transitions and one-minute checkpoints from actual account reads in owner-only `private/status.jsonl` (four 1 MiB files including rotations). Browser/video source timestamps remain separate from host read time; token presence does not prove a valid chat grant. No chat text, account names, channels or raw errors are retained. See [status logging contract](docs/STATUS-LOG.md) for privacy, freshness, failure and rollback behavior.
+
 ## Verification and rollback
 
 The local-pages implementation passes **93 host tests and 269 tests in each helper** at the 2026-11-25 verification checkpoint. Coverage includes permit idempotency, two-client races, shared budgets, pause/readiness changes, seed reconciliation, process restart, lease expiry, unknown outcomes, origin/token/CSRF isolation and UI failures. Helper suites additionally cover Stop during Start, stopped settings/Watch controls, worker replacement, expired sends at the final provider boundary, bounded relay payloads, durable hold recovery and completion replay. These automated checks do not establish uninterrupted live playback or a completed paired live test.

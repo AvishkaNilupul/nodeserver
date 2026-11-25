@@ -7,6 +7,7 @@ import { createAccountManager } from './lib/accounts.mjs';
 import { createChannelDirectory } from './lib/channels.mjs';
 import { createBrowserLauncher, loadBrowserProfiles } from './lib/browser-launcher.mjs';
 import { createClipController } from './lib/clips.mjs';
+import { createStatusLogger } from './lib/status-log.mjs';
 
 const equal = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || '')); return x.length === y.length && timingSafeEqual(x, y); };
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -179,10 +180,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try { browserProfiles = await loadBrowserProfiles(); }
   catch { console.warn('Automatic browser opening is unavailable. Existing companion controls remain available.'); }
   const browserLauncher = createBrowserLauncher({ profiles: browserProfiles });
-  const accounts = createAccountManager();
+  const statusLog = createStatusLogger();
+  const accounts = createAccountManager({ onSnapshot: value => statusLog.observe(value) });
   const clips = createClipController({ db: store.db, accounts, isPaused: () => store.paused });
   const server = createHostServer({ store, clients: config.clients, remoteToken, browserLauncher, accounts, clips });
-  server.once('close', async () => { await clips.close(); store.close(); });
-  server.listen(8795, '127.0.0.1', () => { clips.start(); console.log('Stream Companion Host 1.0.0 listening on http://127.0.0.1:8795'); });
+  server.once('close', async () => { await clips.close(); statusLog.lifecycle('stopped'); store.close(); });
+  server.listen(8795, '127.0.0.1', () => { statusLog.lifecycle('started'); clips.start(); console.log('Stream Companion Host 1.0.0 listening on http://127.0.0.1:8795'); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => server.close());
 }
