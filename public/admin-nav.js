@@ -117,6 +117,12 @@
       icon: ICONS.bots,
       items: [
         {
+          href: "/admin/stream-companion/accounts",
+          label: "Twitch Controller",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
+        {
           href: "/twitch-inventory.html",
           label: "Twitch drops",
           icon: ICONS.twitchDrops,

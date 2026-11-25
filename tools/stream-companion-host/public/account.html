@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Accounts · Stream Companion</title>
+  <link rel="stylesheet" href="__COMPANION_BASE__/accounts.css">
+  <script type="module" src="__COMPANION_BASE__/accounts.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to account controls</a>
+  <div class="shell" data-accounts-app>
+    <header class="page-header">
+      <a class="brand" href="__COMPANION_BASE__/accounts"><span class="brand-mark" aria-hidden="true">c.</span><span>Stream Companion<small>Local account controls</small></span></a>
+      <nav aria-label="Main navigation"><a href="__COMPANION_BASE__/accounts" aria-current="page">Accounts</a><a href="__COMPANION_BASE__/">Shared coordination</a><a id="back-to-server" href="/superadmin.html" hidden>Back to server</a></nav>
+    </header>
+    <main id="main">
+      <div class="page-heading"><div><p class="eyebrow" id="page-eyebrow">Your companions</p><h1 id="page-title">Two accounts. One place.</h1><p id="page-description">Open an account to manage its stream, conversation and recent activity.</p></div><span class="pill" id="network-status" role="status" aria-live="polite">Connecting</span></div>
+      <div class="notice" id="connection-notice" role="status" hidden></div>
+      <p class="access-actions" id="access-actions" hidden><a href="/admin-login.html">Sign in</a> · <a href="/settings.html">Security settings</a></p>
+      <div class="notice error" id="command-error" role="alert" hidden></div>
+      <section id="accounts-overview" aria-label="Companion accounts"><div class="account-grid" id="account-cards"><p class="empty">Waiting for account status.</p></div><aside class="quiet-note">Each account keeps its own browser profile. These controls use the existing extension; the profile must be open to start watching. <a href="__COMPANION_BASE__/">Manage shared turns and bot exchanges</a></aside></section>
+      <div id="account-detail" hidden>
+        <a class="back-link" href="__COMPANION_BASE__/accounts">All accounts</a>
+        <div class="notice" id="account-reason" role="status" hidden></div>
+        <section class="control-panel panel" aria-labelledby="stream-controls-heading">
+          <div class="section-heading"><div><p class="eyebrow">Session controls</p><h2 id="stream-controls-heading">Choose a stream</h2></div><span class="pill" id="session-state">Checking session</span></div>
+          <form id="session-form">
+            <div class="settings-grid"><label class="channel-field">Channel<input id="channel" name="channel" type="text" placeholder="Channel login" autocomplete="off" autocapitalize="none" spellcheck="false" minlength="3" maxlength="25" pattern="[A-Za-z0-9_]{3,25}" required><span class="field-note">Twitch channel login · 3–25 characters</span></label>
+              <label>Conversation mode<select id="chat-mode" name="chatMode"><option value="mentions">Reply to mentions</option><option value="participate">Participate occasionally</option></select></label>
+              <label>Reply source<select id="reply-source" name="replySource"><option value="local">Local replies</option><option value="ai">AI replies</option></select></label>
+            </div>
+            <div class="actions"><button class="primary" id="start" type="submit" disabled>Start companion</button><button class="danger" id="stop" type="button" disabled>Stop</button><button id="watch" type="button" disabled>Open stream</button><button class="subtle" id="save-settings" type="button" disabled>Save settings</button></div>
+            <label class="check-label"><input id="auto-resume" name="autoResume" type="checkbox"><span>Recover this session automatically<small>Applies after Start. Saving settings does not restart a stopped session.</small></span></label>
+          </form>
+          <p class="field-note" id="settings-current">Waiting for current settings.</p>
+          <p class="field-note">Start opens the ordinary Twitch watch page in this account’s browser. Chat connection alone does not confirm video playback.</p>
+        </section>
+        <section class="status-grid" aria-label="Independent account checks" id="status-checks"></section>
+        <section class="panel command-panel" aria-labelledby="operation-heading"><div class="section-heading"><div><p class="eyebrow">Control feedback</p><h2 id="operation-heading">Current operation</h2></div><span class="pill" id="operation-state" role="status" aria-live="polite">No pending operation</span></div><div id="operation-detail"><p class="empty">Commands will appear here.</p></div></section>
+        <div class="content-grid">
+          <section class="panel" aria-labelledby="broadcast-heading"><p class="eyebrow">On stream</p><h2 id="broadcast-heading">Broadcast & activity</h2><div id="broadcast"></div></section>
+          <section class="panel" aria-labelledby="compose-heading"><p class="eyebrow">Review before sending</p><h2 id="compose-heading">Draft a message</h2><p class="section-description">Create a reply or a chat summary, then review the result. Drafting never posts to chat.</p><div class="actions compact"><button id="draft" type="button" disabled>Draft reply</button><button id="summary" type="button" disabled>Summarize chat</button></div><div id="draft-result" class="draft-result" role="status" hidden></div><label class="message-label" for="message-text">Message to review<textarea id="message-text" rows="5" maxlength="300" placeholder="Write a message or request a draft."></textarea></label><div class="send-row"><span class="field-note" id="text-count">0 / 300</span><button class="primary" id="send" type="button" disabled>Send reviewed message</button></div><p class="field-note">Manual sends still use account, playback, duplicate and pacing checks.</p></section>
+          <section class="panel" aria-labelledby="incoming-heading"><div class="section-heading"><div><p class="eyebrow">Recent public chat</p><h2 id="incoming-heading">Incoming messages</h2></div><span class="pill" id="chat-count">—</span></div><div id="chat-digest" class="section-description"></div><ol class="message-list" id="incoming-chat"></ol></section>
+          <section class="panel" aria-labelledby="delivery-heading"><div class="section-heading"><div><p class="eyebrow">Actual delivery records</p><h2 id="delivery-heading">Sent & attempted</h2></div><span class="pill" id="sent-count">—</span></div><ol class="message-list" id="delivery-history"></ol></section>
+          <section class="panel" aria-labelledby="drops-heading"><div class="section-heading"><div><p class="eyebrow">Channel rewards</p><h2 id="drops-heading">Drops</h2></div><span class="pill" id="drops-state">Checking</span></div><div id="drops-detail"></div><div class="actions compact"><button id="drops-enable" type="button" disabled>Enable claims</button><button id="drops-disable" type="button" disabled>Disable claims</button><button id="drops-check" type="button" disabled>Check drops</button></div></section>
+          <section class="panel" aria-labelledby="recent-heading"><p class="eyebrow">Recent control requests</p><h2 id="recent-heading">Command history</h2><ol class="message-list" id="command-history"></ol></section>
+        </div>
+      </div>
+    </main>
+    <footer><span>Local host · Account logins stay in their profiles</span><a href="__COMPANION_BASE__/">Shared coordination & exchanges</a><span id="last-refreshed">Waiting for status</span></footer>
+  </div>
+</body>
+</html>

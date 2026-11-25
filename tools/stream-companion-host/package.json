@@ -1,0 +1,22 @@
+{
+  "name": "stream-companion-host",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.16" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "setup": "node setup.mjs",
+    "service:install": "node service.mjs install",
+    "service:status": "node service.mjs status",
+    "service:restart": "node service.mjs restart",
+    "service:stop": "node service.mjs stop",
+    "service:start": "node service.mjs start",
+    "remote:install": "node remote-service.mjs install",
+    "remote:status": "node remote-service.mjs status",
+    "remote:restart": "node remote-service.mjs restart",
+    "remote:stop": "node remote-service.mjs stop",
+    "remote:start": "node remote-service.mjs start"
+  }
+}

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Companion Host</title>
+  <link rel="stylesheet" href="__COMPANION_BASE__/style.css">
+  <script type="module" src="__COMPANION_BASE__/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to coordination status</a>
+  <div class="app-shell" id="host-app" data-host-app data-network="loading">
+    <header class="page-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <div><p class="eyebrow">Stream Companion</p><h1>Companion Host<span class="title-dot">.</span></h1></div>
+      </div>
+      <div class="header-status"><span class="status-dot" id="host-dot" data-tone="muted"></span><span id="host-status" role="status" aria-live="polite">Connecting to host</span><a id="back-to-server" href="/superadmin.html" hidden>Back to server</a></div>
+    </header>
+
+    <main id="main">
+      <section class="overview" aria-labelledby="overview-heading">
+        <div class="overview-copy"><p class="eyebrow">Shared conversation control</p><h2 id="overview-heading">One turn at a time.</h2><p class="overview-description">Both accounts coordinate here before contributing. Shared limits and duplicate checks keep the conversation clear.</p></div>
+        <div class="coordination-control">
+          <span class="state-pill" id="coordination-state" data-tone="muted">Checking coordination</span>
+          <button class="control-button" id="coordination-toggle" type="button" disabled>Pause coordination</button>
+          <p>Holds new turns. Each account keeps its own controls.</p>
+        </div>
+      </section>
+
+      <div class="notice" id="connection-notice" role="status" aria-live="polite" hidden></div>
+      <p class="notice" id="access-actions" hidden><a href="/admin-login.html">Sign in</a> · <a href="/settings.html">Security settings</a></p>
+      <div class="notice error" id="control-notice" role="alert" hidden></div>
+
+      <section class="summary-strip" aria-label="Host summary">
+        <div><span class="summary-label">Accounts checked in</span><strong id="account-summary">—</strong></div>
+        <div><span class="summary-label">Channels tracked</span><strong id="channel-summary">—</strong></div>
+        <div><span class="summary-label">Host uptime</span><strong id="uptime-summary">—</strong></div>
+        <div><span class="summary-label">Last refreshed</span><strong id="refresh-summary">Waiting for status</strong></div>
+      </section>
+
+      <section class="accounts-section" aria-labelledby="accounts-heading">
+        <div class="section-heading"><div><p class="eyebrow">Individual connections</p><h2 id="accounts-heading">Companions</h2></div><p>Chat connection and playback are checked separately.</p></div>
+        <div class="account-grid" id="accounts" aria-busy="true"><div class="empty-state loading">Waiting for the accounts to check in.</div></div>
+      </section>
+
+      <section class="exchange-panel" aria-labelledby="exchanges-heading">
+        <div class="exchange-header">
+          <div class="exchange-intro">
+            <p class="eyebrow">Optional public feature</p>
+            <h2 id="exchanges-heading">Occasional bot exchanges</h2>
+            <p>Two brief, openly automated lines between your companions. Every public line starts with <code>[companion bot]</code>.</p>
+          </div>
+          <div class="exchange-control">
+            <span class="state-pill" id="exchange-state" data-tone="muted">Checking feature status</span>
+            <button class="exchange-button" id="exchange-toggle" type="button" disabled>Enable bot exchanges</button>
+          </div>
+        </div>
+        <p class="exchange-policy" id="exchange-policy">At most 2 lines · 60–120 minutes between exchanges · 3–6 minutes between lines</p>
+        <p class="exchange-eligibility">Waits until both companions are running on the same live broadcast. Human conversation and the shared limits come first.</p>
+        <div class="exchange-channels" id="exchange-channels"><div class="empty-state">Exchange schedules will appear here.</div></div>
+      </section>
+
+      <div class="detail-grid">
+        <section class="panel" aria-labelledby="channels-heading">
+          <div class="panel-heading"><p class="eyebrow">Shared pacing</p><h2 id="channels-heading">Channel turns</h2></div>
+          <div id="channels"><div class="empty-state">Channel coordination will appear here.</div></div>
+        </section>
+        <section class="panel" aria-labelledby="events-heading">
+          <div class="panel-heading"><p class="eyebrow">Recent activity</p><h2 id="events-heading">Coordination decisions</h2></div>
+          <ol class="event-list" id="events"><li class="empty-state">No decisions to show yet.</li></ol>
+        </section>
+      </div>
+    </main>
+
+    <footer><span>Local host · Account logins remain separate</span><a href="__COMPANION_BASE__/accounts">Open account controls</a><span id="host-version">Companion Host</span></footer>
+  </div>
+</body>
+</html>

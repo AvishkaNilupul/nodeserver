@@ -1,0 +1,40 @@
+# Local account control pages
+
+Owner requested local pages for each existing personal companion with all routine controls and current data, replacing extension pages as the regular interface. Use existing host8795, preserving its coordination page at `/`. New overview `/accounts` and detail `/accounts/primary`, `/accounts/test`. No cloud, Sites registration, new credentials, browser permissions, OAuth, profile/account allocation, farms, marketplace or nodeserver runtime changes. Buildless pages reuse existing visual language. Extension remains the browser/watch engine and old controls remain a fallback.
+
+## Boundaries and APIs
+
+Host server owns public pages and same-origin/CSRF-gated API. Fixed server-side sources are existing helpers8792/8793 and their own private/config.json, already used by read-only dashboard8794; preserve8794. Never expose/copy credentials into served assets or browser state. No arbitrary URL, file or proxy target from page input.
+
+- `GET /api/accounts` → `{updatedAt,instances:[instance...]}` plus host server's ephemeral csrfToken. Same origin checks as existing `/api/status`.
+- `POST /api/accounts/:id/command` JSON `{requestId,action,params}` → `{ok:true,command}`. Existing same-origin and CSRF protections; only primary/test. Host forwards to fixed helper `/api/control/command` with its own paired credentials and original extension Origin; JSON remains exact typed command, never arbitrary worker messages.
+- Each helper paired API gains `POST /api/control/status` `{}` → `{ok:true,...controlSnapshot}`; `POST /api/control/command` `{requestId,action,params}`; `POST /api/control/bridge` with `{sessionId,state?,completion?}` → `{ok:true,command?,...intent}`. Extension is sole executor of Chrome operations. All helper routes retain original Host, extension-Origin, bearer validation. Node host accesses helper server-side only; no added browser CORS origin.
+- Worker polls bridge every5seconds while awake and on existing30second alarm/startup/install, without relying on page remaining open. No new manifest permissions. Preserve resilience to worker termination: request IDs/outcomes are idempotent, expired/in-progress lost commands do not replay a public send. UI reports queued/running/confirmed/failed and bridge freshness honestly; never optimistic success based on enqueue alone. Commands TTL90seconds, bounded queue/history, at most one pending non-Stop action. Stop preempts/cancels stale Start and interrupts slow work. Helper immediately disconnects on Stop and blocks stale connect/send until a newer explicit Start; coordinate generation checks with worker. Closing a profile means controls cannot start Chrome and must show that limitation.
+
+Command actions/params (exact allowlist):
+
+| action | params |
+|---|---|
+| start | `{channel,chatMode,replySource,autoResume}` where channel is a login, mode mentions/participate, source local/ai, autoResume boolean |
+| stop | `{}` |
+| watch | `{}` (bring tracked ordinary Twitch page forward or open selected channel) |
+| settings | `{chatMode,replySource,autoResume}` (safe existing settings only; no account/token/clientID fields) |
+| draft | `{mode}` reply/summary, no automatic send |
+| send | `{text}` explicit reviewed manual text,1–300chars, existing send gates |
+| drops-enable | `{}` |
+| drops-disable | `{}` |
+| drops-check | `{}` |
+
+Start performs existing Simple workflow with permission presence check (no queued permissions prompt): disarm previous session, save chosen channel/source/mode, connect correct account, wait bounded identity confirmation, open/attach normal Twitch tab, then arm selected mode/recovery only if operation/current command/generation unchanged. Failure disarms and reports error. Stop always wins an older Start, including after async network calls. Settings cannot change account, credentials, channel or resume a stopped session. Bridge may reuse trusted worker handle functions but no generic untrusted message dispatch. Draft/send remain behind existing account/channel/playback/duplicate/pacing/provider checks. No public demonstration messages or forced exchange timing. Existing explicitly tagged exchange protocol remains untouched.
+
+`controlSnapshot` shape shared by helper→host→UI (allowlisted, bounded, sanitized): `{account,authorized,connected,channel,error,settings:{allowedChannel,paused,autoReply,autoResume,chatMode,replySource},browser:{online,lastSeenAt},watch:{enabled,status,channel,checkedAt,error},activity:{state,reason,at},streamContext,chat:{messages,digest},sent,drops,coordination,permissions:{playbackAccess},controls:{pending,recent}}`. Numeric timestamps from browser remain numeric; server updatedAt/lastSeenAt ISO strings. Public account and channel identifiers only; never pairingToken/clientId/extensionId/OAuth. Message/history entries bounded and credential-like diagnostics redacted server-side. Mode/recovery/source settings and recent command results remain visible. Fresh bridge max45s; stale data labelled and Start/Settings/Draft/Send/Drops disabled, Stop still can enforce helper hold. `command` fields `{id,requestId,action,params,state,createdAt,expiresAt,result?,error?}`; state queued/running/completed/failed/cancelled/expired. Results only intended text/reason/ok fields, not raw provider responses.
+
+## UI
+
+Overview shows both account cards and navigation; detail page has channel picker, Start/Stop/Open stream, source/mode/recovery settings, independent chat/playback/bridge freshness, current broadcast/category, message and participation activity, actual delivery history/status, recent incoming public chat, manual draft/summary/send, drops state/actions, pending operation/result and link back to shared coordination/exchange controls. Start opens actual ordinary watch page in correct profile. Page never presents an embed or chat connection as proof of video. Visible closed-profile, stale, permission and phone restriction reasons. Use textContent and strict CSP, no remote assets. Keep input edits stable across polling, one pending UI mutation except Stop, no duplicate sends from double clicks. No secret setup forms.
+
+## Ownership and verification
+
+Root: host lib/accounts.mjs, host server routes/security, docs, activation/native QA/durable notes. Helper agent: both lib/local-control.mjs + helper server integration + helper API tests, command lifecycle and guard; coordinate exports with browser agent. Browser agent: both extension bridges/background/Simple fallback integration and worker tests. UI agent: host public account page assets and UI tests, overview links. Do not restart services or use live credentials/DB/browser from agents. Source backups already created before fan-out under each private/backup-local-pages-*.
+
+Use virtual clocks, mocked Chrome and real ephemeral HTTP roundtrips to verify race/outage/idempotency/privacy and full old suites. Root pauses current sessions, installs/restarts helpers/host, reloads native extensions, checks Start/Stop from actual new pages in each profile, then performs a bounded live playback test on another available channel/account. Do not invent a successful post or uninterrupted playback claim. At handoff leave ordinary watch page selected per profile, active tested profile foreground; no focus-stealing jobs. Write final state and rollback in durable notes.

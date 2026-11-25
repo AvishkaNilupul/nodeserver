@@ -212,6 +212,8 @@ app.use(
     },
   }),
 );
+const twitchControllerRoutes = require("./routes/twitchControllerRoutes");
+app.use("/admin/stream-companion", twitchControllerRoutes.bodyParser);
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: true, limit: "100kb" }));
 
@@ -640,6 +642,8 @@ app.get("/marketplace.html", requireAdmin, enforce2fa, (req, res) => {
 });
 app.use("/marketplace", requireAdmin, enforce2fa, marketplaceProxy);
 app.use("/outlook", require("./routes/outlookDashboardRoutes"));
+// Personal Mac companions remain behind the owner's existing session and 2FA.
+app.use("/admin/stream-companion", twitchControllerRoutes);
 
 // =========================
 // Shop (in-app bundle store, all admins)
