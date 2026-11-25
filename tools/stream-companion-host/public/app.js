@@ -218,7 +218,7 @@ function renderExchangeChannel(document, channel, now) {
   const item = element(document, 'article', 'exchange-channel');
   const top = element(document, 'div', 'exchange-channel-top');
   top.append(element(document, 'h3', '', accountName(channel.channel)));
-  const labels = { disabled: 'Disabled', waiting_for_partners: 'Waiting for both companions (main + second)', scheduled: 'Scheduled', quiet_wait: 'Waiting for quiet chat',
+  const labels = { disabled: 'Disabled', waiting_for_partners: 'Waiting for two companions', scheduled: 'Scheduled', quiet_wait: 'Waiting for quiet chat',
     spacing_wait: 'Waiting for shared spacing', turn_1: 'First line scheduled', turn_2: 'Reply scheduled', paused: 'Coordination paused', exhausted: 'Scenes exhausted' };
   top.append(tone(element(document, 'span', 'badge', lookup(labels, channel.state, text(channel.state, 'Waiting'))), ['scheduled', 'turn_1', 'turn_2'].includes(channel.state) ? 'good' : 'muted'));
   item.append(top);
@@ -226,7 +226,7 @@ function renderExchangeChannel(document, channel, now) {
   const bottom = element(document, 'div', 'exchange-channel-meta'), wait = remaining(channel.nextAt, now);
   const next = wait ? `Next eligible in ${wait}` : channel.state === 'exhausted' ? 'No unused scenes remain'
     : channel.state === 'disabled' ? 'Enable to schedule' : channel.state === 'paused' ? 'Held until coordination resumes'
-    : channel.state === 'waiting_for_partners' ? 'Waiting for the main and second accounts to run' : 'Waiting on eligibility checks';
+    : channel.state === 'waiting_for_partners' ? 'Waiting for two accounts to run' : 'Waiting on eligibility checks';
   bottom.append(element(document, 'span', '', next));
   bottom.append(element(document, 'span', '', `${Math.floor(number(channel.usedScenes))} / ${Math.floor(number(channel.totalScenes))} scenes used`));
   item.append(bottom); return item;
@@ -251,7 +251,7 @@ function renderExchanges(view, state, now, stale) {
   n['exchange-channels'].replaceChildren(...(channels.length ? channels.map(channel => renderExchangeChannel(document, channel, now))
     : [element(document, 'div', 'empty-state', !available ? 'Waiting for exchange status.' : !exchanges.enabled
       ? 'Bot exchanges are disabled. Enabling starts a warmup before the first eligible exchange.'
-      : 'Waiting for the main and second companions to run on the same live broadcast.')]));
+      : 'Waiting for two companions to run on the same live broadcast.')]));
 }
 
 export function renderHost(view, state, now = Date.now()) {

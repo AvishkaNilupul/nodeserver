@@ -95,21 +95,53 @@ export class ExchangeEngine {
       || !Number.isFinite(x.lastHumanAt) || x.lastHumanAt < 0 || x.lastHumanAt > this.s.now() + 5000) return { streamId: '', checkedAt: 0, lastHumanAt: 0 };
     return { streamId: x.streamId, checkedAt: x.checkedAt, lastHumanAt: x.lastHumanAt };
   }
-  partners(channel) {
-    const originalPair = this.s.clients.has('primary') && this.s.clients.has('test');
-    const active = this.db.prepare('SELECT * FROM host_clients WHERE channel=?').all(channel)
-      // The original two-turn exchange stays with the original pair. A third
-      // companion shares ordinary pacing without cancelling or joining a run.
-      .filter(c => (!originalPair || ['primary', 'test'].includes(c.client_id)) && this.s.clients.has(c.client_id) && this.s.eligible(c));
-    if (active.length !== 2 || active.some(c => !c.exchange_stream_id || c.exchange_checked_at <= 0 || c.exchange_checked_at < this.s.now() - EXCHANGE_POLICY.contextMs || c.exchange_checked_at > this.s.now() + 5000)
-      || active[0].exchange_stream_id !== active[1].exchange_stream_id) return null;
-    return active.sort((a, b) => a.account.localeCompare(b.account));
+  eligiblePartners(channel) {
+    const finite = [...this.s.clients.keys()].every(id => ['primary', 'test', 'third'].includes(id));
+    // Retain the original generic two-client store contract without extending
+    // pair selection to arbitrary larger rosters.
+    if (!finite && this.s.clients.size !== 2) return [];
+    return this.db.prepare('SELECT * FROM host_clients WHERE channel=?').all(channel)
+      .filter(c => this.s.clients.has(c.client_id) && this.s.eligible(c) && c.exchange_stream_id
+        && c.exchange_checked_at > 0 && c.exchange_checked_at >= this.s.now() - EXCHANGE_POLICY.contextMs
+        && c.exchange_checked_at <= this.s.now() + 5000)
+      .sort((a, b) => a.account.localeCompare(b.account));
+  }
+  lastPair(channel, pair) {
+    const [a, b] = pair;
+    return this.db.prepare(`SELECT e.rowid AS last_run,a.account AS initiator FROM host_exchanges e
+      JOIN host_exchange_lines a ON a.exchange_id=e.id AND a.turn=1
+      JOIN host_exchange_lines b ON b.exchange_id=e.id AND b.turn=2
+      WHERE e.channel=? AND ((a.account=? AND b.account=?) OR (a.account=? AND b.account=?))
+      ORDER BY e.rowid DESC LIMIT 1`).get(channel, a.account, b.account, b.account, a.account) || { last_run: 0, initiator: '' };
+  }
+  partners(channel, run = null) {
+    const active = this.eligiblePartners(channel);
+    if (run) {
+      const lines = this.db.prepare('SELECT turn,account,other_account FROM host_exchange_lines WHERE exchange_id=? ORDER BY turn').all(run.id);
+      if (run.channel !== channel || lines.length !== 2 || lines[0].turn !== 1 || lines[1].turn !== 2
+        || lines[0].account === lines[1].account || lines[0].other_account !== lines[1].account
+        || lines[1].other_account !== lines[0].account) return null;
+      const pair = active.filter(c => lines.some(line => line.account === c.account));
+      return pair.length === 2 && pair.every(c => c.exchange_stream_id === run.stream_id) ? pair : null;
+    }
+    const pairs = [];
+    for (let i = 0; i < active.length; i++) for (let j = i + 1; j < active.length; j++) {
+      const a = active[i], b = active[j];
+      if (a.exchange_stream_id !== b.exchange_stream_id) continue;
+      pairs.push({ pair: [a, b], last: this.lastPair(channel, [a, b]).last_run,
+        key: `${a.account}:${b.account}` });
+    }
+    pairs.sort((a, b) => a.last - b.last || a.key.localeCompare(b.key));
+    // Prefer a ready pair; spacing for one account must not starve a different
+    // eligible pair. While globally held, retain one pair for waiting status.
+    return pairs.find(x => this.gate(channel, x.pair).ok)?.pair || pairs[0]?.pair || null;
   }
   gate(channel, pair, account) {
     if (!this.enabled) return hold('exchange_cancelled', 'Companion exchanges are disabled.');
     if (this.s.paused) return hold('paused', 'Central coordination is paused.');
     if (!pair) return hold('exchange_cancelled', 'Both companions need fresh participation and the same live broadcast.');
-    if (Math.max(...pair.map(c => c.last_human_at)) > this.s.now() - EXCHANGE_POLICY.quietMs) return hold('exchange_quiet', 'Human conversation has priority; waiting for a quiet moment.');
+    const observers = this.eligiblePartners(channel).filter(c => c.exchange_stream_id === pair[0].exchange_stream_id);
+    if (Math.max(...observers.map(c => c.last_human_at)) > this.s.now() - EXCHANGE_POLICY.quietMs) return hold('exchange_quiet', 'Human conversation has priority; waiting for a quiet moment.');
     const priority = this.db.prepare("SELECT p.*,c.* FROM host_proposals p JOIN host_clients c USING(client_id) WHERE p.channel=? AND p.kind<>'exchange' AND p.state='waiting' AND p.last_at>? AND (p.reply_at=0 OR p.reply_at>=?)").all(channel, this.s.now() - 30000, this.s.now() - 45000)
       .some(c => this.s.clients.has(c.client_id) && c.channel === channel && this.s.eligible(c, !!c.kind || !!c.reply_id));
     if (priority) return hold('exchange_priority', 'A useful conversation opportunity has priority.');
@@ -144,8 +176,9 @@ export class ExchangeEngine {
       for (const c of this.db.prepare("SELECT DISTINCT channel FROM host_clients WHERE channel<>''").all()) this.db.prepare('INSERT OR IGNORE INTO host_exchange_schedules(channel) VALUES (?)').run(c.channel);
       const schedules = this.db.prepare('SELECT * FROM host_exchange_schedules ORDER BY channel').all();
       for (const schedule of schedules) {
-        const channel = schedule.channel, pair = this.partners(channel);
+        const channel = schedule.channel;
         let run = this.db.prepare("SELECT * FROM host_exchanges WHERE channel=? AND state='active'").get(channel);
+        let pair = this.partners(channel, run);
         if (run) {
           if (!this.enabled || this.s.paused || !pair || pair[0].exchange_stream_id !== run.stream_id || run.deadline <= this.s.now()) {
             this.cancel(run, !this.enabled ? 'Companion exchanges are disabled.' : this.s.paused ? 'Central coordination is paused.' : run.deadline <= this.s.now() ? 'The exchange deadline passed.' : 'A partner or live broadcast changed.');
@@ -158,6 +191,7 @@ export class ExchangeEngine {
             }
           }
         }
+        if (!run) pair = this.partners(channel);
         if (!this.enabled) { this.schedule(channel, 0, 'disabled', 'Companion exchanges are disabled.'); continue; }
         if (this.s.paused) { this.schedule(channel, this.db.prepare('SELECT next_at FROM host_exchange_schedules WHERE channel=?').get(channel).next_at, 'paused', 'Central coordination is paused.'); continue; }
         if (!pair) { this.schedule(channel, this.db.prepare('SELECT next_at FROM host_exchange_schedules WHERE channel=?').get(channel).next_at, 'waiting_for_partners', 'Waiting for both companions on the same fresh live broadcast.'); continue; }
@@ -178,7 +212,8 @@ export class ExchangeEngine {
         if (current.next_at > this.s.now()) { this.schedule(channel, current.next_at, 'scheduled', 'Waiting for the next occasional exchange.'); continue; }
         const g = this.gate(channel, pair);
         if (!g.ok) { this.schedule(channel, current.next_at, g.code === 'exchange_quiet' ? 'quiet_wait' : 'spacing_wait', g.reason); continue; }
-        const first = pair.find(c => c.account !== current.last_initiator) || pair[0], second = pair.find(c => c !== first);
+        const previous = this.lastPair(channel, pair);
+        const first = pair.find(c => c.account !== previous.initiator) || pair[0], second = pair.find(c => c !== first);
         const scene = remaining[Math.min(remaining.length - 1, Math.floor(this.delaySample() * remaining.length))];
         const id = randomUUID(), deadline = this.s.now() + EXCHANGE_POLICY.deadlineMs;
         this.db.prepare('INSERT INTO host_used_scenes VALUES (?,?,?)').run(channel, scene.id, this.s.now());
@@ -200,7 +235,7 @@ export class ExchangeEngine {
     if (!run || c.channel !== channel) return undefined;
     const line = this.db.prepare("SELECT * FROM host_exchange_lines WHERE exchange_id=? AND account=? AND state IN ('offered','leased')").get(run.id, c.account);
     if (!line || line.not_before > this.s.now() || line.expires_at <= this.s.now()) return undefined;
-    const g = this.gate(channel, this.partners(channel), line.account);
+    const g = this.gate(channel, this.partners(channel, run), line.account);
     // An already-owned unused lease is still the same exact offer; its own
     // presence must not invalidate the helper's final local validation.
     if (!g.ok && !(g.code === 'exchange_wait' && line.state === 'leased')) return undefined;
@@ -216,7 +251,7 @@ export class ExchangeEngine {
     if (begin ? line.state !== 'leased' || line.permit_id !== p.reservation_id : line.state !== 'offered') return hold('exchange_consumed', 'This exchange line has already been consumed.');
     if (line.expires_at <= this.s.now()) return hold('exchange_cancelled', 'This exchange line expired.');
     if (!line.not_before || line.not_before > this.s.now()) return hold('exchange_wait', 'The next exchange line is not due yet.');
-    const pair = this.partners(p.channel);
+    const pair = this.partners(p.channel, run);
     if (!pair || pair[0].exchange_stream_id !== run.stream_id) return hold('exchange_cancelled', 'A partner or live broadcast changed.');
     const g = this.gate(p.channel, pair, line.account);
     if (!g.ok && !(begin && g.code === 'exchange_wait')) return g;

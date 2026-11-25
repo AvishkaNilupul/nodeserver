@@ -134,13 +134,13 @@ test('exchange settings and waiting reasons render literally without hiding thei
   assert.equal(v.nodes['exchange-state'].textContent, 'Enabled');
   assert.equal(v.nodes['exchange-toggle'].textContent, 'Disable bot exchanges');
   assert.ok(v.nodes['exchange-channels'].textContent.includes(hostile));
-  assert.ok(v.nodes['exchange-channels'].textContent.includes('Waiting for both companions'));
+  assert.ok(v.nodes['exchange-channels'].textContent.includes('Waiting for two companions'));
   assert.ok(v.nodes['exchange-channels'].textContent.includes('2 / 10 scenes used'));
   assert.equal(v.nodes['exchange-policy'].textContent, 'At most 2 lines · 60–120 minutes between exchanges · 3–6 minutes between lines');
   const { readFile } = await import('node:fs/promises');
   const markup = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
   assert.ok(markup.includes('Every public line starts with <code>[companion bot]</code>'));
-  assert.ok(markup.includes('both companions are running on the same live broadcast'));
+  assert.ok(markup.includes('two companions are running on the same live broadcast'));
 });
 
 test('exchange toggle sends one exact-key request and holds the pause control during its mutation', async () => {

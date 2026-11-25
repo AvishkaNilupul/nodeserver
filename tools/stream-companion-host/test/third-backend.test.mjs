@@ -74,7 +74,7 @@ test('a third automatic creator receives only its own final permission', async t
   assert.equal(f.controller.permit('third', { requestId }).ok, false);
 });
 
-test('third live presence leaves the original pair exchange eligible and never substitutes for a missing original', t => {
+test('an unrelated third broadcast leaves the selected pair eligible and cannot replace its missing partner', t => {
   let time = NOW;
   const store = new HostStore({ file: ':memory:', clients, now: () => time, random: () => 0 }); t.after(() => store.close());
   const sync = (id, extra = {}) => store.sync(id, { channel: 'live_channel', connected: true, ready: true,
