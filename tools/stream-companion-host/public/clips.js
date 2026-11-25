@@ -123,7 +123,7 @@ export function createClipsController({ fetchImpl = globalThis.fetch, now = Date
     if (!validForm()) { state.error = 'Enter a channel login with 3–25 letters, numbers or underscores.'; emit(); return false; }
     const formRevision = state.form.revision;
     const result = await mutate('/api/clips/settings', { enabled: state.form.enabled, channel: state.form.channel, accountIds: creatorIds(state.form.selection) }, 'settings');
-    if (result) { if (formRevision === state.form.revision) state.form.dirty = false; state.feedback = 'Clip settings saved. Your watch and chat sessions have not been started.'; emit(); return true; }
+    if (result) { if (formRevision === state.form.revision) state.form.dirty = false; state.feedback = 'Clip settings saved.'; emit(); return true; }
     return false;
   }
   async function create() {
