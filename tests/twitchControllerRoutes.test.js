@@ -62,7 +62,7 @@ async function fixture(t, options = {}) {
     if (req.url.endsWith('/api/status')) return respond(res, 200, { updatedAt: new Date().toISOString(), paused: true, csrfToken: UPSTREAM_TOKEN });
     if (req.url.endsWith('/api/accounts')) return respond(res, 200, { updatedAt: new Date().toISOString(), instances: [], csrfToken: UPSTREAM_TOKEN });
     if (req.method === 'POST') return respond(res, 200, { ok: true, command: { id: 'fixture-command', state: 'queued' } });
-    return respond(res, 200, '<!doctype html><title>Fixture controller</title>', { 'Content-Type': req.url.endsWith('.js') ? 'text/javascript' : req.url.endsWith('.css') ? 'text/css' : 'text/html' });
+    return respond(res, 200, '<!doctype html><html lang="en"><head><title>Fixture controller</title></head><body><main id="main">Fixture content</main></body></html>', { 'Content-Type': req.url.endsWith('.js') ? 'text/javascript' : req.url.endsWith('.css') ? 'text/css' : 'text/html' });
   });
   const upstreamPort = await listen(upstream);
   const app = express();
@@ -122,13 +122,16 @@ test('every page, asset and API uses the real superadmin and two-factor guards b
   const enrolled = await f.client(); assert.equal((await enrolled.request('/api/status')).status, 200);
 });
 
-test('each finite GET route reaches only its prefixed fixed upstream and keeps response source intact', async t => {
+test('each finite GET route reaches only its prefixed fixed upstream and pages include site navigation', async t => {
   const f = await fixture(t), c = await f.client();
   const routes = ['/', '/accounts', '/accounts/primary', '/accounts/test', '/app.js', '/style.css', '/accounts.js', '/accounts.css', '/controller-path.js', '/api/status', '/api/accounts'];
   for (const path of routes) assert.equal((await c.request(path)).status, 200, path);
   assert.deepEqual(f.seen.map(x => x.path), routes.map(x => BASE + x));
   assert.ok(f.seen.every(x => x.headers.host === '127.0.0.1:8795' && x.headers.authorization === `Bearer ${REMOTE_TOKEN}`));
-  assert.equal((await c.request('/accounts')).text, '<!doctype html><title>Fixture controller</title>');
+  const page = await c.request('/accounts');
+  assert.match(page.text, /<main id="main">Fixture content<\/main>/);
+  assert.match(page.text, /class="nav"/);
+  assert.match(page.text, /src="\/admin-nav\.js/);
 });
 
 test('the gateway gives each authenticated session its own nonce and never exposes the private upstream CSRF', async t => {
@@ -144,6 +147,27 @@ test('the gateway gives each authenticated session its own nonce and never expos
   assert.equal((await post(a, '/api/control', { paused: true }, aNonce)).status, 200);
   assert.equal(f.seen.at(-1).headers['x-csrf-token'], UPSTREAM_TOKEN);
   assert.notEqual(f.seen.at(-1).headers['x-csrf-token'], aNonce);
+});
+
+test('site navigation uses fresh document style nonces while preserving the controller policy and body', async t => {
+  const csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  const html = '<!doctype html><html><head><link rel="stylesheet" href="/admin/stream-companion/accounts.css"><script type="module" src="/admin/stream-companion/accounts.js"></script></head><body><main id="main"><button id="stop" disabled>Stop</button></main></body></html>';
+  const f = await fixture(t, { upstream: (_req, res) => respond(res, 200, html, { 'Content-Security-Policy': csp }) });
+  const c = await f.client(), nonces = new Set();
+  for (const path of ['/', '/accounts', '/accounts/primary', '/accounts/test']) {
+    const page = await c.request(path);
+    assert.equal(page.status, 200);
+    const policy = page.headers['content-security-policy'];
+    const token = /style-src 'self' 'nonce-([A-Za-z0-9+/=_-]+)'/.exec(policy)?.[1];
+    assert.ok(token, policy); assert.ok(!nonces.has(token)); nonces.add(token);
+    assert.match(page.text, new RegExp('nonce="' + token.replace(/[+]/g, '\\+') + '"'));
+    for (const directive of ["default-src 'none'", "script-src 'self'", "connect-src 'self'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"]) assert.ok(policy.includes(directive));
+    assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval/);
+    assert.match(page.text, /<main id="main"><button id="stop" disabled>Stop<\/button><\/main>/);
+    assert.ok(page.text.indexOf('/admin-nav.css') > page.text.indexOf('/twitch-controller-shell.css'));
+    assert.doesNotMatch(page.text, /<iframe|<base|\sonclick=|\sstyle=/i);
+    assert.doesNotMatch(page.text, new RegExp(REMOTE_TOKEN + '|' + UPSTREAM_TOKEN));
+  }
 });
 
 test('Origin, same-origin metadata and session nonce are all required before a mutation contacts upstream', async t => {
@@ -274,6 +298,7 @@ test('tunnel outage returns a bounded offline navigation page and sanitized unav
   const page = await c.request('/accounts', { headers: { Accept: 'text/html', Origin: '', 'Sec-Fetch-Site': 'none' } });
   assert.equal(page.status, 503); assert.match(page.text, /retry/i); assert.match(page.text, /\/superadmin\.html/);
   assert.ok(page.text.length < 10000); assert.doesNotMatch(page.text, /ECONNREFUSED|18795|8795|Bearer|stack|remoteToken/);
+  assert.match(page.text, /class="nav"/); assert.match(page.text, /src="\/admin-nav\.js/);
   const api = await c.request('/api/accounts'); assert.equal(api.status, 503); assert.equal(api.data.ok, false);
   assert.doesNotMatch(api.text, /ECONNREFUSED|18795|8795|Bearer|stack|remoteToken/);
 });

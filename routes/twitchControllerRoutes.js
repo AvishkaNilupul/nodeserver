@@ -2,6 +2,7 @@ const express = require("express");
 const http = require("node:http");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const auth = require("../middleware/auth");
+const { renderControllerPage } = require("../utils/twitchControllerShell");
 
 const MOUNT = "/admin/stream-companion";
 const MAX_BODY = 65536;
@@ -86,8 +87,9 @@ function unavailable(req, res, mutation) {
   if (mutation) return errorResponse(res, 503, "command_unconfirmed", "The connection to your Mac was lost. The command outcome is unconfirmed. Refresh status before taking another action.");
   if (STATIC.get(req.controllerPath) === "text/html") {
     safeHeaders(res);
-    res.set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
-    return res.status(503).type("html").send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Twitch Controller unavailable</title></head><body><main><h1>Your Mac is unavailable</h1><p>The controller could not reach the Mac. Keep it awake and signed in, with Chrome and the companion services open.</p><p>No commands will be queued or replayed when the connection returns.</p><p><a href="${MOUNT}/accounts">Retry controller</a></p><p><a href="/superadmin.html">Back to server</a></p></main></body></html>`);
+    const page = renderControllerPage(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Twitch Controller unavailable</title></head><body><main class="controller-offline" id="main"><h1>Your Mac is unavailable</h1><p>The controller could not reach the Mac. Keep it awake and signed in, with Chrome and the companion services open.</p><p>No commands will be queued or replayed when the connection returns.</p><p><a href="${MOUNT}/accounts">Retry controller</a></p></main></body></html>`);
+    res.set("Content-Security-Policy", page.csp);
+    return res.status(503).type("html").send(page.html);
   }
   return errorResponse(res, 503, "mac_unavailable", "Your Mac controller is unavailable. Check that the Mac and its private connection are awake.");
 }
@@ -190,6 +192,11 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
       if (upstream.status !== 200 || !String(upstream.headers["content-type"] || "").startsWith(STATIC.get(suffix))) return unavailable(req, res, false);
       for (const name of ["content-security-policy", "permissions-policy"]) if (upstream.headers[name]) res.set(name, upstream.headers[name]);
       const text = redact(upstream.body.toString("utf8"), [remoteToken, req.session.companionUpstreamCsrf]);
+      if (STATIC.get(suffix) === "text/html") {
+        const page = renderControllerPage(text, upstream.headers["content-security-policy"]);
+        res.set("Content-Security-Policy", page.csp);
+        return res.status(200).type("html").send(page.html);
+      }
       return res.status(200).type(STATIC.get(suffix)).send(text);
     } catch { return unavailable(req, res, mutation); }
   });

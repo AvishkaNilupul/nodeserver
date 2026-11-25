@@ -4,6 +4,8 @@
 // one flat link per feature forever, and surfaces the superadmin-only
 // "Admins" link.
 (function () {
+  // Pages with a strict style policy pass a per-response nonce on this script.
+  var styleNonce = document.currentScript ? document.currentScript.nonce : "";
   function icon(pathHtml) {
     return (
       '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
@@ -121,6 +123,7 @@
           label: "Twitch Controller",
           icon: ICONS.bots,
           superOnly: true,
+          activePrefix: "/admin/stream-companion",
         },
         {
           href: "/twitch-inventory.html",
@@ -483,8 +486,11 @@
     var a = document.createElement("a");
     a.href = item.href;
     a.innerHTML = icon(item.icon) + " " + item.label;
-    if (window.location.pathname === item.href) {
+    var path = window.location.pathname;
+    if (path === item.href || (item.activePrefix &&
+      (path === item.activePrefix || path.indexOf(item.activePrefix + "/") === 0))) {
       a.className = "active";
+      a.setAttribute("aria-current", "page");
     }
     return a;
   }
@@ -638,6 +644,7 @@
       ".nav-backdrop.show{display:block;}" +
       "}";
     var style = document.createElement("style");
+    if (styleNonce) style.nonce = styleNonce;
     style.textContent = css;
     document.head.appendChild(style);
 
@@ -722,6 +729,7 @@
       ".nav-group-toggle .chev{transition:none;}}" +
       navScrollCss();
     var style = document.createElement("style");
+    if (styleNonce) style.nonce = styleNonce;
     style.id = "nav-group-style";
     style.textContent = css;
     document.head.appendChild(style);
