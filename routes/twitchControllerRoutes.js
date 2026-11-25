@@ -16,7 +16,8 @@ const STATIC = new Map([
   ["/controller-path.js", "text/javascript"],
   ["/style.css", "text/css"], ["/accounts.css", "text/css"],
 ]);
-const DATA = new Set(["/api/status", "/api/accounts"]);
+const DATA = new Set(["/api/status", "/api/accounts", "/api/channels"]);
+const CHANNEL_LOOKUP = /^\/api\/channels\/[a-z0-9_]{3,25}$/;
 const COMMAND = /^\/api\/accounts\/(primary|test)\/command$/;
 const object = (x) => !!x && typeof x === "object" && !Array.isArray(x);
 const exact = (x, keys) => object(x) && Object.keys(x).length === keys.length && keys.every((key) => Object.hasOwn(x, key));
@@ -147,7 +148,7 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
     if (suffix === null || /[?%\\\u0000-\u0020\u007f]/.test(suffix)) return errorResponse(res, 404, "not_found", "Controller route not found.");
     if (suffix === "" && req.method === "GET") return res.redirect(302, `${MOUNT}/accounts`);
     req.controllerPath = suffix;
-    const isData = DATA.has(suffix), isControl = suffix === "/api/control", isCommand = COMMAND.test(suffix);
+    const isData = DATA.has(suffix) || CHANNEL_LOOKUP.test(suffix), isControl = suffix === "/api/control", isCommand = COMMAND.test(suffix);
     const mutation = isControl || isCommand;
     if (!STATIC.has(suffix) && !isData && !mutation) return errorResponse(res, 404, "not_found", "Controller route not found.");
     if (req.method !== (mutation ? "POST" : "GET") || req.get("upgrade")) return errorResponse(res, 405, "method_not_allowed", "This controller method is not supported.");

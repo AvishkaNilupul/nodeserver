@@ -16,14 +16,18 @@ const prefixed = path => `${REMOTE_PREFIX}${path}`;
 
 async function harness(t, options = {}) {
   const store = new HostStore({ file: ':memory:', clients });
-  const calls = { snapshots: 0, commands: [], assets: [], sync: 0 };
+  const calls = { snapshots: 0, commands: [], assets: [], sync: 0, channels: [] };
   const sync = store.sync.bind(store); store.sync = (...args) => { calls.sync++; return sync(...args); };
   const accounts = {
     async snapshot() { calls.snapshots++; return { updatedAt: new Date().toISOString(), instances: [] }; },
     async command(id, body) { const input = validateCommand(body); calls.commands.push({ id, input });
       return { ok: true, command: { id: 'accepted-command', requestId: input.requestId, action: input.action, state: 'queued' } }; }
   };
-  const server = createHostServer({ store, clients, accounts, remoteToken, csrfToken: 'host-only-csrf',
+  const channels = {
+    async snapshot() { calls.channels.push('directory'); return { updatedAt: new Date().toISOString(), channels: [{ login: 'aviskarex', isLive: false }] }; },
+    async lookup(login) { calls.channels.push(login); return { login, isLive: true }; }
+  };
+  const server = createHostServer({ store, clients, accounts, channels, remoteToken, csrfToken: 'host-only-csrf',
     readFileImpl: async file => { calls.assets.push(file.pathname);
       return Buffer.from(file.pathname.endsWith('.html')
         ? '<link href="__COMPANION_BASE__/style.css"><a href="__COMPANION_BASE__/accounts">Accounts</a>'
@@ -66,7 +70,7 @@ test('remote pairing cannot reuse either coordination token or accept malformed 
 
 test('missing remote pairing disables the entire prefix while root and internal routes retain compatibility', async t => {
   const { request } = await harness(t, { remoteToken: undefined });
-  for (const path of ['/', '/accounts', '/controller-path.js', '/api/status', '/api/accounts']) {
+  for (const path of ['/', '/accounts', '/controller-path.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex']) {
     assert.equal((await request(prefixed(path), { headers: remote })).status, 404, path);
   }
   assert.equal((await request('/')).status, 200);
@@ -79,13 +83,13 @@ test('missing remote pairing disables the entire prefix while root and internal 
 
 test('every remote asset and API requires its separate bearer and remote credentials cannot impersonate a helper', async t => {
   const { request, calls } = await harness(t);
-  for (const path of ['/', '/accounts', '/app.js', '/accounts.js', '/controller-path.js', '/api/status', '/api/accounts']) {
+  for (const path of ['/', '/accounts', '/app.js', '/accounts.js', '/controller-path.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex']) {
     for (const authorization of [undefined, 'Bearer wrong-pairing', `Bearer ${clients[0].token}`, `Bearer ${clients[1].token}`]) {
       const headers = { ...local, ...(authorization ? { Authorization: authorization } : {}) };
       assert.equal((await request(prefixed(path), { headers })).status, 403, path);
     }
   }
-  assert.equal(calls.assets.length, 0); assert.equal(calls.snapshots, 0);
+  assert.equal(calls.assets.length, 0); assert.equal(calls.snapshots, 0); assert.equal(calls.channels.length, 0);
   const result = await request('/internal/sync', { method: 'POST', body: {}, headers: { Authorization: `Bearer ${remoteToken}`, 'X-Companion-Id': 'primary' } });
   assert.equal(result.status, 403); assert.equal(calls.sync, 0);
 });
@@ -136,13 +140,33 @@ test('only literal prefixed public paths are reachable, including under traversa
   const paths = ['', '/health', '/internal/sync', '/internal/reserve', '/internal/begin', '/internal/finish', '/private/remote.json',
     '/server.mjs', '/api/proxy', '/api/accounts/foreign/command', '/accounts/primary/', '/accounts/%70rimary',
     '/accounts/../api/status', '/../internal/sync', '/%2e%2e/internal/sync', '/%2Finternal/sync', '//api/status',
-    '/api/status?x=1', '/app.js?base=elsewhere', '/api/accounts%2fprimary%2fcommand', '/accounts\\primary'];
+    '/api/status?x=1', '/app.js?base=elsewhere', '/api/accounts%2fprimary%2fcommand', '/accounts\\primary',
+    '/api/channels/ab', '/api/channels/aviskarex?x=1', '/api/channels/%61viskarex', '/api/channels/aviskarex/', '/api/channels/aviskarex/extra'];
   for (const path of paths) assert.equal((await request(prefixed(path), { headers: remote })).status, 404, path);
   for (const path of ['/admin/%73tream-companion/api/status', '//admin/stream-companion/api/status',
     'http://127.0.0.1:8795/admin/stream-companion/api/status']) {
     assert.equal((await request(path, { headers: remote })).status, 404, path);
   }
   assert.equal(calls.assets.length, 0); assert.equal(calls.snapshots, 0); assert.equal(calls.commands.length, 0); assert.equal(calls.sync, 0);
+});
+
+test('channel directory and exact lookup are read-only, paired and same-origin in root and remote routes', async t => {
+  const { request, calls, store } = await harness(t);
+  const before = store.paused;
+  for (const prefix of ['', REMOTE_PREFIX]) {
+    const headers = prefix ? remote : local;
+    const denied = await request(prefix + '/api/channels', { headers: prefix ? { Authorization: remote.Authorization } : {} });
+    assert.equal(denied.status, 403);
+    const directory = await request(prefix + '/api/channels', { headers });
+    assert.equal(directory.status, 200); assert.equal(directory.data.channels[0].login, 'aviskarex');
+    assert.equal(directory.data.channels[0].isLive, false); assert.equal(directory.data.csrfToken, 'host-only-csrf');
+    const lookup = await request(prefix + '/api/channels/live_friend', { headers });
+    assert.equal(lookup.status, 200); assert.equal(lookup.data.channels[0].login, 'live_friend');
+    assert.equal(lookup.data.channels[0].isLive, true);
+    assert.equal((await request(prefix + '/api/channels/live_friend', { method: 'POST', body: {}, headers })).status, 405);
+  }
+  assert.deepEqual(calls.channels, ['directory', 'live_friend', 'directory', 'live_friend']);
+  assert.equal(calls.commands.length, 0); assert.equal(store.paused, before);
 });
 
 test('unsupported methods and upgrade headers never reach a prefixed public action', async t => {

@@ -4,6 +4,7 @@ import { timingSafeEqual, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { HostStore } from './lib/store.mjs';
 import { createAccountManager } from './lib/accounts.mjs';
+import { createChannelDirectory } from './lib/channels.mjs';
 
 const equal = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || '')); return x.length === y.length && timingSafeEqual(x, y); };
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -13,7 +14,8 @@ const STATIC = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/ap
   ...['/accounts', '/accounts/primary', '/accounts/test'].map(path => [path, ['account.html', 'text/html; charset=utf-8']]),
   ['/accounts.js', ['accounts.js', 'text/javascript; charset=utf-8']], ['/accounts.css', ['accounts.css', 'text/css; charset=utf-8']],
   ['/controller-path.js', ['controller-path.js', 'text/javascript; charset=utf-8']]]);
-const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts']);
+const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels']);
+const CHANNEL_LOOKUP = /^\/api\/channels\/([a-z0-9_]{3,25})$/;
 const REMOTE_POST = new Set(['/api/control', '/api/accounts/primary/command', '/api/accounts/test/command']);
 const failure = (message, status) => Object.assign(new Error(message), { status });
 
@@ -38,7 +40,7 @@ async function bodyJSON(req) {
   return value;
 }
 
-export function createHostServer({ store, clients, accounts = createAccountManager(), port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
+export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
   if (!store || !Array.isArray(clients) || !clients.length) throw Error('Host store and clients required.');
   for (const c of clients) if (typeof c.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(c.token) || store.client(c.id).account !== c.account) throw Error('Invalid coordination client pairing.');
   if (new Set(clients.map(c => c.token)).size !== clients.length) throw Error('Coordination clients require separate tokens.');
@@ -70,9 +72,9 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         // Match the literal request target. Decoding or normalizing here could
         // turn an unlisted remote URL into a privileged local/internal route.
         path = rawPath.slice(REMOTE_PREFIX.length);
-        if (!REMOTE_GET.has(path) && !REMOTE_POST.has(path)) return send(res, 404, { error: 'Not found.' });
+        if (!REMOTE_GET.has(path) && !CHANNEL_LOOKUP.test(path) && !REMOTE_POST.has(path)) return send(res, 404, { error: 'Not found.' });
         if (req.headers.upgrade !== undefined || /\bupgrade\b/i.test(String(req.headers.connection || ''))
-          || !(req.method === 'GET' && REMOTE_GET.has(path) || req.method === 'POST' && REMOTE_POST.has(path))) {
+          || !(req.method === 'GET' && (REMOTE_GET.has(path) || CHANNEL_LOOKUP.test(path)) || req.method === 'POST' && REMOTE_POST.has(path))) {
           return send(res, 405, { error: 'Unsupported controller method.' });
         }
       }
@@ -97,6 +99,15 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
         if (!sameOrigin(req)) return send(res, 403, { error: 'Open the local account pages to view status.' });
         return send(res, 200, { ...await accounts.snapshot(), csrfToken });
+      }
+      const channelLookup = CHANNEL_LOOKUP.exec(path);
+      if (path === '/api/channels' || channelLookup) {
+        if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
+        if (!sameOrigin(req)) return send(res, 403, { error: 'Open the account pages to choose a channel.' });
+        const value = channelLookup
+          ? { updatedAt: new Date().toISOString(), channels: [await channels.lookup(channelLookup[1])] }
+          : await channels.snapshot();
+        return send(res, 200, { ...value, csrfToken });
       }
       const accountCommand = /^\/api\/accounts\/(primary|test)\/command$/.exec(path);
       if (accountCommand) {

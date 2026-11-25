@@ -38,6 +38,7 @@ function validChannel(value) { return typeof value === 'string' && /^[a-zA-Z0-9_
 function validMessage(value) { return typeof value === 'string' && value.trim() === value && value.length > 0 && value.length <= 300 && !/^[/.]|[\r\n\u0000-\u001f\u007f]|https?:\/\/|www\./i.test(value); }
 function validMode(value) { return value === 'mentions' || value === 'participate'; }
 function validSource(value) { return value === 'local' || value === 'ai'; }
+function quickFailure(message) { return Object.assign(Error(message), { quickPublic: true }); }
 function commandParams(action, params = {}) {
   if (action === 'start' && validChannel(params.channel) && validMode(params.chatMode) && validSource(params.replySource) && typeof params.autoResume === 'boolean') return { channel: params.channel.toLowerCase(), chatMode: params.chatMode, replySource: params.replySource, autoResume: params.autoResume };
   if (action === 'settings' && validMode(params.chatMode) && validSource(params.replySource) && typeof params.autoResume === 'boolean') return { chatMode: params.chatMode, replySource: params.replySource, autoResume: params.autoResume };
@@ -49,8 +50,11 @@ function commandParams(action, params = {}) {
 
 export function createAccountsController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, basePath = '' } = {}) {
   basePath = controllerBasePath(basePath);
-  const state = { basePath, data: null, network: 'loading', error: '', operations: {}, forms: {} };
-  let flight = null, timer = null;
+  const state = { basePath, data: null, network: 'loading', error: '', operations: {}, forms: {}, quick: {
+    channel: 'aviskarex', selection: 'primary', lookup: '', channels: [{ login: 'aviskarex', displayName: 'aviskarex', isLive: null }],
+    channelsAt: null, loading: false, busy: false, action: '', error: '', message: '', outcomes: {}, targetIds: [], targetChannel: ''
+  } };
+  let flight = null, timer = null, channelFlight = null, quickRun = 0;
   const emit = () => onState(state);
   const formFor = id => state.forms[id] ||= { initialized: false, channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '', textRevision: 0, dirty: {} };
   function reconcile() {
@@ -146,12 +150,124 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     if (key === 'text') form.textRevision++;
     emit();
   }
-  return { getState: () => state, refresh, canCommand, command, edit, form: formFor,
+  const selectedIds = () => state.quick.selection === 'both' ? ['primary', 'test'] : [state.quick.selection];
+  function editQuick(key, value) {
+    if (state.quick.busy) return;
+    if (key === 'selection' && ['primary', 'test', 'both'].includes(value)) state.quick.selection = value;
+    else if (key === 'channel' && validChannel(value)) state.quick.channel = value.toLowerCase();
+    else if (key === 'lookup') state.quick.lookup = String(value).slice(0, 25);
+    else return;
+    state.quick.error = ''; emit();
+  }
+  async function channels(lookup = '') {
+    if (channelFlight || state.quick.busy) return false;
+    const login = lookup.trim().replace(/^@/, '').toLowerCase();
+    if (lookup && !validChannel(login)) { state.quick.error = 'Enter a Twitch channel login using 3–25 letters, numbers or underscores.'; emit(); return false; }
+    state.quick.loading = true; state.quick.error = ''; emit();
+    channelFlight = (async () => {
+      try {
+        const path = login ? `/api/channels/${login}` : '/api/channels';
+        const response = await fetchImpl(controllerPath(basePath, path), { method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(7000) });
+        if (!response.ok) throw responseError(response);
+        const result = await response.json();
+        if (!Array.isArray(result?.channels) || !Number.isFinite(timestamp(result.updatedAt))) throw Error('invalid');
+        const found = result.channels.filter(c => validChannel(c?.login)).slice(0, 20);
+        if (login && !found.some(c => c.login === login)) throw Error('not found');
+        const keep = state.quick.channels.filter(c => c.login === 'aviskarex' || c.login === state.quick.channel);
+        const merged = new Map([...keep, ...found].map(c => [c.login, c]));
+        state.quick.channels = [...merged.values()].sort((a, b) => Number(b.login === 'aviskarex') - Number(a.login === 'aviskarex'));
+        state.quick.channelsAt = result.updatedAt;
+        if (login) state.quick.channel = login;
+        if (result.error) state.quick.error = 'Some channel statuses could not be checked. Unknown does not mean offline.';
+        return true;
+      } catch { state.quick.error = login ? 'Could not check that channel. Check its login and try again.' : 'Live channels could not be refreshed. Your selected channel is kept.'; return false; }
+      finally { state.quick.loading = false; channelFlight = null; emit(); }
+    })();
+    return channelFlight;
+  }
+  async function quickStart() {
+    const q = state.quick;
+    if (q.busy || q.loading || !validChannel(q.channel)) return false;
+    const generation = ++quickRun, ids = selectedIds(), channel = q.channel;
+    q.busy = true; q.action = 'start'; q.error = ''; q.message = 'Checking the selected accounts…';
+    q.targetIds = [...ids]; q.targetChannel = channel; q.outcomes = Object.fromEntries(ids.map(id => [id, { state: 'not_requested', action: 'start' }])); emit();
+    const sharedStatus = async () => {
+      const response = await fetchImpl(controllerPath(basePath, '/api/status'), { method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(6000) });
+      if (!response.ok) throw quickFailure('Could not check shared coordination. Refresh and try again.');
+      const shared = await response.json();
+      if (typeof shared?.paused !== 'boolean' || !fresh(shared.updatedAt, HOST_FRESH_MS, now())) throw quickFailure('Shared coordination status is not current. Refresh and try again.');
+      return shared;
+    };
+    const resumeBlocked = () => ['primary', 'test'].filter(id => !ids.includes(id)).some(id => {
+      const instance = instanceFor(state, id), pending = instance?.controls?.pending, local = state.operations[id];
+      return instance?.available !== true || active(pending, now()) && pending.action === 'start'
+        || local?.action === 'start' && (local.transport || active(local.command, now()))
+        || instance.settings?.paused !== true || instance.settings?.autoReply === true;
+    });
+    try {
+      await refresh();
+      if (generation !== quickRun) return false;
+      if (!hostFresh(state, now()) || ids.some(id => !canCommand(id, 'start'))) throw quickFailure('One of the selected accounts is not ready. Open its controls below to check the browser, access or pending operation.');
+      let shared = await sharedStatus();
+      if (generation !== quickRun) return false;
+      if (shared.paused && resumeBlocked()) throw quickFailure('The other account is running, starting or unavailable. Stop it first or select Both accounts before resuming shared coordination.');
+      for (const id of ids) {
+        if (generation !== quickRun) return false;
+        const instance = instanceFor(state, id);
+        q.message = `Requesting ${instance?.name || (id === 'primary' ? 'the main account' : 'the second account')}…`; emit();
+        const accepted = await command(id, 'start', { channel, chatMode: 'participate', replySource: instance.settings?.replySource === 'ai' ? 'ai' : 'local', autoResume: instance.settings?.autoResume === true });
+        if (generation !== quickRun) return false;
+        const operation = state.operations[id];
+        q.outcomes[id] = operation ? { requestId: operation.requestId, state: operation.command.state, action: 'start' } : { state: 'not_requested', action: 'start' };
+        if (!accepted || !['queued', 'running', 'completed'].includes(operation?.command?.state) || operation.command?.result?.ok === false) throw quickFailure('The start sequence stopped. Check each account’s outcome below; shared coordination was not resumed and no request will be retried automatically.');
+      }
+      if (generation !== quickRun) return false;
+      await refresh();
+      shared = await sharedStatus();
+      if (generation !== quickRun) return false;
+      if (!hostFresh(state, now()) || ids.some(id => !['queued', 'running', 'completed'].includes(state.operations[id]?.command?.state))) throw quickFailure('An account start is no longer confirmed. Shared coordination was not resumed; check the outcomes below.');
+      if (shared.paused && resumeBlocked()) throw quickFailure('The other account changed or became unavailable. Shared coordination was not resumed; check both accounts before trying again.');
+      if (shared.paused) {
+        q.message = 'Resuming shared coordination…'; emit();
+        const response = await fetchImpl(controllerPath(basePath, '/api/control'), { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify({ paused: false }) });
+        if (!response.ok) throw quickFailure('The shared coordination outcome is unconfirmed. Check Shared coordination before trying another action; this request will not be retried.');
+        const result = await response.json();
+        if (result?.ok !== true) throw quickFailure('The shared coordination outcome is unconfirmed. Check Shared coordination before trying another action; this request will not be retried.');
+      }
+      if (generation !== quickRun) return false;
+      q.message = 'Start requests accepted. Each account’s outcome is shown below; automatic chat waits for live playback and an eligible turn.';
+      return true;
+    } catch (error) {
+      if (generation === quickRun) { q.error = error.quickPublic ? error.message : 'Could not finish the start sequence. Check account status before trying another action; no request will be retried automatically.'; q.message = ''; }
+      return false;
+    } finally { if (generation === quickRun) { q.busy = false; emit(); } }
+  }
+  async function quickStop() {
+    const q = state.quick;
+    if (q.busy && q.action === 'stop') return false;
+    const ids = q.busy ? [...q.targetIds] : selectedIds(), generation = ++quickRun;
+    q.busy = true; q.action = 'stop'; q.error = ''; q.message = 'Stopping the selected accounts…'; q.targetIds = [...ids];
+    q.outcomes = Object.fromEntries(ids.map(id => [id, { state: 'not_requested', action: 'stop' }])); emit();
+    let allAccepted = true;
+    try {
+      for (const id of ids) {
+        if (generation !== quickRun) return false;
+        const accepted = await command(id, 'stop');
+        const operation = state.operations[id];
+        q.outcomes[id] = operation ? { requestId: operation.requestId, state: operation.command.state, action: 'stop' } : { state: 'not_requested', action: 'stop' };
+        allAccepted &&= accepted && ['queued', 'running', 'completed'].includes(operation?.command?.state);
+      }
+      q.message = allAccepted ? 'Stop requests accepted. Check each account’s confirmation below.' : '';
+      if (!allAccepted) q.error = 'Some stops are unconfirmed. Check the account controls below before taking another action.';
+      return allAccepted;
+    } finally { if (generation === quickRun) { q.busy = false; emit(); } }
+  }
+  return { getState: () => state, refresh, canCommand, command, edit, form: formFor, editQuick, channels, quickStart, quickStop,
     start() { if (timer === null) { void refresh(); timer = setIntervalImpl(() => { if (state.network === 'online' && !fresh(state.data?.updatedAt, HOST_FRESH_MS, now())) { state.network = 'stale'; emit(); } void refresh(); }, POLL_MS); } },
     stop() { if (timer !== null) clearIntervalImpl(timer); timer = null; } };
 }
 
-const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed'];
+const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed','quick-channel','quick-channel-status','quick-channel-detail','quick-refresh','quick-lookup','quick-find','quick-account-primary','quick-account-test','quick-account-both','quick-primary-label','quick-test-label','quick-start','quick-stop','quick-error','quick-message','quick-outcomes','quick-outcome-heading'];
 export function createAccountsView(document) {
   const nodes = Object.fromEntries(NODE_IDS.map(id => [id, document.getElementById(id)]));
   function el(tag, content, className) { const node = document.createElement(tag); if (content !== undefined) node.textContent = String(content); if (className) node.className = className; return node; }
@@ -181,6 +297,49 @@ function sessionStatus(instance, state, now) {
   if (instance?.settings?.paused === true) return { title: 'Stopped', tone: 'muted' };
   if (instance?.settings?.paused === false) return { title: 'Session enabled', tone: 'good' };
   return { title: 'Unavailable', tone: 'muted' };
+}
+function renderQuick(view, state, now, canCommand) {
+  const q = state.quick, n = view.nodes;
+  if (!q) return;
+  const channels = list(q.channels), current = channels.find(c => c.login === q.channel);
+  const known = current && fresh(current.checkedAt, 120000, now);
+  const status = known && current.isLive === true ? 'Live now' : known && current.isLive === false ? 'Offline · opens and waits' : 'Live status unknown';
+  setPill(n['quick-channel-status'], status, known && current.isLive ? 'good' : 'muted');
+  const signature = JSON.stringify(channels.map(c => [c.login, c.displayName, fresh(c.checkedAt, 120000, now) ? c.isLive : null]));
+  if (signature !== view.quickOptions) {
+    n['quick-channel'].replaceChildren(...channels.map(channel => {
+      const current = fresh(channel.checkedAt, 120000, now);
+      const status = current && channel.isLive === true ? 'Live' : current && channel.isLive === false ? 'Offline' : 'Unknown';
+      const option = view.el('option', `${text(channel.displayName, channel.login)}${channel.login === 'aviskarex' ? ' · Favorite' : ''} · ${status}`);
+      option.setAttribute('value', channel.login); return option;
+    }));
+    view.quickOptions = signature;
+  }
+  if (n['quick-channel'].value !== q.channel) n['quick-channel'].value = q.channel;
+  if (n['quick-lookup'].value !== q.lookup) n['quick-lookup'].value = q.lookup;
+  n['quick-channel-detail'].textContent = current?.title ? `${current.title}${current.game ? ` · ${current.game}` : ''}` : known && current?.isLive === false ? 'The stream will open in the selected profiles. Automatic chat waits until the channel is live.' : 'Choose aviskarex, another live channel, or enter a channel login below.';
+  n['quick-primary-label'].textContent = text(instanceFor(state, 'primary')?.account, 'Main account');
+  n['quick-test-label'].textContent = text(instanceFor(state, 'test')?.account, 'Second account');
+  for (const value of ['primary', 'test', 'both']) { n[`quick-account-${value}`].checked = q.selection === value; n[`quick-account-${value}`].disabled = q.busy; }
+  for (const key of ['quick-channel', 'quick-lookup', 'quick-find', 'quick-refresh']) n[key].disabled = q.busy || q.loading;
+  n['quick-refresh'].textContent = q.loading ? 'Checking channels…' : 'Refresh live channels';
+  const ids = q.selection === 'both' ? ['primary', 'test'] : [q.selection];
+  n['quick-start'].disabled = q.busy || q.loading || !validChannel(q.channel) || ids.some(id => !canCommand(id, 'start'));
+  n['quick-start'].textContent = q.busy && q.action === 'start' ? 'Starting selected accounts…' : q.selection === 'both' ? 'Open stream & start both' : 'Open stream & start chat';
+  n['quick-stop'].disabled = q.busy && q.action === 'stop' || !ids.some(id => canCommand(id, 'stop'));
+  n['quick-stop'].textContent = q.busy && q.action === 'stop' ? 'Stopping…' : 'Stop selected';
+  n['quick-error'].textContent = q.error || ''; n['quick-error'].hidden = !q.error;
+  n['quick-message'].textContent = q.message || ''; n['quick-message'].hidden = !q.message;
+  n['quick-outcome-heading'].textContent = q.targetIds.length ? `Latest action${q.action === 'start' && q.targetChannel ? ` · #${q.targetChannel}` : ''}` : '';
+  n['quick-outcome-heading'].hidden = !q.targetIds.length;
+  n['quick-outcomes'].replaceChildren(...q.targetIds.map(id => {
+    const outcome = q.outcomes[id] || {}, local = state.operations[id], current = local?.requestId === outcome.requestId ? local.command : outcome;
+    const row = view.el('li'), name = text(instanceFor(state, id)?.account, id === 'primary' ? 'Main companion' : 'Second companion');
+    const status = current.state === 'not_requested' ? 'Not requested' : commandState(current);
+    row.append(view.el('strong', name), pill(view, `${outcome.action === 'stop' ? 'Stop' : 'Start'} · ${status}`, commandTone(current)));
+    if (current.state !== 'not_requested') row.append(view.el('p', commandReason(current), 'field-note'));
+    return row;
+  }));
 }
 function renderCards(view, state, now) {
   const cards = [];
@@ -277,7 +436,7 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n['command-error'].textContent = state.error || ''; n['command-error'].hidden = !state.error;
   n['last-refreshed'].textContent = state.data ? `Host refreshed ${age(state.data.updatedAt, now)}` : 'Waiting for status';
   n['accounts-overview'].hidden = !!id; n['account-detail'].hidden = !id;
-  if (!id) { renderCards(view, state, now); return; }
+  if (!id) { renderQuick(view, state, now, canCommand); renderCards(view, state, now); return; }
   const instance = instanceFor(state, id), form = state.forms[id] || { channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '' };
   n['page-eyebrow'].textContent = id === 'primary' ? 'Primary profile' : 'Second profile';
   n['page-title'].textContent = text(instance?.name, id === 'primary' ? 'Main companion' : 'Second companion');
@@ -322,6 +481,17 @@ if (globalThis.document?.querySelector('[data-accounts-app]')) {
     n.summary.addEventListener('click', () => void controller.command(id, 'draft', { mode: 'summary' }));
     n.send.addEventListener('click', () => void controller.command(id, 'send', { text: controller.form(id).text }));
     for (const action of ['stop','watch','drops-enable','drops-disable','drops-check']) n[action].addEventListener('click', () => void controller.command(id, action));
+  } else {
+    const n = view.nodes;
+    n['quick-channel'].addEventListener('change', () => controller.editQuick('channel', n['quick-channel'].value));
+    n['quick-lookup'].addEventListener('input', () => controller.editQuick('lookup', n['quick-lookup'].value));
+    n['quick-find'].addEventListener('click', () => void controller.channels(controller.getState().quick.lookup));
+    n['quick-lookup'].addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void controller.channels(controller.getState().quick.lookup); } });
+    n['quick-refresh'].addEventListener('click', () => void controller.channels());
+    for (const value of ['primary', 'test', 'both']) n[`quick-account-${value}`].addEventListener('change', () => { if (n[`quick-account-${value}`].checked) controller.editQuick('selection', value); });
+    n['quick-start'].addEventListener('click', () => void controller.quickStart());
+    n['quick-stop'].addEventListener('click', () => void controller.quickStop());
+    void controller.channels();
   }
   bindControllerLifecycle(controller);
   controller.start();

@@ -28,3 +28,42 @@
 input, select, textarea { font-size: 16px; }
 nav { flex-wrap: wrap; gap: 10px 20px; }
 .access-actions { margin: 0 0 16px; font-size: 14px; }
+
+/* Quick start keeps channel and account selection stable between status polls. */
+.quick-start { margin-bottom: 26px; border-color: #416454; background: linear-gradient(120deg, #192b25, var(--panel) 72%); }
+.quick-start .section-heading { margin-bottom: 12px; }
+.quick-start .section-heading h2 { max-width: 560px; }
+.quick-intro { color: var(--muted); font-size: 15px; margin-bottom: 23px; max-width: 700px; }
+.quick-channel-row, .quick-lookup-row { display: flex; align-items: flex-end; gap: 12px; }
+.quick-channel-row > label, .quick-lookup-row > label { flex: 1; min-width: 0; }
+.quick-channel-row button, .quick-lookup-row button { flex: 0 0 auto; min-height: 48px; }
+.quick-channel-detail { margin: 10px 0 20px; overflow-wrap: anywhere; }
+.quick-lookup-row { max-width: 700px; }
+.quick-accounts { min-width: 0; margin: 24px 0; padding: 0; border: 0; }
+.quick-accounts legend { margin-bottom: 11px; padding: 0; font-size: 14px; font-weight: 600; }
+.quick-account-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.quick-account-options label { display: flex; flex-direction: row; align-items: flex-start; gap: 10px; padding: 15px; border: 1px solid #3a504f; border-radius: 11px; background: #101c1b; cursor: pointer; }
+.quick-account-options label:has(input:checked) { border-color: var(--mint); background: #233c30; }
+.quick-account-options input { width: 18px; min-width: 18px; min-height: 18px; height: 18px; padding: 0; margin: 3px 0 0; accent-color: var(--mint); }
+.quick-account-options span { min-width: 0; overflow-wrap: anywhere; }
+.quick-account-options small { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.45; font-weight: 400; }
+.quick-actions { display: flex; gap: 12px; flex-wrap: wrap; margin: 0 0 13px; }
+.quick-actions .primary { flex: 1; min-width: 220px; }
+.quick-start .notice { margin-top: 18px; margin-bottom: 0; }
+.quick-message { font-size: 14px; color: var(--mint); margin-top: 18px; }
+.quick-outcome-heading { font-size: 15px; margin-top: 20px; }
+.quick-outcomes { list-style: none; margin: 0; padding: 0; }
+.quick-outcomes > li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 13px; border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.quick-outcomes strong { font-size: 14px; overflow-wrap: anywhere; }
+.quick-outcomes .pill { font-size: 13px; }
+.quick-outcomes .field-note { flex: 1 0 100%; }
+@media (max-width: 700px) {
+  .quick-start .section-heading { flex-direction: column; }
+  .quick-start .section-heading .pill { max-width: 100%; }
+  .quick-channel-row, .quick-lookup-row { align-items: stretch; flex-direction: column; }
+  .quick-channel-row button, .quick-lookup-row button { align-self: flex-start; }
+  .quick-account-options { grid-template-columns: 1fr; }
+  .quick-account-options label { padding: 13px 15px; }
+  .quick-actions { flex-direction: column; }
+  .quick-actions button { width: 100%; min-width: 0; }
+}

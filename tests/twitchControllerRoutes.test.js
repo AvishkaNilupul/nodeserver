@@ -61,6 +61,7 @@ async function fixture(t, options = {}) {
     if (upstreamHandler) return upstreamHandler(record, res);
     if (req.url.endsWith('/api/status')) return respond(res, 200, { updatedAt: new Date().toISOString(), paused: true, csrfToken: UPSTREAM_TOKEN });
     if (req.url.endsWith('/api/accounts')) return respond(res, 200, { updatedAt: new Date().toISOString(), instances: [], csrfToken: UPSTREAM_TOKEN });
+    if (/\/api\/channels(?:\/[a-z0-9_]{3,25})?$/.test(req.url)) return respond(res, 200, { updatedAt: new Date().toISOString(), channels: [{ login: req.url.split('/').at(-1) === 'channels' ? 'aviskarex' : req.url.split('/').at(-1), isLive: true }], csrfToken: UPSTREAM_TOKEN });
     if (req.method === 'POST') return respond(res, 200, { ok: true, command: { id: 'fixture-command', state: 'queued' } });
     return respond(res, 200, '<!doctype html><html lang="en"><head><title>Fixture controller</title></head><body><main id="main">Fixture content</main></body></html>', { 'Content-Type': req.url.endsWith('.js') ? 'text/javascript' : req.url.endsWith('.css') ? 'text/css' : 'text/html' });
   });
@@ -106,7 +107,7 @@ function post(client, path, body, csrf, headers = {}) {
 
 test('every page, asset and API uses the real superadmin and two-factor guards before reaching the Mac', async t => {
   const f = await fixture(t);
-  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts']) {
+  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex']) {
     assert.equal((await request(f.port, BASE + path)).status, 401);
     const normal = await f.client('admin'); assert.equal((await normal.request(path)).status, 403);
   }
@@ -124,7 +125,7 @@ test('every page, asset and API uses the real superadmin and two-factor guards b
 
 test('each finite GET route reaches only its prefixed fixed upstream and pages include site navigation', async t => {
   const f = await fixture(t), c = await f.client();
-  const routes = ['/', '/accounts', '/accounts/primary', '/accounts/test', '/app.js', '/style.css', '/accounts.js', '/accounts.css', '/controller-path.js', '/api/status', '/api/accounts'];
+  const routes = ['/', '/accounts', '/accounts/primary', '/accounts/test', '/app.js', '/style.css', '/accounts.js', '/accounts.css', '/controller-path.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex'];
   for (const path of routes) assert.equal((await c.request(path)).status, 200, path);
   assert.deepEqual(f.seen.map(x => x.path), routes.map(x => BASE + x));
   assert.ok(f.seen.every(x => x.headers.host === '127.0.0.1:8795' && x.headers.authorization === `Bearer ${REMOTE_TOKEN}`));
@@ -208,12 +209,29 @@ test('outside cookies, Authorization and arbitrary forwarding headers never reac
 test('raw route, traversal, query, extra slash, method and upgrade attempts are denied without proxying', async t => {
   const f = await fixture(t), c = await f.client();
   for (const path of ['/api/status?x=1', '//api/status', '/api//status', '/api/%73tatus', '/%2e%2e/api/status', '/api/%2fstatus', '/api/status/',
-    '/health', '/internal/sync', '/private/remote.json', '/api/accounts/unknown/command', '/api/accounts/primary/command/foo']) {
+    '/health', '/internal/sync', '/private/remote.json', '/api/accounts/unknown/command', '/api/accounts/primary/command/foo',
+    '/api/channels/ab', '/api/channels/aviskarex/extra', '/api/channels/aviskarex/', '/api/channels/%61viskarex', '/api/channels/aviskarex?x=1']) {
     const response = await c.request(path); assert.ok(response.status >= 400, `${path}: ${response.status}`);
   }
   for (const method of ['HEAD', 'PUT', 'DELETE', 'OPTIONS']) assert.ok((await c.request('/api/status', { method })).status >= 400, method);
   assert.ok((await c.request('/api/status', { headers: { Upgrade: 'websocket' } })).status >= 400);
   assert.equal(f.seen.length, 0);
+});
+
+test('live channel reads share session CSRF masking and cannot mutate account state', async t => {
+  const f = await fixture(t), c = await f.client();
+  const token = await nonce(c);
+  for (const path of ['/api/channels', '/api/channels/live_friend']) {
+    const response = await c.request(path);
+    assert.equal(response.status, 200); assert.equal(response.data.csrfToken, token);
+    assert.doesNotMatch(response.text, new RegExp(UPSTREAM_TOKEN + '|' + REMOTE_TOKEN));
+    const before = f.seen.length;
+    assert.equal((await c.request(path, { method: 'POST', body: {} })).status, 405);
+    assert.equal(f.seen.length, before);
+    assert.equal((await c.request(path, { headers: { Origin: 'https://foreign.example' } })).status, 403);
+    assert.equal(f.seen.length, before);
+  }
+  assert.ok(f.seen.every(x => x.method === 'GET'));
 });
 
 test('only exact one-key boolean controls and typed account commands are forwarded unchanged once', async t => {
@@ -315,7 +333,7 @@ test('the request bound applies to original bytes including padded or chunked JS
 });
 
 
-const hostSource = resolve(__dirname, '../../stream-companion-host/server.mjs');
+const hostSource = resolve(__dirname, '../tools/stream-companion-host/server.mjs');
 test('real prefixed Mac host and production gateway complete authenticated page/status/control roundtrips without helper calls',
   { skip: Number(process.versions.node.split('.')[0]) < 22 || !existsSync(hostSource) }, async t => {
     const { createHostServer } = await import(pathToFileURL(hostSource).href);
@@ -326,7 +344,9 @@ test('real prefixed Mac host and production gateway complete authenticated page/
       setExchangesEnabled(value) { return { ok: true, exchangesEnabled: value }; } };
     const accounts = { snapshot: async () => ({ updatedAt: new Date().toISOString(), instances: [{ id: 'primary', account: 'fixture_account', connected: false }] }),
       command: async (id, body) => { commandCalls.push({ id, body }); return { ok: true, command: { ...body, id: 'fixture-host-command', state: 'queued' } }; } };
-    const upstream = createHostServer({ store, clients, accounts, remoteToken: REMOTE_TOKEN, csrfToken: UPSTREAM_TOKEN });
+    const channels = { snapshot: async () => ({ updatedAt: new Date().toISOString(), channels: [{ login: 'aviskarex', isLive: false }] }),
+      lookup: async login => ({ login, isLive: true, checkedAt: Date.now() }) };
+    const upstream = createHostServer({ store, clients, accounts, channels, remoteToken: REMOTE_TOKEN, csrfToken: UPSTREAM_TOKEN });
     const f = await fixture(t, { upstreamServer: upstream }), c = await f.client();
     const page = await c.request('/accounts/primary'); assert.equal(page.status, 200);
     assert.doesNotMatch(page.text, /__COMPANION_BASE__/);
@@ -336,6 +356,12 @@ test('real prefixed Mac host and production gateway complete authenticated page/
     assert.equal(data.data.instances[0].account, 'fixture_account');
     const csrf = data.data.csrfToken; assert.notEqual(csrf, UPSTREAM_TOKEN);
     assert.doesNotMatch(data.text, new RegExp(REMOTE_TOKEN + '|' + UPSTREAM_TOKEN));
+    const directory = await c.request('/api/channels');
+    assert.equal(directory.status, 200); assert.equal(directory.data.channels[0].login, 'aviskarex');
+    assert.equal(directory.data.csrfToken, csrf);
+    const lookup = await c.request('/api/channels/live_friend');
+    assert.equal(lookup.status, 200); assert.equal(lookup.data.channels[0].login, 'live_friend');
+    assert.equal(lookup.data.csrfToken, csrf);
     const body = command('settings', { chatMode: 'mentions', replySource: 'local', autoResume: false });
     assert.equal((await post(c, '/api/accounts/primary/command', body, csrf)).status, 200);
     assert.deepEqual(commandCalls, [{ id: 'primary', body }]);
