@@ -11,6 +11,7 @@ import { ViewerClips } from './lib/clips.mjs';
 import { DirectorAdapter } from './lib/director-adapter.mjs';
 import { validateHostPairing } from './lib/instance.mjs';
 import { createUsTransport, blockedUsTransport } from './lib/usa-transport.mjs';
+import { createUsaHealthLogger } from './lib/usa-health-log.mjs';
 
 const equal = (a, b) => { const aa = Buffer.from(a), bb = Buffer.from(b); return aa.length === bb.length && timingSafeEqual(aa, bb); };
 const respond = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(data)); };
@@ -22,7 +23,7 @@ export async function savePrivate(url, value) {
   await rename(temporary, url);
 }
 
-export function createHelper({ config, twitch, usaTransport, generateImpl = generate, now = Date.now, control: suppliedControl, intentFile, clipFile, clips: suppliedClips } = {}) {
+export function createHelper({ config, twitch, usaTransport, usaHealthLogger, generateImpl = generate, now = Date.now, control: suppliedControl, intentFile, clipFile, clips: suppliedClips } = {}) {
   usaTransport ||= twitch?.usaTransport || (twitch ? blockedUsTransport : createUsTransport({ now }));
   twitch ||= new TwitchChat({ fetchImpl: usaTransport.fetch, WebSocketImpl: usaTransport.WebSocket, transport: usaTransport, now });
   twitch.usaTransport ||= usaTransport;
@@ -114,7 +115,11 @@ export function createHelper({ config, twitch, usaTransport, generateImpl = gene
   });
   server.control = control; server.clips = clips;
   server.requestTimeout = 45_000; server.headersTimeout = 10_000;
-  server.on('close', () => { clips.close(); twitch.disconnect(); usaTransport.close(); });
+  server.once('listening', () => { try { usaHealthLogger?.start(); } catch { /* Health logging never blocks startup. */ } });
+  server.on('close', () => {
+    try { clips.close(); twitch.disconnect(); usaTransport.close(); }
+    finally { try { usaHealthLogger?.close(); } catch { /* Health logging never blocks shutdown. */ } }
+  });
   return server;
 }
 
@@ -137,7 +142,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     saveCredentials: value => savePrivate(credentialsUrl, value), saveHistory: value => savePrivate(historyUrl, value) });
   twitch.usaTransport = usaTransport;
   void coordinator.refresh().catch(() => {});
-  const server = createHelper({ config, twitch, intentFile: new URL('./private/control-intent.json', import.meta.url), clipFile: new URL('./private/clip-jobs.json', import.meta.url) });
+  const usaHealthLogger = createUsaHealthLogger({ transport: usaTransport });
+  const server = createHelper({ config, twitch, usaHealthLogger, intentFile: new URL('./private/control-intent.json', import.meta.url), clipFile: new URL('./private/clip-jobs.json', import.meta.url) });
   server.once('close', () => { coordinator.close(); void usaTransport.close(); });
   server.listen(8797, '127.0.0.1', () => console.log('Stream Companion 0.12.0 listening on 127.0.0.1:8797 (Twitch API; chat disconnected)'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { twitch.disconnect(); server.close(); });
