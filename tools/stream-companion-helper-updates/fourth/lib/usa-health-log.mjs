@@ -3,6 +3,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const LIMIT = 1024 * 1024, CHECKPOINT_MS = 60_000, PROOF_MS = 5000;
+const CLOSE_SOURCES = new Set(['browser-close', 'browser-error', 'proof-expiry', 'lease-expiry', 'local-reset', 'local-close', 'setup-timeout', 'command-failure']);
+function closeState(raw, at) {
+  if (!raw || !Number.isSafeInteger(raw.at) || raw.at <= 0 || raw.at > at) return null;
+  return { source: CLOSE_SOURCES.has(raw.source) ? raw.source : 'unknown', at: raw.at,
+    code: Number.isInteger(raw.code) && raw.code >= 1000 && raw.code <= 4999 ? raw.code : null,
+    wasClean: typeof raw.wasClean === 'boolean' ? raw.wasClean : null };
+}
 const STATES = new Set(['ready', 'held', 'closed']);
 const bounded = (value, maximum) => Number.isInteger(value) && value >= 0 && value <= maximum ? value : null;
 
@@ -14,7 +21,7 @@ function project(raw, at) {
   const browserOnline = raw?.browserOnline === true;
   return { state: { countryRequired: 'US', state, country, browserOnline,
     proofFresh: raw?.countryRequired === 'US' && state === 'ready' && country === 'US' && browserOnline && checkedAt !== null && at - checkedAt <= PROOF_MS,
-    pending: bounded(raw?.pending, 32), sockets: bounded(raw?.sockets, 4) }, proofObservedAt: checkedAt };
+    pending: bounded(raw?.pending, 32), sockets: bounded(raw?.sockets, 4), lastSocketClose: closeState(raw?.lastSocketClose, at) }, proofObservedAt: checkedAt };
 }
 
 // Same secure, bounded writer as the host status logger, kept local so this

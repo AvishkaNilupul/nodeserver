@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { validateFetch, validateSocket, MAX_HTTP_BODY, MAX_FRAME } from '../extension/usa-policy.js';
 
+const CLOSE_SOURCES = new Set(['browser-close', 'browser-error', 'proof-expiry', 'lease-expiry', 'local-reset', 'local-close', 'setup-timeout', 'command-failure']);
 const bytes = value => Buffer.byteLength(value, 'utf8');
 const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const exact = (value, keys) => object(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
@@ -18,7 +19,7 @@ export const blockedUsTransport = Object.freeze({
   fetch: async () => { throw failure(); },
   WebSocket: class { constructor() { throw failure(); } },
   invalidate() {}, bind() {}, close() {},
-  status: () => ({ countryRequired: 'US', state: 'held', country: null, checkedAt: 0, browserOnline: false, pending: 0, sockets: 0 })
+  status: () => ({ countryRequired: 'US', state: 'held', country: null, checkedAt: 0, browserOnline: false, pending: 0, sockets: 0, lastSocketClose: null })
 });
 
 /** No Node external network, persistent browser secrets, retries, or direct fallback. */
@@ -27,6 +28,8 @@ export function createUsTransport({ now = Date.now, requestMs = 10_000, leaseMs 
   requestMs = Math.max(1, Math.min(10_000, requestMs)); leaseMs = Math.max(1, Math.min(15_000, leaseMs));
   proofMs = Math.max(1, Math.min(5000, proofMs));
   let session = '', epoch = randomUUID(), leaseUntil = 0, proof = null, closed = false, invalidating = false;
+  let lastSocketClose = null, closeCallbackDepth = 0, eventSource = '';
+  const fromSource = (source, callback) => { const previous = eventSource; eventSource = source; try { return callback(); } finally { eventSource = previous; } };
   let getGeneration = () => 0, getControlGeneration = () => 0;
   const jobs = new Map(), sockets = new Map(), completed = new Map(), retired = new Map();
   const fence = () => [getGeneration(), getControlGeneration()];
@@ -46,18 +49,19 @@ export function createUsTransport({ now = Date.now, requestMs = 10_000, leaseMs 
     // Credentials and returned bodies become unreachable after settlement.
     job.body = undefined; job.headers = undefined;
   }
-  function invalidate() {
+  function invalidate(source = eventSource || 'local-reset') {
     if (invalidating) return;
     invalidating = true; epoch = randomUUID(); proof = null;
     for (const job of [...jobs.values()]) settle(job, failure('usa_transport_cancelled', job.state !== 'begun'));
-    for (const socket of [...sockets.values()]) socket.finish(1006, false);
+    let record = closeCallbackDepth === 0;
+    for (const socket of [...sockets.values()]) if (socket.finish(1006, false, true, source, record)) record = false;
     sockets.clear();
     invalidating = false;
   }
   function sweep() {
     if (closed) return;
-    if (session && !online()) { invalidate(); leaseUntil = 0; }
-    else if ([...sockets.values()].some(socket => socket.constructed && socket.readyState !== 3) && !fresh(proof)) invalidate();
+    if (session && !online()) { invalidate('lease-expiry'); leaseUntil = 0; }
+    else if ([...sockets.values()].some(socket => socket.constructed && socket.readyState !== 3) && !fresh(proof)) invalidate('proof-expiry');
     for (const job of [...jobs.values()]) if (job.expiresAt <= now() || !matching(job)) settle(job, failure('usa_transport_expired', job.state !== 'begun'));
   }
   const interval = setInterval(sweep, Math.max(10, sweepMs)); interval.unref?.();
@@ -160,8 +164,8 @@ export function createUsTransport({ now = Date.now, requestMs = 10_000, leaseMs 
     const value = input.event;
     if (value.type === 'open' && exact(value, ['type']) && socket.readyState === 0) { socket.readyState = 1; clearTimer(socket.setupTimer); socket.dispatchEvent(new Event('open')); }
     else if (value.type === 'message' && exact(value, ['type', 'data']) && typeof value.data === 'string' && bytes(value.data) <= MAX_FRAME && socket.readyState === 1) socket.dispatchEvent(new MessageEvent('message', { data: value.data }));
-    else if (value.type === 'error' && exact(value, ['type'])) socket.dispatchEvent(new Event('error'));
-    else if (value.type === 'close' && exact(value, ['type', 'code', 'wasClean']) && Number.isInteger(value.code) && value.code >= 1000 && value.code <= 4999 && typeof value.wasClean === 'boolean') socket.finish(value.code, value.wasClean, false);
+    else if (value.type === 'error' && exact(value, ['type'])) fromSource('browser-error', () => socket.dispatchEvent(new Event('error')));
+    else if (value.type === 'close' && exact(value, ['type', 'code', 'wasClean']) && Number.isInteger(value.code) && value.code >= 1000 && value.code <= 4999 && typeof value.wasClean === 'boolean') socket.finish(value.code, value.wasClean, false, 'browser-close');
     else throw failure('usa_transport_event', false, 400);
     socket.seq = input.seq; socket.events.set(input.seq, hash); while (socket.events.size > 64) socket.events.delete(socket.events.keys().next().value);
     // Keep a bounded closed facade until epoch retirement, so close ACK loss is idempotent.
@@ -177,26 +181,32 @@ export function createUsTransport({ now = Date.now, requestMs = 10_000, leaseMs 
       for (const [key, socket] of sockets) if (socket.readyState === 3 && sockets.size >= 64) sockets.delete(key);
       const job = queue('ws-open', { url: this.url, socketId: this.socketId }); this.job = job;
       sockets.set(this.socketId, this);
-      this.setupTimer = setTimer(() => { if (this.readyState === 0) { this.dispatchEvent(new Event('error')); invalidate(); } }, requestMs); this.setupTimer?.unref?.();
-      job.promise.catch(() => { if (this.readyState !== 3) { this.dispatchEvent(new Event('error')); this.finish(); } });
+      this.setupTimer = setTimer(() => { if (this.readyState === 0) { fromSource('setup-timeout', () => { this.dispatchEvent(new Event('error')); invalidate('setup-timeout'); }); } }, requestMs); this.setupTimer?.unref?.();
+      job.promise.catch(() => { if (this.readyState !== 3) fromSource('command-failure', () => { this.dispatchEvent(new Event('error')); this.finish(1006, false, true, 'command-failure'); }); });
     }
-    finish(code = 1006, wasClean = false, remove = true) {
-      if (this.readyState === 3) return;
+    finish(code = 1006, wasClean = false, remove = true, source = 'local-reset', record = true) {
+      if (this.readyState === 3) return false;
       this.readyState = 3; clearTimer(this.setupTimer);
+      if (record && closeCallbackDepth === 0) lastSocketClose = { source: CLOSE_SOURCES.has(source) ? source : 'local-reset', at: now(),
+        code: Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : 1006, wasClean: wasClean === true };
       if (remove) sockets.delete(this.socketId);
-      queueMicrotask(() => this.dispatchEvent(closeEvent(code, wasClean)));
+      queueMicrotask(() => {
+        closeCallbackDepth++;
+        try { this.dispatchEvent(closeEvent(code, wasClean)); } finally { closeCallbackDepth--; }
+      });
+      return true;
     }
     close(code = 1000, reason = '') {
       if (code !== 1000 && (!Number.isInteger(code) || code < 3000 || code > 4999) || typeof reason !== 'string' || bytes(reason) > 123) throw failure('usa_transport_close', true, 400);
       if (this.readyState === 3 || this.readyState === 2) return;
-      if (this.job && jobs.has(this.job.id) && this.job.state !== 'begun') { settle(this.job, failure('usa_transport_cancelled')); this.finish(1000, true); return; }
+      if (this.job && jobs.has(this.job.id) && this.job.state !== 'begun') { settle(this.job, failure('usa_transport_cancelled')); this.finish(1000, true, true, 'local-close'); return; }
       this.readyState = 2;
-      try { queue('ws-close', { socketId: this.socketId, code, reason }).promise.then(() => this.finish(1000, true, false), () => this.finish()); }
-      catch { this.finish(); }
+      try { queue('ws-close', { socketId: this.socketId, code, reason }).promise.then(() => this.finish(1000, true, false, 'local-close'), () => this.finish(1006, false, true, 'command-failure')); }
+      catch { this.finish(1006, false, true, 'command-failure'); }
     }
     send(data) {
       if (this.readyState !== 1 || typeof data !== 'string' || bytes(data) > MAX_FRAME) throw failure('usa_transport_socket', true, 400);
-      queue('ws-send', { socketId: this.socketId, data }).promise.catch(() => { this.dispatchEvent(new Event('error')); this.finish(); });
+      queue('ws-send', { socketId: this.socketId, data }).promise.catch(() => fromSource('command-failure', () => { this.dispatchEvent(new Event('error')); this.finish(1006, false, true, 'command-failure'); }));
     }
   }
   return {
@@ -211,7 +221,7 @@ export function createUsTransport({ now = Date.now, requestMs = 10_000, leaseMs 
     }, poll, begin, complete, event, invalidate,
     bind({ getGeneration: nextGeneration, getControlGeneration: nextControl } = {}) { if (nextGeneration) getGeneration = nextGeneration; if (nextControl) getControlGeneration = nextControl; },
     status() { sweep(); const valid = online() && fresh(proof); return { countryRequired: 'US', state: closed ? 'closed' : valid ? 'ready' : 'held', country: valid ? 'US' : null,
-      checkedAt: valid ? proof.checkedAt : 0, browserOnline: online(), pending: jobs.size, sockets: [...sockets.values()].filter(s => s.readyState !== 3).length }; },
+      checkedAt: valid ? proof.checkedAt : 0, browserOnline: online(), pending: jobs.size, sockets: [...sockets.values()].filter(s => s.readyState !== 3).length, lastSocketClose: lastSocketClose ? { ...lastSocketClose } : null }; },
     close() { if (closed) return; closed = true; invalidate(); clearInterval(interval); leaseUntil = 0; }
   };
 }

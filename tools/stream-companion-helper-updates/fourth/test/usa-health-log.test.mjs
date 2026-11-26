@@ -52,7 +52,7 @@ test('strict projection excludes IPs, URLs, tokens, messages, errors and arbitra
     pending: secrets[4], sockets: 500, ip: secrets[0], url: secrets[1], error: secrets.join(' '), messages: secrets, token: secrets[2] });
   assert.equal(f.logger.start(), true); const row = f.read()[0], text = JSON.stringify(f.read());
   for (const secret of secrets) assert.equal(text.includes(secret), false);
-  assert.deepEqual(Object.keys(row).sort(), ['version', 'event', 'observedAt', 'profile', 'countryRequired', 'state', 'country', 'browserOnline', 'proofFresh', 'pending', 'sockets', 'proofObservedAt'].sort());
+  assert.deepEqual(Object.keys(row).sort(), ['version', 'event', 'observedAt', 'profile', 'countryRequired', 'state', 'country', 'browserOnline', 'proofFresh', 'pending', 'sockets', 'proofObservedAt', 'lastSocketClose'].sort());
   assert.equal(row.profile, 'fourth'); assert.equal(row.countryRequired, 'US'); assert.equal(row.state, 'unknown');
   assert.equal(row.country, null); assert.equal(row.pending, null); assert.equal(row.sockets, null); assert.equal(row.browserOnline, false);
 });

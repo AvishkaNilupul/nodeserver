@@ -60,7 +60,7 @@ export class UsaBrowserRelay {
     Object.assign(this, { settings, access, post, fetch: hostCall(fetchImpl), WebSocket: WebSocketImpl, now, makeSession: sessionId,
       setTimer: hostCall(setTimer), clearTimer: hostCall(clearTimer), setInterval: hostCall(setIntervalImpl), clearInterval: hostCall(clearIntervalImpl) });
     this.sessionId = sessionId(); this.epoch = ''; this.version = 0; this.identity = ''; this.leaseExpiresAt = 0;
-    this.seen = new Map(); this.sockets = new Map(); this.requests = new Set(); this.tasks = new Set(); this.lastCheckAt = 0; this.reason = 'setup';
+    this.seen = new Map(); this.sockets = new Map(); this.requests = new Set(); this.tasks = new Set(); this.lastCheckAt = 0; this.reason = 'setup'; this.publicationPending = false;
   }
   status() {
     const ready = !!this.epoch && this.leaseExpiresAt > this.now() && this.proof?.loc === 'US' && this.proof.checkedAt >= this.now() - 5000;
@@ -73,6 +73,7 @@ export class UsaBrowserRelay {
   stop() { if (this.timer) this.clearInterval(this.timer); this.timer = null; this.reset('stopped'); }
   cleanup() {
     this.clearTimer(this.leaseTimer); this.leaseTimer = null;
+    this.clearTimer(this.renewalTimer); this.renewalTimer = null; this.publicationPending = false;
     this.probe?.controller.abort(); this.probe = null;
     for (const controller of this.requests) controller.abort(); this.requests.clear();
     for (const socket of this.sockets.values()) { socket.retired = true; try { socket.ws.close(1000, 'Connection reset'); } catch {} }
@@ -92,26 +93,51 @@ export class UsaBrowserRelay {
     if (this.epoch !== reply.epoch) { this.version++; this.cleanup(); this.seen.clear(); this.epoch = reply.epoch; }
     this.leaseExpiresAt = reply.leaseExpiresAt; this.clearTimer(this.leaseTimer);
     const version = this.version;
+    if (this.proof) this.scheduleRenewal(this.proof, version);
     this.leaseTimer = this.setTimer(() => { if (version === this.version && this.leaseExpiresAt <= this.now()) this.reset('lease'); }, Math.max(1, this.leaseExpiresAt - this.now())); this.leaseTimer?.unref?.();
+  }
+  scheduleRenewal(proof, version = this.version) {
+    this.clearTimer(this.renewalTimer);
+    const epoch = this.epoch;
+    this.renewalTimer = this.setTimer(() => {
+      this.renewalTimer = null;
+      if (!this.current(version, epoch) || this.proof !== proof) return;
+      void this.attest().catch(() => {});
+    }, Math.max(0, proof.checkedAt + 1000 - this.now()));
+    this.renewalTimer?.unref?.();
+  }
+  publishProof(version) {
+    if (!this.current(version)) return;
+    this.publicationPending = true; void this.tick();
   }
   async tick() {
     if (this.pollFlight) return this.pollFlight;
+    const invocationVersion = this.version; let operationVersion = invocationVersion;
     this.pollFlight = (async () => {
       try {
-        const s = await this.settings(); this.settingsChanged(s);
+        const s = await this.settings();
+        if (invocationVersion !== this.version) return;
+        this.settingsChanged(s);
+        const version = this.version, sessionId = this.sessionId; operationVersion = version;
         if (typeof s.pairingToken !== 'string' || s.pairingToken.length < 16 || s.pairingToken.length > 1024 || /\s/.test(s.pairingToken)) { this.reset('setup'); return; }
-        if (!await this.access()) { this.reset('access'); return; }
-        const version = this.version, sessionId = this.sessionId;
+        const access = await this.access();
+        if (version !== this.version || sessionId !== this.sessionId) return;
+        if (!access) { this.reset('access'); return; }
         const proof = this.proof && this.proof.checkedAt >= this.now() - 5000 ? this.proof : null;
+        this.publicationPending = false;
         const reply = await this.post('/api/usa-transport/poll', { sessionId, ...(this.epoch ? { epoch: this.epoch } : {}), proof }, s);
         if (version !== this.version || sessionId !== this.sessionId) return;
-        this.adopt(reply);
+        this.adopt(reply); operationVersion = this.version;
+        if (this.proof && this.proof !== proof) this.publicationPending = true;
         if (reply.job !== null && reply.job !== undefined) this.launch(reply.job, s);
         if (reply.needsProof || !this.proof || this.proof.checkedAt < this.now() - 2000) {
-          void this.attest().then(() => { void this.tick(); }).catch(() => {});
+          void this.attest().catch(() => {});
         }
-      } catch (error) { this.reset(error?.code || 'helper'); }
-    })().finally(() => { this.pollFlight = null; });
+      } catch (error) { if (operationVersion === this.version) this.reset(error?.code || 'helper'); }
+    })().finally(() => {
+      this.pollFlight = null;
+      if (this.publicationPending) { this.publicationPending = false; void this.tick(); }
+    });
     return this.pollFlight;
   }
   async attest() {
@@ -126,7 +152,8 @@ export class UsaBrowserRelay {
         const text = await boundedText(response, 16384, controller.signal);
         const proof = parseUsaTrace(text, this.now());
         if (version !== this.version || controller.signal.aborted) throw failure('aborted');
-        this.lastCheckAt = proof.checkedAt; this.proof = proof; this.reason = 'checking'; return proof;
+        this.lastCheckAt = proof.checkedAt; this.proof = proof; this.reason = 'checking';
+        this.scheduleRenewal(proof, version); this.publishProof(version); return proof;
       } catch (error) {
         const code = ['non_us', 'bad_response', 'access'].includes(error?.code) ? error.code : controller.signal.aborted ? 'timeout' : 'network_error';
         if (version === this.version) { this.lastCheckAt = this.now(); this.reset(code); }
