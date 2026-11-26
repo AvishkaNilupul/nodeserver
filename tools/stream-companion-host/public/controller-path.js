@@ -8,8 +8,8 @@ export function controllerBasePath(value = '') {
 export function basePathFromModule(moduleUrl) {
   const url = new URL(moduleUrl);
   if (!['http:', 'https:'].includes(url.protocol)) return '';
-  if (/^\/(?:app|accounts|clips|controller-path)\.js$/.test(url.pathname)) return '';
-  if (new RegExp(`^${REMOTE_BASE_PATH}/(?:app|accounts|clips|controller-path)\\.js$`).test(url.pathname)) return REMOTE_BASE_PATH;
+  if (/^\/(?:app|accounts|clips|messages|controller-path)\.js$/.test(url.pathname)) return '';
+  if (new RegExp(`^${REMOTE_BASE_PATH}/(?:app|accounts|clips|messages|controller-path)\\.js$`).test(url.pathname)) return REMOTE_BASE_PATH;
   throw new Error('Unsupported controller module location.');
 }
 

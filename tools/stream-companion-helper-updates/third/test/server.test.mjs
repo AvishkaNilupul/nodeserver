@@ -44,8 +44,9 @@ test('paired status refreshes only its own coordinator presence before returning
 
 test('helper dispatches chat-only actions and rejects legacy watch endpoints', async t => {
   const h = await harness(t);
-  for (const path of ['/api/twitch/status', '/api/twitch/authorize', '/api/twitch/authorization', '/api/twitch/connect', '/api/twitch/send', '/api/twitch/disconnect']) assert.equal((await h.request(path, { account: 'companion_test', channel: 'friend_channel', clientId: 'testclient1234' })).status, 200);
-  assert.deepEqual(h.calls.map(c => c.name), ['status', 'startAuthorization', 'pollAuthorization', 'connect', 'send', 'disconnect']);
+  for (const path of ['/api/twitch/status', '/api/twitch/authorize', '/api/twitch/authorization', '/api/twitch/connect', '/api/twitch/disconnect']) assert.equal((await h.request(path, { account: 'companion_test', channel: 'friend_channel', clientId: 'testclient1234' })).status, 200);
+  assert.deepEqual(h.calls.map(c => c.name), ['status', 'startAuthorization', 'pollAuthorization', 'connect', 'disconnect']);
+  assert.equal((await h.request('/api/twitch/send', { text: 'unplanned message' })).status, 409);
   for (const path of ['/api/watch', '/api/follow', '/api/browser-input', '/api/player/open', '/api/player/close', '/api/player/state', '/api/player/stop']) assert.equal((await h.request(path)).status, 404);
 });
 

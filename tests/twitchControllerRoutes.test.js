@@ -109,7 +109,7 @@ function post(client, path, body, csrf, headers = {}) {
 
 test('every page, asset and API uses the real superadmin and two-factor guards before reaching the Mac', async t => {
   const f = await fixture(t);
-  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex', '/api/accounts/primary/browser', '/clips.js', '/clips.css', '/api/clips', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization']) {
+  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex', '/api/accounts/primary/browser', '/clips.js', '/clips.css', '/api/clips', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization', '/messages', '/messages.js', '/messages.css', '/api/director', '/api/director/history/all/0', '/api/director/bank', '/api/director/cancel']) {
     assert.equal((await request(f.port, BASE + path)).status, 401);
     const normal = await f.client('admin'); assert.equal((await normal.request(path)).status, 403);
   }
@@ -123,6 +123,95 @@ test('every page, asset and API uses the real superadmin and two-factor guards b
   }
   assert.equal(f.seen.length, 0);
   const enrolled = await f.client(); assert.equal((await enrolled.request('/api/status')).status, 200);
+});
+
+test('central messages use bounded fixed reads and exact single-forward bank/cancel mutations', async t => {
+  const f = await fixture(t, { upstream: (req, res) => {
+    if (req.method === 'POST') return respond(res, 200, { ok: true, revision: 2 });
+    if (req.path.endsWith('.js')) return respond(res, 200, 'export const fixture = true;', { 'Content-Type': 'text/javascript' });
+    if (req.path.endsWith('.css')) return respond(res, 200, 'body {}', { 'Content-Type': 'text/css' });
+    if (req.path.includes('/api/director')) return respond(res, 200, { protocol: 1, ready: false, bank: {}, history: [], csrfToken: UPSTREAM_TOKEN });
+    return respond(res, 200, '<!doctype html><html><head><title>Messages</title></head><body><main>Messages</main></body></html>');
+  } }), c = await f.client(), csrf = await nonce(c, '/api/director');
+  for (const path of ['/messages', '/messages.js', '/messages.css', '/api/director/history/all/0', '/api/director/history/primary/9007199254740991', '/api/director/history/test/23', '/api/director/history/third/5']) {
+    const response = await c.request(path); assert.equal(response.status, 200, path);
+    assert.equal(f.seen.at(-1).path, BASE + path);
+    if (path.includes('/api/')) assert.equal(response.data.csrfToken, csrf);
+  }
+  const bank = { entries: [{ id: 'topic_general', kind: 'topic', category: 'general', lines: ['Enjoying {game}.'], accountIds: ['primary', 'third'], enabled: true }],
+    profiles: ['primary', 'test', 'third'].map(id => ({ id, chatMode: 'mentions', replySource: 'local' })) };
+  for (const [path, body] of [
+    ['/api/director/bank', { requestId: 'bank-save-1', expectedRevision: 1, bank }],
+    ['/api/director/cancel', { requestId: 'cancel-1', planId: 'plan-1' }]
+  ]) {
+    const before = f.seen.length;
+    assert.equal((await c.request(path)).status, 405);
+    assert.equal((await post(c, path, body, 'wrong')).status, 403);
+    assert.equal((await post(c, path, body, csrf, { Origin: 'https://outside.example' })).status, 403);
+    assert.equal(f.seen.length, before);
+    assert.equal((await post(c, path, body, csrf)).status, 200);
+    assert.equal(f.seen.length, before + 1);
+    assert.deepEqual(f.seen.at(-1).body, body);
+  }
+  const before = f.seen.length;
+  const save = changes => ({ requestId: 'invalid-save', expectedRevision: 1, bank: { ...bank, ...changes } });
+  const entry = bank.entries[0];
+  for (const body of [
+    { ...save({}), expectedRevision: 0 }, { ...save({}), expectedRevision: 1.5 },
+    { ...save({}), authorityEpoch: 'client-selected' }, save({ profiles: bank.profiles.slice(0, 2) }),
+    save({ profiles: [bank.profiles[0], bank.profiles[0], bank.profiles[2]] }),
+    save({ entries: [{ ...entry, accountIds: ['primary', 'primary'] }] }), save({ entries: [{ ...entry, kind: 'force' }] }),
+    save({ entries: [{ ...entry, category: 'foreign' }] }), save({ entries: [{ ...entry, lines: ['hello\nthere'] }] }),
+    save({ entries: [{ ...entry, lines: ['/ban somebody'] }] }), save({ entries: [{ ...entry, lines: ['https://outside.example'] }] }),
+    save({ entries: [{ ...entry, lines: ['{arbitrary}'] }] }), save({ entries: [{ ...entry, lines: ['x'.repeat(261)] }] }),
+    save({ entries: [{ ...entry, id: '' }] }), save({ entries: [{ ...entry, expiresAt: 1 }] }),
+    save({ entries: Array.from({ length: 96 }, (_, i) => ({ ...entry, id: 'entry_' + i, lines: ['é'.repeat(260)] })) })
+  ]) assert.equal((await post(c, '/api/director/bank', body, csrf)).status, 400, JSON.stringify(body).slice(0, 160));
+  for (const body of [{ requestId: 'x', planId: '' }, { requestId: 'x', planId: 'p', retry: true }])
+    assert.equal((await post(c, '/api/director/cancel', body, csrf)).status, 400);
+  for (const path of ['/api/director/history/all/9007199254740992', '/api/director/history/foreign/0', '/api/director/history/all/-1', '/api/director/history/all/1.5',
+    '/api/director/history/all/0?limit=1000', '/api/director/history/all/0/', '/api/director/history/all/%30', '/api/director/retry', '/internal/director/import'])
+    assert.equal((await c.request(path)).status, 404, path);
+  assert.equal(f.seen.length, before, 'rejected inputs cannot contact the Mac');
+});
+
+test('an interrupted central bank save remains unconfirmed and is never replayed', async t => {
+  const f = await fixture(t), c = await f.client(), csrf = await nonce(c);
+  f.setHandler((_req, res) => res.destroy());
+  const response = await post(c, '/api/director/cancel', { requestId: 'cancel-once', planId: 'plan-once' }, csrf);
+  assert.equal(response.status, 503); assert.equal(response.data.code, 'command_unconfirmed');
+  assert.equal(f.seen.filter(x => x.method === 'POST').length, 1);
+});
+
+test('real Mac director bank edits survive the protected site gateway without activating profiles', async t => {
+  const { HostStore } = await import(pathToFileURL(resolve(__dirname, '../tools/stream-companion-host/lib/store.mjs')));
+  const { createHostServer } = await import(pathToFileURL(resolve(__dirname, '../tools/stream-companion-host/server.mjs')));
+  const clients = ['primary', 'test', 'third'].map((id, index) => ({ id, account: `fixture_account_${index}`, token: `fixture-client-token-${id}-1234567890123456789` }));
+  const store = new HostStore({ file: ':memory:', clients, directorEnabled: true }); t.after(() => store.close());
+  const accounts = { snapshot: async () => ({ instances: [] }), command: async () => { throw Error('No account control is allowed in this bank test.'); } };
+  const upstream = createHostServer({ store, clients, accounts, remoteToken: REMOTE_TOKEN, csrfToken: UPSTREAM_TOKEN });
+  const f = await fixture(t, { upstreamServer: upstream }), c = await f.client();
+  const before = await c.request('/api/director');
+  assert.equal(before.status, 200); assert.equal(before.data.ready, false);
+  assert.equal(before.data.imports.length, 3); assert.ok(before.data.imports.every(x => !x.complete));
+  const bank = structuredClone(before.data.bank); bank.entries[0].lines = ['A revised greeting.'];
+  const body = { requestId: 'real-bank-save', expectedRevision: before.data.revision, bank };
+  const saved = await post(c, '/api/director/bank', body, before.data.csrfToken);
+  assert.equal(saved.status, 200); assert.equal(saved.data.revision, before.data.revision + 1);
+  const repeat = await post(c, '/api/director/bank', body, before.data.csrfToken);
+  assert.equal(repeat.status, 200); assert.deepEqual(repeat.data, saved.data);
+  const changed = await post(c, '/api/director/bank', { ...body, bank: { ...bank, entries: bank.entries.slice(1) } }, before.data.csrfToken);
+  assert.equal(changed.status, 409);
+  const stale = await post(c, '/api/director/bank', { ...body, requestId: 'stale-save' }, before.data.csrfToken);
+  assert.equal(stale.status, 409);
+  const after = await c.request('/api/director');
+  assert.equal(after.data.revision, saved.data.revision);
+  assert.deepEqual(after.data.bank.entries[0].lines, ['A revised greeting.']);
+  assert.deepEqual(after.data.lastMutation, { requestId: body.requestId, revision: saved.data.revision });
+  assert.deepEqual(after.data.plans, []); assert.deepEqual(after.data.history, []); assert.equal(after.data.ready, false);
+  assert.doesNotMatch(after.text, /authorityEpoch|binding|controlSession|fixture-client-token|fixture-private-upstream/);
+  for (const path of ['/messages', '/messages.js', '/messages.css']) assert.equal((await c.request(path)).status, 200);
+  const history = await c.request('/api/director/history/third/0'); assert.equal(history.status, 200); assert.deepEqual(history.data.history, []);
 });
 
 test('each finite GET route reaches only its prefixed fixed upstream and pages include site navigation', async t => {

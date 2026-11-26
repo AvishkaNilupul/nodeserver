@@ -1,3 +1,4 @@
+import { installDirectorFixture } from './director-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -32,6 +33,7 @@ async function harness(t, hooks = {}) {
     } });
   twitch = new TwitchChat({ credentials: { account: 'companion_test', userId: '123' }, coordinator, now: () => time,
     saveHistory: async history => saved.push(structuredClone(history)) });
+  installDirectorFixture(twitch);
   twitch.connected = true; twitch.channel = channel; twitch.broadcasterId = '456'; twitch.ensureIdentity = async () => {};
   twitch.inspectChannel = async () => ({ streamContext: { isLive: true, streamId: '123456789' }, sharedChat: false, chatSettings: {} });
   twitch.api = async (path, body) => {

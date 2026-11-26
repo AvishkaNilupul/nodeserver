@@ -1,0 +1,39 @@
+{
+  "baselineCommit": "d15bee667487f516015234530f3c1eecf4f11e08",
+  "sources": {
+    "lib/store.mjs": {
+      "public": "e2b86a07a5764fe43ce116ce12b137523beba55493c50fe2d6dcf2b8a28bf676",
+      "installed": "e2b86a07a5764fe43ce116ce12b137523beba55493c50fe2d6dcf2b8a28bf676"
+    },
+    "lib/exchanges.mjs": {
+      "public": "8800f8223662453ea2875c0d7aa6d681eadaa881f198c4b11833eddc4ec9902c",
+      "installed": "8800f8223662453ea2875c0d7aa6d681eadaa881f198c4b11833eddc4ec9902c"
+    },
+    "lib/accounts.mjs": {
+      "public": "02692fba8356cf9eb6c78e23bc1519005faedcc06132af1a26d6272dda330c10",
+      "installed": "02692fba8356cf9eb6c78e23bc1519005faedcc06132af1a26d6272dda330c10"
+    },
+    "server.mjs": {
+      "public": "fc12e83494ce9ee0b90248180aa3a601b1889134d7bc7da045a8b3690550d3de",
+      "installed": "fc12e83494ce9ee0b90248180aa3a601b1889134d7bc7da045a8b3690550d3de"
+    },
+    "README.md": {
+      "public": "6b354228cf5c78e3d7277f37652d8c23fa844938e2403d7187968fbd6265a0c1",
+      "installed": "6b354228cf5c78e3d7277f37652d8c23fa844938e2403d7187968fbd6265a0c1"
+    },
+    "docs/CONTRACT.md": {
+      "public": "e3faf7f765e45138d041a9e1f28083e80e287277a8110bc0f57df77269c44d0f",
+      "installed": "e3faf7f765e45138d041a9e1f28083e80e287277a8110bc0f57df77269c44d0f"
+    }
+  },
+  "newAbsent": [
+    "docs/ADR-003-central-director.md",
+    "docs/CENTRAL-DIRECTOR-1126.md",
+    "lib/bank.mjs",
+    "lib/director.mjs",
+    "lib/reply-policy.mjs",
+    "lib/text-policy.mjs",
+    "test/director-http.test.mjs",
+    "test/director.test.mjs"
+  ]
+}

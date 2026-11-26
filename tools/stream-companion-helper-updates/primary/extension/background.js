@@ -1,35 +1,14 @@
-import { mergeMessages, replyOpportunity, digest, sendGate, localSummary } from './core.js';
-import { localReply, pickPhrase } from './replies.js';
+import { mergeMessages, digest, sendGate } from './core.js';
+import { directorBinding, directorOffer, importPages, importAcknowledged, sameBinding, sha256 } from './director.js';
 import { DropClaims } from './drops.js';
 import { WatchSession } from './watch.js';
-import { planParticipation, planExchange, exchangeContext, humanMessages } from './participation.js';
-import { normalizeStreamContext } from './replies.js';
-import { exchangeOffer } from './exchange.js';
+import { exchangeContext, humanMessages, normalizeStreamContext } from './chat-context.js';
 import { LocalControlBridge } from './local-control.js';
 
 const defaults = { account: '', allowedChannel: '', autoReply: false, autoResume: false, chatMode: 'mentions', replySource: 'local', pairingToken: '', paused: false, clientId: '' };
 let serial = Promise.resolve(), autoInFlight = false, recoveryInFlight = false, operationEpoch = 0;
 let controlBridge, migrationGate = null;
-const preparedDrafts = new Map();
-function prunePreparedDrafts(s) {
-  const now = Date.now();
-  for (const [key, entry] of preparedDrafts) if (entry.epoch !== operationEpoch || entry.revision !== s.revision
-    || entry.account !== s.account || entry.channel !== s.allowedChannel || now < entry.targetAt || now - entry.targetAt > 45_000) preparedDrafts.delete(key);
-}
-const draftKey = (s, target) => `${operationEpoch}:${s.revision}:${s.account}:${s.allowedChannel}:${target.id}`;
-function preparedReply(s, target) {
-  prunePreparedDrafts(s);
-  const entry = preparedDrafts.get(draftKey(s, target));
-  return entry && entry.targetAt === target.at && entry.author === target.author.toLowerCase() && entry.body === target.text ? entry.draft : null;
-}
-function rememberPreparedReply(s, target, result) {
-  prunePreparedDrafts(s);
-  const key = draftKey(s, target);
-  if (!preparedDrafts.has(key) && preparedDrafts.size >= 32) preparedDrafts.delete(preparedDrafts.keys().next().value);
-  preparedDrafts.set(key, { epoch: operationEpoch, revision: s.revision, account: s.account, channel: s.allowedChannel,
-    targetAt: target.at, author: target.author.toLowerCase(), body: target.text,
-    draft: { text: result.text, category: result.category || '', reason: result.reason || '', source: result.source || '' } });
-}
+let messageDirector = null, browserImportFlight = null, browserImported = false;
 const locked = fn => {
   const epoch = operationEpoch;
   const run = () => { if (epoch !== operationEpoch) throw new Error('Operation cancelled by Pause or Disconnect.'); return fn(); };
@@ -48,7 +27,7 @@ function updateSettings(fields, { expectedRevision, epoch } = {}) {
     if ((epoch !== undefined && epoch !== operationEpoch) || (expectedRevision !== undefined && current.revision !== expectedRevision)) throw new Error('Setup changed; operation cancelled.');
     const next = { ...current, ...(typeof fields === 'function' ? fields(current) : fields), schemaVersion: 8, revision: current.revision + 1 };
     await chrome.storage.local.set({ settings: next });
-    preparedDrafts.clear();
+    messageDirector = null;
     return next;
   });
   settingsSerial = result.catch(() => {});
@@ -160,10 +139,10 @@ async function participationGate(s, proposal) {
 async function helper(path, body = {}, options, binding = controlBridge?.binding()) {
   const s = options || await settings();
   if (!s.pairingToken) throw new Error('Enter the local pairing token first.');
-  if (['/api/twitch/connect', '/api/twitch/send'].includes(path) || path === '/api/twitch/disconnect' && body.disarmOnly === true) body = { ...body, ...binding };
+  if (path.startsWith('/api/director/') || ['/api/twitch/connect', '/api/twitch/send'].includes(path) || path === '/api/twitch/disconnect' && body.disarmOnly === true) body = { ...body, ...binding };
   const response = await fetch(`http://127.0.0.1:8792${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.pairingToken}` },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(path === '/api/compose' ? 40_000 : 12_000)
+    body: JSON.stringify(body), signal: AbortSignal.timeout(path === '/api/compose' || path.startsWith('/api/director/') ? 40_000 : 12_000)
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Local helper returned ${response.status}.`);
@@ -202,7 +181,7 @@ async function migrate() {
 chrome.runtime.onInstalled.addListener(migrate);
 chrome.runtime.onStartup.addListener(migrate);
 
-async function refreshChat() {
+async function refreshChat({ automatic = true } = {}) {
   const epoch = operationEpoch;
   const before = await settings();
   const playback = await watch.state();
@@ -222,90 +201,141 @@ async function refreshChat() {
     const latest = await settings();
     if (epoch !== operationEpoch || latest.paused || latest.revision !== after.revision) return chat;
     chat.streamContext = channelInfo?.channel === chat.channel ? channelInfo.streamContext : null;
-    requestAutoReply(); await chrome.storage.session.set({ recovery: {} });
+    if (!sendHoldReason(latest)) await syncDirector(latest);
+    else messageDirector = null;
+    if (automatic) requestAutoReply(); await chrome.storage.session.set({ recovery: {} });
   }
   else requestRecovery();
   return chat;
 }
 
-async function compose(mode, s, target) {
-  const held = sendHoldReason(s); if (held) throw new Error(held);
-  const recent = (await chrome.storage.local.get('sent')).sent || [];
-  if (mode === 'summary' && s.replySource === 'local') return localSummary(chat.messages, chat.channel);
-  if (mode === 'reply' && s.replySource === 'local') return localReply({ messages: chat.messages, account: s.account, channel: chat.channel, target, recent, streamContext: chat.streamContext, excludedKeys: chat.coordination?.textKeys || [] });
-  return helper('/api/compose', { mode, channel: chat.channel, account: s.account, messages: chat.messages, target, streamContext: chat.streamContext, recentReplies: recent.filter(x => x.channel === chat.channel) }, s);
+async function importBrowser(s) {
+  if (browserImported) return;
+  if (!browserImportFlight) browserImportFlight = (async () => {
+    const stored = await chrome.storage.local.get(['sent', 'participationAttempts', 'handled', 'directorImport']);
+    const old = stored.directorImport;
+    if (old?.account === s.account && old.complete === true) { browserImported = true; return; }
+    if (old?.account && old.account !== s.account) throw Error('The central migration journal belongs to another account.');
+    let pages = old?.pages;
+    if (!Array.isArray(pages) || !pages.length) {
+      pages = await importPages({ source: 'browser', account: s.account, history: stored.sent || [],
+        participationAttempts: stored.participationAttempts || [], handled: stored.handled || [],
+        preferences: { chatMode: s.chatMode, replySource: s.replySource } });
+      await chrome.storage.local.set({ directorImport: { version: 1, account: s.account, pages, nextPage: 0, complete: false } });
+    }
+    for (const page of pages) {
+      const current = await settings();
+      if (current.account !== s.account) throw Error('Account changed during central history import.');
+      await controlBridge.poll();
+      const result = await helper('/api/director/import', { page, settingsRevision: current.revision }, current);
+      if (!importAcknowledged(result, page)) throw Error('Central history import was not durably acknowledged.');
+      await chrome.storage.local.set({ directorImport: page.final
+        ? { version: 1, account: s.account, importId: page.importId, digest: page.digest, complete: true }
+        : { version: 1, account: s.account, pages, nextPage: page.page + 1, complete: false } });
+    }
+    browserImported = true;
+  })().finally(() => { browserImportFlight = null; });
+  return browserImportFlight;
 }
-
-async function submit(text, target, category, participation, binding = controlBridge?.binding(), check = () => {}) {
+async function syncDirector(s) {
+  await importBrowser(s);
+  await controlBridge.poll();
+  const current = await settings();
+  if (current.revision !== s.revision || current.account !== s.account) return;
+  const expectedBinding = directorBinding(controlBridge.binding(), current.revision);
+  const response = await helper('/api/director/sync', { settingsRevision: current.revision }, current);
+  const latest = await settings();
+  if (latest.revision !== current.revision || latest.paused || !sameBinding(directorBinding(controlBridge.binding(), latest.revision), expectedBinding)) return;
+  const value = response.director;
+  if (!value || value.protocol !== 1 || typeof value.authorityEpoch !== 'string') throw Error('The central message controller is unavailable.');
+  messageDirector = value;
+  chat.coordination = { ...(chat.coordination || {}), director: value };
+  const profile = value.profile;
+  if (profile && ['mentions', 'participate'].includes(profile.chatMode) && ['local', 'ai'].includes(profile.replySource)
+    && (profile.chatMode !== latest.chatMode || profile.replySource !== latest.replySource)) {
+    await updateSettings({ chatMode: profile.chatMode, replySource: profile.replySource }, { expectedRevision: latest.revision });
+    messageDirector = null;
+  }
+}
+async function compose(mode, s, target, category) {
+  const held = sendHoldReason(s); if (held) throw new Error(held);
+  await importBrowser(s); await controlBridge.poll();
+  const latest = await settings();
+  const result = await helper('/api/director/draft', { requestId: crypto.randomUUID(), mode,
+    ...(mode === 'phrase' ? { category } : {}), settingsRevision: latest.revision }, latest);
+  if (!result.draft) throw Error(result.director?.reason || 'The central controller has no draft for this context.');
+  return result.draft;
+}
+async function submit(text, target, category, offered, binding = controlBridge?.binding(), check = () => {}) {
   check();
   const epoch = operationEpoch;
-  const s = await settings();
+  let s = await settings();
   if (s.paused) throw new Error('Companion is paused.');
-  await refreshChat();
-  check();
-  if (!chat.connected || chat.channel !== s.allowedChannel) throw new Error('Connect chat to the configured channel first.');
-  const watchReason = participation ? await participationGate(s, participation) : await watchSendGate(s, !!target);
-  if (watchReason) throw new Error(watchReason);
+  await refreshChat({ automatic: false }); check();
+  const latest = await settings();
+  if (latest.revision !== s.revision || epoch !== operationEpoch) throw Error('Setup changed before submission.');
+  const held = sendHoldReason(s); if (held) throw Error(held);
+  if (!offered) {
+    const result = await helper('/api/director/manual', { requestId: crypto.randomUUID(), text,
+      settingsRevision: s.revision }, s, binding);
+    check(); offered = result.plan || result.director?.plan;
+    if (result.director) messageDirector = result.director;
+  }
+  const currentBinding = directorBinding(binding, s.revision);
+  const plan = directorOffer(offered, { account: s.account, channel: s.allowedChannel, binding: currentBinding,
+    authorityEpoch: messageDirector?.authorityEpoch });
+  if (!plan || plan.text !== text || await sha256(text) !== plan.exactKey) throw Error('An exact current central message command is required.');
+  if (plan.source === 'automatic' && (messageDirector?.ready !== true || messageDirector?.plan?.planId !== plan.planId
+    || messageDirector.plan.text !== text || !s.autoReply)) throw Error('The central automatic message is no longer current.');
+  if (!chat.connected || chat.account !== s.account || chat.channel !== s.allowedChannel) throw Error('Connect chat to the configured channel first.');
+  const participation = plan.kind ? { key: plan.participationKey, kind: plan.kind, streamId: plan.streamId,
+    ...(plan.kind === 'exchange' ? { exchangeId: plan.participationKey.slice('exchange:'.length) } : {}) } : null;
+  target = plan.replyId ? chat.messages.find(x => x.id === plan.replyId && x.author.toLowerCase() === plan.replyAuthor
+    && x.at === plan.replyAt && x.at <= Date.now() && Date.now() - x.at <= 45_000) : null;
+  if (plan.replyId && !target) throw Error('The central reply target is no longer current.');
+  const watchReason = participation ? await participationGate(s, participation) : await watchSendGate(s, plan.source === 'automatic');
+  if (watchReason) throw Error(watchReason);
+  if (plan.kind === 'exchange' && humanMessages(chat.messages, s.account, chat.coordination?.accounts || [])
+    .some(x => x.at <= Date.now() && x.at > Date.now() - 90_000)) throw Error('Fresh human chat takes priority over the scheduled exchange.');
   const recent = (await chrome.storage.local.get('sent')).sent || [];
   const reason = sendGate({ channel: chat.channel, allowedChannel: s.allowedChannel, login: chat.account, expectedLogin: s.account, recent, text });
-  if (reason) throw new Error(reason);
-  const intent = participation ? { participationKey: participation.key, kind: participation.kind, streamId: participation.streamId,
-    ...(participation.kind === 'exchange' ? { exchangeId: participation.exchangeId } : {}) } : {};
-  const attempt = { at: Date.now(), account: s.account, channel: s.allowedChannel, text, delivery: 'pending', category: category || '', ...(target ? { replyTo: target.author } : {}), ...intent };
+  if (reason) throw Error(reason);
+  const intent = { participationKey: plan.participationKey, kind: plan.kind, streamId: plan.streamId,
+    ...(participation?.exchangeId ? { exchangeId: participation.exchangeId } : {}) };
+  const attempt = { at: Date.now(), account: s.account, channel: s.allowedChannel, text, delivery: 'pending', category: plan.category,
+    planId: plan.planId, authorityEpoch: plan.authorityEpoch, ...(target ? { replyTo: plan.replyAuthor, replyId: plan.replyId } : {}), ...intent };
   const journal = (await chrome.storage.local.get('participationAttempts')).participationAttempts || [];
-  if (participation && journal.some(x => x.key === participation.key && !(x.delivery === 'cancelled' && x.submitted === false))) throw new Error('This contribution was already attempted.');
-  if (participation) {
-    const handled = (await chrome.storage.local.get('handled')).handled || [];
-    const mention = replyOpportunity(humanMessages(chat.messages, s.account, chat.coordination?.accounts || []), s.account);
-    const freshMention = mention?.id && !handled.includes(`${s.account}:${s.allowedChannel}:${mention.id}`);
-    const planInput = { messages: chat.messages, account: s.account, channel: s.allowedChannel,
-      streamContext: chat.streamContext, recent, attempts: journal, coordination: chat.coordination };
-    const humanPlan = participation.kind === 'exchange' && planParticipation({ ...planInput,
-      coordination: { ...chat.coordination, exchange: undefined } });
-    // Exchanges are exact host-authored offers, not generated greeting/topic
-    // plans. Fresh supported public conversation still takes priority.
-    const currentPlan = participation.kind === 'exchange' ? planExchange(planInput) : planParticipation(planInput);
-    if (freshMention || humanPlan?.kind === 'conversation' || currentPlan?.key !== participation.key
-      || currentPlan?.exchangeId !== participation.exchangeId || (!target && currentPlan?.text !== text)) {
-      setActivity('waiting', freshMention ? 'A fresh direct mention takes priority.' : 'The conversation changed; checking again.');
-      return { delivery: 'cancelled', reason: activity.reason };
-    }
-  }
-  const entry = participation && { key: participation.key, account: s.account, channel: s.allowedChannel, streamId: participation.streamId, kind: participation.kind, at: attempt.at, delivery: 'pending', submitted: false };
-  // Keep greeting/topic tombstones for this broadcast even in a long session;
-  // chat-message entries may roll over because their targets expire in 45s.
+  if (participation && journal.some(x => x.key === participation.key && !(x.delivery === 'cancelled' && x.submitted === false))) throw Error('This contribution was already attempted.');
+  const entry = participation && { key: participation.key, account: s.account, channel: s.allowedChannel,
+    streamId: plan.streamId, kind: plan.kind, at: attempt.at, delivery: 'pending', submitted: false, planId: plan.planId };
   const currentBroadcast = x => entry && x.account === entry.account && x.channel === entry.channel && x.streamId === entry.streamId;
-  const retained = entry ? [
-    ...journal.filter(x => x.kind !== 'conversation' && currentBroadcast(x)),
+  const retained = entry ? [...journal.filter(x => x.kind !== 'conversation' && currentBroadcast(x)),
     ...journal.filter(x => x.kind !== 'conversation' && !currentBroadcast(x) && x.at > Date.now() - 14 * 86400_000).slice(-99),
-    ...journal.filter(x => x.kind === 'conversation' && x.at > Date.now() - 86400_000).slice(-199)
-  ] : [];
-  await chrome.storage.local.set({ sent: [...recent.filter(x => x.at > Date.now() - 3_600_000), attempt], ...(entry ? { participationAttempts: [...retained, entry] } : {}) });
+    ...journal.filter(x => x.kind === 'conversation' && x.at > Date.now() - 86400_000).slice(-199)] : [];
+  await chrome.storage.local.set({ sent: [...recent.filter(x => x.at > Date.now() - 3_600_000), attempt],
+    ...(entry ? { participationAttempts: [...retained, entry] } : {}) });
   let result, submittedToHelper = false;
   try {
-    const latest = await settings();
-    if (latest.paused || latest.revision !== s.revision || epoch !== operationEpoch) throw new Error('Setup changed before submission.');
-    const finalWatchReason = participation ? await participationGate(latest, participation) : await watchSendGate(latest, !!target);
-    check();
-    if (finalWatchReason || epoch !== operationEpoch) throw new Error(finalWatchReason || 'The stream changed before submission.');
-    if (participation?.kind === 'exchange') {
-      const current = exchangeOffer(chat.coordination?.exchange, { account: latest.account, channel: latest.allowedChannel,
-        streamId: participation.streamId, accounts: chat.coordination?.accounts || [] });
-      if (!current || current.id !== participation.exchangeId || current.key !== participation.key || current.text !== text
-        || chat.coordination?.paused || chat.coordination?.available === false) throw new Error('The scheduled companion exchange is no longer current.');
-    }
+    const final = await settings(); check();
+    if (final.paused || final.revision !== s.revision || epoch !== operationEpoch || plan.expiresAt <= Date.now()
+      || !sameBinding(plan.binding, directorBinding(controlBridge.binding(), final.revision))) throw Error('Central message cancelled by Stop, expiry or changed setup.');
+    const finalWatch = participation ? await participationGate(final, participation) : await watchSendGate(final, plan.source === 'automatic');
+    if (finalWatch) throw Error(finalWatch);
     submittedToHelper = true;
-    result = await helper('/api/twitch/send', { account: s.account, channel: s.allowedChannel, text, replyTo: target?.id || '', replyAuthor: target?.author || '', category: category || '', ...intent }, s, binding);
+    result = await helper('/api/twitch/send', { account: s.account, channel: s.allowedChannel, text,
+      replyTo: plan.replyId, replyAuthor: plan.replyAuthor, category: plan.category, ...intent,
+      planId: plan.planId, authorityEpoch: plan.authorityEpoch, binding: plan.binding, settingsRevision: s.revision }, s, binding);
     Object.assign(attempt, { delivery: result.delivery, messageId: result.messageId, reason: result.reason });
     if (result.sendHold) chat.sendHold = result.sendHold;
-    // Explicit suppression certifies that no Twitch send request was made.
     if (result.suppressed === true && result.submitted === false) { submittedToHelper = false; attempt.suppressed = true; }
-    setActivity(chat.sendHold?.held ? 'waiting' : attempt.suppressed ? 'waiting' : result.delivery === 'confirmed' ? 'sent' : 'error', chat.sendHold?.held ? chat.sendHold.reason : attempt.suppressed ? result.reason : result.delivery === 'confirmed' ? 'Twitch confirmed the latest reply.' : `Message ${result.delivery}${result.reason ? `: ${result.reason}` : '.'}`);
-  } catch (e) { attempt.delivery = submittedToHelper ? 'unknown' : 'cancelled'; attempt.reason = e.message; throw e; }
+    setActivity(attempt.suppressed ? 'waiting' : result.delivery === 'confirmed' ? 'sent' : 'error',
+      attempt.suppressed ? result.reason : result.delivery === 'confirmed' ? 'Twitch confirmed the latest message.' : `Message ${result.delivery}; no automatic retry was made.`);
+  } catch (error) { attempt.delivery = submittedToHelper ? 'unknown' : 'cancelled'; attempt.reason = error.message; throw error; }
   finally {
     const entries = (await chrome.storage.local.get('sent')).sent || [];
     const participationEntries = entry ? (await chrome.storage.local.get('participationAttempts')).participationAttempts || [] : [];
-    await chrome.storage.local.set({ sent: attempt.suppressed ? entries.filter(x => x.at !== attempt.at) : entries.map(x => x.at === attempt.at ? attempt : x), ...(entry ? { participationAttempts: participationEntries.map(x => x.key === entry.key && x.at === entry.at ? { ...x, delivery: attempt.delivery, submitted: submittedToHelper } : x) } : {}) });
+    await chrome.storage.local.set({ sent: attempt.suppressed ? entries.filter(x => x.at !== attempt.at) : entries.map(x => x.at === attempt.at ? attempt : x),
+      ...(entry ? { participationAttempts: participationEntries.map(x => x.key === entry.key && x.at === entry.at ? { ...x, delivery: attempt.delivery, submitted: submittedToHelper } : x) } : {}) });
   }
   return result;
 }
@@ -350,6 +380,12 @@ async function handle(message) {
     if (changed) next.chatMode = 'mentions';
     if (next.autoResume && (changed || !chat.connected || chat.account !== next.account || chat.channel !== next.allowedChannel)) throw new Error('Connect the configured account and channel before enabling away mode.');
     if (next.autoReply && (changed || !chat.connected || chat.account !== next.account || chat.channel !== next.allowedChannel)) throw new Error('Save setup and connect official Twitch chat before arming replies.');
+    if (!changed && old.account && old.pairingToken && (next.chatMode !== old.chatMode || next.replySource !== old.replySource)) {
+      await controlBridge.poll();
+      const accepted = await helper('/api/director/preferences', { requestId: crypto.randomUUID(), settingsRevision: old.revision,
+        chatMode: next.chatMode, replySource: next.replySource }, old);
+      if (accepted.ok !== true) throw Error('Central message preferences could not be saved.');
+    }
     if (next.paused || next.account !== old.account) await drops.stop(next.paused ? 'Companion is paused.' : 'Account changed. Enable claims for the new account explicitly.');
     await updateSettings(next, { expectedRevision: old.revision });
     if (changed || next.paused) {
@@ -396,12 +432,11 @@ async function handle(message) {
     await updateSettings({ autoReply: false, autoResume: false });
     await helper('/api/twitch/disconnect', {}, s); chat = { connected: false, messages: [], channel: '', account: '' }; return { ok: true };
   }
-  if (message.type === 'pickPhrase') return pickPhrase({ category: message.category, recent: (await chrome.storage.local.get('sent')).sent || [], excludedKeys: chat.coordination?.textKeys || [] });
+  if (message.type === 'pickPhrase') return compose('phrase', s, null, message.category);
   if (message.type === 'compose') {
     await refreshChat();
     if (!chat.connected || chat.account !== s.account || chat.channel !== s.allowedChannel) throw new Error('Connect official Twitch chat first.');
-    const target = replyOpportunity(chat.messages, s.account);
-    return compose(message.mode === 'summary' ? 'summary' : 'reply', s, target);
+    return compose(message.mode === 'summary' ? 'summary' : 'reply', s);
   }
   if (message.type === 'send') return submit(message.text);
   throw new Error('Unknown operation.');
@@ -418,60 +453,22 @@ function requestAutoReply() {
   if (autoInFlight) return;
   autoInFlight = true;
   (async () => {
-    const epoch = operationEpoch;
-    const s = await settings();
-    prunePreparedDrafts(s);
+    const epoch = operationEpoch, s = await settings();
     if (!s.autoReply || s.paused || !chat.connected || chat.account !== s.account || chat.channel !== s.allowedChannel) return;
     const held = sendHoldReason(s); if (held) { setActivity('waiting', held); return; }
-    if (chat.coordination?.available === false || chat.coordination?.paused) { setActivity('waiting', chat.coordination.reason || 'Central host is holding automatic chat.'); return; }
-    const watchReason = await watchSendGate(s, true);
-    if (watchReason) { setActivity('waiting', watchReason); return; }
-    const handled = (await chrome.storage.local.get('handled')).handled || [];
-    let target = replyOpportunity(humanMessages(chat.messages, s.account, chat.coordination?.accounts || []), s.account);
-    if (target && (chat.coordination?.accounts || []).includes(target.author.toLowerCase())) target = null;
-    let key = target?.id ? `${s.account}:${s.allowedChannel}:${target.id}` : '';
-    if (!key || handled.includes(key)) target = null;
-    const recent = (await chrome.storage.local.get('sent')).sent || [];
-    let participation = null;
-    if (!target && s.chatMode === 'participate') {
-      const participationReason = await participationGate(s);
-      if (participationReason) { setActivity('waiting', participationReason); return; }
-      const attempts = (await chrome.storage.local.get('participationAttempts')).participationAttempts || [];
-      participation = planParticipation({ messages: chat.messages, account: s.account, channel: s.allowedChannel, streamContext: chat.streamContext, recent, attempts, coordination: chat.coordination });
-      if (!participation.kind) { setActivity('waiting', participation.reason || 'Waiting for a useful conversation opportunity.'); return; }
-      target = participation.target || null;
-      key = participation.key;
+    if (chat.coordination?.available === false || chat.coordination?.paused || messageDirector?.ready !== true) {
+      setActivity('waiting', messageDirector?.reason || 'Central message authority is holding automatic chat.'); return;
     }
-    if (!target && !participation) { setActivity('waiting', 'Waiting for a fresh direct mention.'); return; }
-    const reason = sendGate({ channel: chat.channel, allowedChannel: s.allowedChannel, login: chat.account, expectedLogin: s.account, text: 'preview', recent });
-    if (reason) { setActivity('waiting', reason); return; }
-    // Consume targeted generation once. Only a proven no-Twitch transient host
-    // hold releases this target; its prepared draft survives until original expiry.
-    if (target) {
-      const targetKey = `${s.account}:${s.allowedChannel}:${target.id}`;
-      if (handled.includes(targetKey)) return;
-      await chrome.storage.local.set({ handled: [...handled.slice(-119), targetKey] });
-    }
-    setActivity('generating', target ? `Preparing a reply to @${target.author}.` : participation.reason);
-    const result = target ? preparedReply(s, target) || await compose('reply', s, target) : participation;
-    if (target && result.text && epoch === operationEpoch) rememberPreparedReply(s, target, result);
-    if (!result.text) setActivity('no_match', result.reason || 'No useful contribution for this conversation.');
+    const plan = directorOffer(messageDirector.plan, { account: s.account, channel: s.allowedChannel,
+      binding: directorBinding(controlBridge.binding(), s.revision), authorityEpoch: messageDirector.authorityEpoch });
+    if (!plan || plan.source !== 'automatic') { setActivity('waiting', messageDirector.reason || 'Waiting for a central message command.'); return; }
     await locked(async () => {
-      const latest = await settings();
-      if (epoch !== operationEpoch || latest.revision !== s.revision || latest.paused || !latest.autoReply || (target && Date.now() - target.at > 45_000)) return;
-      if (result.text) {
-        const outcome = await submit(result.text, target, result.category, participation);
-        const stillCurrent = await settings();
-        const fresh = target && target.at <= Date.now() && Date.now() - target.at <= 45_000;
-        if (fresh && outcome?.suppressed === true && outcome.submitted === false && outcome.retryable === true
-          && epoch === operationEpoch && stillCurrent.revision === s.revision && !stillCurrent.paused) {
-          const targetKey = `${s.account}:${s.allowedChannel}:${target.id}`;
-          const currentHandled = (await chrome.storage.local.get('handled')).handled || [];
-          await chrome.storage.local.set({ handled: currentHandled.filter(x => x !== targetKey) });
-        } else if (target) preparedDrafts.delete(draftKey(s, target));
-      }
+      const current = await settings();
+      if (epoch !== operationEpoch || current.revision !== s.revision || current.paused || !current.autoReply) return;
+      await submit(plan.text, undefined, plan.category, plan);
     });
-  })().catch(e => { preparedDrafts.clear(); setActivity('error', e.message); return chrome.storage.local.set({ lastError: { at: Date.now(), message: e.message } }); }).finally(() => { autoInFlight = false; });
+  })().catch(error => { messageDirector = null; setActivity('error', error.message);
+    return chrome.storage.local.set({ lastError: { at: Date.now(), message: error.message } }); }).finally(() => { autoInFlight = false; });
 }
 
 function requestRecovery() {
@@ -506,7 +503,7 @@ chrome.tabs?.onRemoved?.addListener(tabId => { void watch.handleTabRemoved(tabId
 async function pauseLocal(expectedGeneration) {
   const epoch = ++operationEpoch;
   const current = () => epoch === operationEpoch && (!expectedGeneration || controlBridge?.intent?.generation === expectedGeneration);
-  watchTransition = false; preparedDrafts.clear();
+  watchTransition = false; messageDirector = null;
   await watch.stop('Companion is paused.');
   if (!current()) return;
   await drops.stop('Companion is paused.');
@@ -634,4 +631,7 @@ controlBridge = new LocalControlBridge({ transport: input => helper('/api/contro
     else operationEpoch++;
   } });
 controlBridge.start();
-void controlBridge.poll();
+void controlBridge.poll().then(async () => {
+  const current = await settings();
+  if (current.account && current.pairingToken) await importBrowser(current);
+}).catch(error => { setActivity('waiting', error.message); });

@@ -89,6 +89,7 @@ test('expired commands do not execute and polling survives a temporary outage', 
 test('the real paired helper accepts bridge state, executes one fenced send and retains the result after a lost response', async t => {
   let sends = 0, connected = true;
   const twitch = { status: () => ({ account: 'companion_test', authorized: true, connected, channel: 'friend_channel', messages: [], sent: [] }),
+    coordinator: { currentPlan: (id, binding) => id === 'reviewed-central-plan' ? { planId: id, authorityEpoch: 'central-authority', source: 'manual', text: 'one reviewed message', binding } : null },
     disconnect() { connected = false; }, async send(input) { sends++; return { delivery: 'confirmed', text: input.text, messageId: 'provider-1' }; } };
   const config = { extensionId: 'extension-test', pairingToken: 'local-pairing-test-token' };
   const server = createHelper({ config, twitch, now: () => now }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -101,7 +102,7 @@ test('the real paired helper accepts bridge state, executes one fenced send and 
   let bridge, loseCompletion = true;
   bridge = new LocalControlBridge({ now: () => now, sessionId: 'real-browser', state: async () => ({ settings: { account: 'companion_test', pairingToken: config.pairingToken, allowedChannel: 'friend_channel' } }),
     transport: async input => { const result = await request('/api/control/bridge', input); if (input.completion && loseCompletion) { loseCompletion = false; throw Error('lost completion response'); } return result; },
-    execute: async (command, check) => { check(); const result = await request('/api/twitch/send', { account: 'companion_test', channel: 'friend_channel', text: command.params.text, ...bridge.binding(), controlCommandId: command.id });
+    execute: async (command, check) => { check(); const result = await request('/api/twitch/send', { account: 'companion_test', channel: 'friend_channel', text: command.params.text, ...bridge.binding(), controlCommandId: command.id, settingsRevision: 0, planId: 'reviewed-central-plan', authorityEpoch: 'central-authority', binding: { generation: bridge.binding().controlGeneration, sessionId: bridge.binding().controlSessionId, settingsRevision: 0 } });
       return { ok: result.delivery === 'confirmed', text: result.text, reason: 'Twitch confirmed the message.' }; } });
   t.after(async () => { bridge.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   await bridge.poll();

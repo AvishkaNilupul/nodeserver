@@ -1,3 +1,5 @@
+import { humanMessages, exchangeContext } from './chat-context.js';
+export { humanMessages, exchangeContext } from './chat-context.js';
 import { validateReply } from './core.js';
 import { localReply, normalizeStreamContext } from './replies.js';
 import { distinctPhrase, messageKey, phraseSample } from './message-policy.js';
@@ -16,24 +18,6 @@ const login = value => typeof value === 'string' ? value.toLowerCase() : '';
 const consumed = attempt => !(attempt.delivery === 'cancelled' && attempt.submitted === false);
 const submitted = attempt => attempt.submitted === true
   || ['confirmed', 'rejected', 'unknown'].includes(attempt.delivery);
-
-export function humanMessages(messages, account, companions = []) {
-  const excluded = new Set([login(account), ...companions.map(login)]);
-  return (Array.isArray(messages) ? messages : []).filter(message => {
-    const author = login(message?.author);
-    return LOGIN.test(author) && !excluded.has(author) && !KNOWN_BOTS.has(author) && !author.endsWith('bot')
-      && message.isBot !== true && message.bot !== true;
-  });
-}
-
-export function exchangeContext({ messages, account, channel, streamContext, accounts = [], now = Date.now() } = {}) {
-  const context = normalizeStreamContext(streamContext, channel, now);
-  if (!context?.isLive || !/^\d{1,128}$/.test(context.streamId)) return null;
-  const lastHumanAt = humanMessages(messages, account, accounts).reduce((last, message) =>
-    Number.isFinite(message.at) && message.at > 0 && message.at <= now
-      && (!message.channel || login(message.channel) === channel) ? Math.max(last, message.at) : last, 0);
-  return { streamId: context.streamId, checkedAt: context.checkedAt, lastHumanAt };
-}
 
 export function planExchange({ account, channel, streamContext, attempts = [], coordination = {}, now = Date.now() } = {}) {
   const context = normalizeStreamContext(streamContext, channel, now);

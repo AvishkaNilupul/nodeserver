@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { LocalControl } from '../lib/local-control.mjs';
+import { createHash } from 'node:crypto';
+import { messageKey } from '../extension/message-policy.js';
 
 const event = () => ({ handlers: [], addListener(fn) { this.handlers.push(fn); } });
 function storage() {
@@ -9,16 +11,51 @@ function storage() {
   return { data, async get(keys) { if (keys == null) return structuredClone(data); const out = {}; for (const k of Array.isArray(keys) ? keys : [keys]) if (k in data) out[k] = structuredClone(data[k]); return out; }, async set(value) { Object.assign(data, structuredClone(value)); }, async clear() { for (const key of Object.keys(data)) delete data[key]; }, async setAccessLevel() {} };
 }
 let sequence = 0;
-async function harness(t) {
+async function harness(t, { inactive = false } = {}) {
   const savedChrome = globalThis.chrome, savedFetch = globalThis.fetch;
   const local = storage(), session = storage(), calls = [];
   const chrome = { storage: { local, session }, tabs: { onUpdated: event(), onRemoved: event() }, runtime: { id: 'unit-test', onInstalled: event(), onStartup: event(), onMessage: event() }, sidePanel: { async setPanelBehavior() {} }, alarms: { onAlarm: event(), async create() {}, async clearAll() {} } };
   const chat = { connected: true, account: 'qumaris_2489', channel: 'test_channel', messages: [{ id: 'incoming', author: 'alice', text: '@qumaris_2489 hello', at: Date.now() }] };
-  let fetchOverride;
+  if (inactive) {
+    chat.connected = false;
+    local.data.settings = { schemaVersion: 8, revision: 3, account: 'qumaris_2489', allowedChannel: 'test_channel', pairingToken: 'local-test',
+      paused: true, autoReply: false, autoResume: false, chatMode: 'participate', replySource: 'local' };
+    local.data.sent = [{ account: 'qumaris_2489', channel: 'test_channel', at: Date.now() - 7_200_000, text: 'old uncertain text', delivery: 'unknown' }];
+    local.data.participationAttempts = [{ account: 'qumaris_2489', channel: 'test_channel', streamId: '987654321', kind: 'greeting',
+      key: 'participation:qumaris_2489:test_channel:987654321:greeting', at: Date.now() - 7_200_000, delivery: 'unknown', submitted: true }];
+    local.data.handled = ['qumaris_2489:test_channel:no-match'];
+  }
+  let fetchOverride, centralOffer = null, centralPaused = false, centralReady = true, planSequence = 0;
+  const control = new LocalControl({ twitch: { status: () => ({ ...chat, sent: local.data.sent || [] }),
+    disconnect() { chat.connected = false; chat.channel = ''; chat.messages = []; } } });
+  const makePlan = (body, value) => ({ planId: value.planId || `plan-${++planSequence}`, authorityEpoch: 'fixture-authority', clientId: 'primary',
+    account: local.data.settings.account, channel: local.data.settings.allowedChannel,
+    streamId: value.source === 'manual' ? '' : '987654321', kind: '', participationKey: '', opportunityKey: 'fixture-opportunity',
+    textKey: messageKey(value.text), exactKey: createHash('sha256').update(value.text).digest('hex'), category: 'greeting', source: 'automatic',
+    replyId: '', replyAuthor: '', replyAt: 0, bankRevision: 1, profileRevision: 1, notBefore: Date.now() - 1, expiresAt: Date.now() + 20000,
+    binding: { generation: body.controlGeneration, sessionId: body.controlSessionId, settingsRevision: body.settingsRevision }, ...value });
+  const director = (body, plan) => ({ protocol: 1, ready: centralReady && !centralPaused, reason: centralPaused ? 'Central coordination paused.' : '',
+    authorityEpoch: 'fixture-authority', bankRevision: 1, profile: { id: 'primary', revision: 1,
+      chatMode: local.data.settings.chatMode, replySource: local.data.settings.replySource }, ...(plan ? { plan } : {}) });
   globalThis.chrome = chrome;
   globalThis.fetch = async (url, options) => {
     calls.push({ url, body: JSON.parse(options.body) });
     const custom = await fetchOverride?.(url, options); if (custom) return custom;
+    const body = JSON.parse(options.body), json = value => ({ ok: true, json: async () => value });
+    if (url.endsWith('/api/control/bridge')) return json(control.bridge(body));
+    if (url.endsWith('/api/director/import')) return json({ ok: true, source: body.page.source, importId: body.page.importId,
+      page: body.page.page, digest: body.page.digest, nextPage: body.page.page + 1, complete: body.page.final });
+    if (url.endsWith('/api/director/preferences')) return json({ ok: true });
+    if (url.endsWith('/api/director/sync')) {
+      const value = typeof centralOffer === 'function' ? centralOffer(body) : centralOffer;
+      return json({ ok: true, director: director(body, value ? makePlan(body, value) : null) });
+    }
+    if (url.endsWith('/api/director/draft')) return json({ ok: true, director: director(body), draft: { text: body.mode === 'summary' ? '' : 'central draft',
+      ...(body.mode === 'summary' ? { summary: 'Central chat summary.' } : {}), category: body.category || 'greeting', reason: 'Central reviewed draft.' } });
+    if (url.endsWith('/api/director/manual')) { const plan = makePlan(body, { text: body.text, source: 'manual' }); return json({ ok: true, plan, director: director(body, plan) }); }
+    if (url.endsWith('/api/twitch/channel')) return json({ channel: body.channel, checkedAt: Date.now(), canReply: true,
+      streamContext: { channel: body.channel, streamId: '987654321', gameName: 'Minecraft', title: 'A stream', isLive: true, checkedAt: Date.now() } });
+    if (url.endsWith('/disconnect')) { chat.connected = false; chat.channel = ''; chat.messages = []; return json({ ok: true }); }
     if (url.endsWith('/status')) return { ok: true, json: async () => structuredClone(chat) };
     if (url.endsWith('/send')) return { ok: true, json: async () => ({ submitted: true, delivery: 'confirmed', messageId: 'api-id' }) };
     return { ok: true, json: async () => ({ ok: true }) };
@@ -27,9 +64,13 @@ async function harness(t) {
   t.after(() => { globalThis.chrome = savedChrome; globalThis.fetch = savedFetch; });
   const panel = { id: chrome.runtime.id, url: `chrome-extension://${chrome.runtime.id}/panel.html` };
   const send = (message, sender = panel) => new Promise(resolve => chrome.runtime.onMessage.handlers[0](message, sender, resolve));
-  await send({ type: 'saveSettings', settings: { account: 'qumaris_2489', allowedChannel: 'test_channel', pairingToken: 'local-test', paused: false } });
+  if (!inactive) await send({ type: 'saveSettings', settings: { account: 'qumaris_2489', allowedChannel: 'test_channel', pairingToken: 'local-test', paused: false } });
   const flush = async () => { for (let i = 0; i < 40; i++) await new Promise(resolve => setImmediate(resolve)); };
-  return { chrome, local, session, chat, calls, panel, send, flush, override: fn => { fetchOverride = fn; } };
+  await send({ type: 'getState' }); await flush();
+  return { chrome, local, session, chat, calls, panel, send, flush, control,
+    offer: value => { centralOffer = value && { planId: `automatic-${++planSequence}`, ...value }; },
+    central: values => { if ('paused' in values) centralPaused = values.paused; if ('ready' in values) centralReady = values.ready; },
+    override: fn => { fetchOverride = fn; } };
 }
 
 async function hostedHarness(t, { access = true, offline = false, windowId = 1 } = {}) {
@@ -42,7 +83,7 @@ async function hostedHarness(t, { access = true, offline = false, windowId = 1 }
   h.chrome.windows = { update: async (id, options) => { focused.push({ windowId: id, options }); } };
   h.chrome.scripting = { executeScript: async () => [{ frameId: 0, documentId: 'control-doc', result: { url: tab.url, hasVideo: true, currentTime: clock++, readyState: 4, paused: false } }] };
   const twitch = { status: () => ({ ...h.chat, authorized: true, sent: h.local.data.sent || [] }), disconnect() { h.chat.connected = false; h.chat.channel = ''; h.chat.messages = []; } };
-  const control = new LocalControl({ twitch });
+  const control = h.control; control.twitch = twitch;
   h.override(async (url, options) => {
     const body = JSON.parse(options.body);
     const json = value => ({ ok: true, json: async () => value });
@@ -244,13 +285,6 @@ test('Twitch pages cannot configure, read, or send; a full-page extension panel 
   assert.ok((await h.send({ type: 'getState' }, { ...h.panel, url: 'chrome-extension://unit-test/simple.html', tab: { id: 8 } })).settings);
 });
 
-test('local previews still work with no helper or Twitch account authorization', async t => {
-  const h = await harness(t);
-  await h.send({ type: 'saveSettings', settings: { ...h.local.data.settings, pairingToken: '' } });
-  h.override(() => { throw new Error('offline'); });
-  assert.ok((await h.send({ type: 'pickPhrase', category: 'greeting' })).text);
-  assert.equal((await h.send({ type: 'getState' })).settings.autoReply, false);
-});
 
 test('manual send preserves casual wording through the official API and enforces cooldown', async t => {
   const h = await harness(t);
@@ -262,40 +296,8 @@ test('manual send preserves casual wording through the official API and enforces
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
 });
 
-test('automatic replies answer direct mentions once through the official API', async t => {
-  const h = await harness(t);
-  await h.send({ type: 'getState' });
-  await h.send({ type: 'saveSettings', settings: { ...h.local.data.settings, autoReply: true } });
-  await h.send({ type: 'getState' }); await h.flush();
-  const calls = h.calls.filter(c => c.url.endsWith('/send'));
-  assert.equal(calls.length, 1); assert.equal(calls[0].body.replyTo, 'incoming');
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
-});
 
-test('unknown requests, unmentioned chat, future and stale messages cannot trigger automatic posts', async t => {
-  const h = await harness(t);
-  await h.send({ type: 'getState' });
-  await h.send({ type: 'saveSettings', settings: { ...h.local.data.settings, autoReply: true } });
-  for (const [index, fields] of [{ text: '@qumaris_2489 what game is this?' }, { text: 'hello everyone' }, { at: Date.now() - 46000 }, { at: Date.now() + 2000 }].entries()) {
-    h.chat.messages = [{ id: `message-${index}`, author: 'alice', text: '@qumaris_2489 hi', at: Date.now(), ...fields }];
-    await h.send({ type: 'getState' }); await h.flush();
-  }
-  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
-});
 
-test('Pause interrupts a slow model reply and clears the official chat connection', async t => {
-  const h = await harness(t); let finish;
-  await h.send({ type: 'getState' });
-  await h.send({ type: 'saveSettings', settings: { ...h.local.data.settings, replySource: 'ai', autoReply: true } });
-  h.override(url => url.endsWith('/api/compose') ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ text: 'hello' }) }); }) : null);
-  await h.send({ type: 'getState' }); await h.flush(); assert.ok(finish);
-  await h.send({ type: 'saveSettings', settings: { ...h.local.data.settings, paused: true } });
-  finish(); await h.flush();
-  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
-  assert.equal(h.local.data.settings.autoReply, false);
-  assert.equal((await h.send({ type: 'getState' })).chat.connected, false);
-});
 
 test('failed API submission consumes its budget and does not retry uncertain delivery', async t => {
   const h = await harness(t);
@@ -306,16 +308,6 @@ test('failed API submission consumes its budget and does not retry uncertain del
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
 });
 
-test('AI requests include the precise mention target and recent replies', async t => {
-  const h = await harness(t);
-  h.chat.messages.push({ id: 'unrelated', author: 'bob', text: 'something else', at: Date.now() });
-  await h.send({ type: 'saveSettings', settings: { ...h.local.data.settings, replySource: 'ai' } });
-  h.local.data.sent = [{ at: Date.now() - 300000, channel: 'test_channel', text: '[bot] hey', delivery: 'confirmed' }];
-  h.override(url => url.endsWith('/api/compose') ? { ok: true, json: async () => ({ text: 'hello' }) } : null);
-  await h.send({ type: 'compose', mode: 'reply' });
-  const request = h.calls.find(c => c.url.endsWith('/api/compose')).body;
-  assert.equal(request.target.id, 'incoming'); assert.equal(request.recentReplies[0].text, '[bot] hey');
-});
 
 test('away mode preserves intent on startup and reconnects without opening the panel', async t => {
   const h = await harness(t); await h.send({ type: 'getState' });
@@ -356,14 +348,6 @@ test('Pause bypasses a pending connection and cancels queued sends', async t => 
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
 });
 
-test('local catch-up works without a model provider and only quotes received chat', async t => {
-  const h = await harness(t);
-  const result = await h.send({ type: 'compose', mode: 'summary' });
-  assert.match(result.summary, /@alice: “@qumaris_2489 hello”/);
-  assert.equal(h.calls.filter(c => c.url.endsWith('/api/compose')).length, 0);
-  h.chat.messages = [];
-  assert.match((await h.send({ type: 'compose', mode: 'summary' })).summary, /No chat messages/);
-});
 
 test('changing app identity cannot leave automatic replies armed', async t => {
   const h = await harness(t); await h.send({ type: 'getState' });
@@ -426,6 +410,7 @@ async function exchangeReady(t) {
   const h = await harness(t); await tracked(h);
   const offer = { id: 'scheduled-turn', key: 'exchange:scheduled-turn', account: 'qumaris_2489', channel: 'test_channel',
     streamId: '987654321', text: '@other_companion a short chat break.', notBefore: Date.now() - 1, expiresAt: Date.now() + 20_000 };
+  h.offer({ ...offer, kind: 'exchange', participationKey: offer.key, exchangeId: offer.id, opportunityKey: offer.key, text: offer.text, planId: offer.id });
   h.chat.coordination = { available: true, paused: false, accounts: ['qumaris_2489', 'other_companion'], textKeys: [], topicStreams: [], replyIds: [], exchange: offer };
   h.local.data.participationAttempts = ['greeting', 'topic'].map(kind => ({ key: `old-${kind}`, kind,
     account: offer.account, channel: offer.channel, streamId: offer.streamId, at: Date.now() - 600_000, delivery: 'confirmed', submitted: true }));
@@ -449,43 +434,18 @@ test('a due exchange uses exact host text without AI or a fabricated Twitch repl
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
 });
 
-test('a later plain companion mention cannot hide an earlier human mention or trigger exchange AI', async t => {
-  const { h } = await exchangeReady(t);
-  h.chat.messages = [{ id: 'human-first', author: 'alice', text: '@qumaris_2489 hello', at: Date.now() - 1000 },
-    { id: 'companion-last', author: 'other_companion', text: '@qumaris_2489 hello', at: Date.now() - 1 }];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options) => url.endsWith('/api/compose')
-    ? (h.calls.push({ url, body: JSON.parse(options.body) }), { ok: true, json: async () => ({ text: 'hello there' }) })
-    : originalFetch(url, options);
-  await h.send({ type: 'getState' }); await h.flush();
-  const sends = h.calls.filter(c => c.url.endsWith('/send'));
-  assert.equal(sends.length, 1); assert.equal(sends[0].body.replyTo, 'human-first');
-  assert.equal(sends[0].body.exchangeId, undefined);
-  assert.equal(h.calls.find(c => c.url.endsWith('/api/compose')).body.target.id, 'human-first');
-  const context = h.calls.filter(c => c.url.endsWith('/status')).at(-1).body.observation.exchangeContext;
-  assert.equal(context.lastHumanAt, h.chat.messages[0].at);
-});
 
-test('fresh public conversation takes priority over a due exchange', async t => {
-  const { h } = await exchangeReady(t);
-  await h.send({ type: 'saveSettings', settings: { replySource: 'local' } });
-  h.chat.messages = [{ id: 'human-public', author: 'alice', text: 'what game is this?', at: Date.now() - 1 }];
-  await h.send({ type: 'getState' }); await h.flush();
-  const sends = h.calls.filter(c => c.url.endsWith('/send'));
-  assert.equal(sends.length, 1); assert.equal(sends[0].body.kind, 'conversation');
-  assert.equal(sends[0].body.replyTo, 'human-public');
-});
 
-test('expired offers, paused host, mention-only mode and pending participation spacing hold exchanges', async t => {
+test('expired offers, paused host, mention-only mode and incomplete authority hold exchanges', async t => {
   const { h, offer } = await exchangeReady(t);
   const poll = async () => { await h.send({ type: 'getState' }); await h.flush(); };
-  offer.expiresAt = Date.now() - 1; await poll();
-  offer.expiresAt = Date.now() + 20_000; h.chat.coordination.paused = true; await poll();
+  offer.expiresAt = Date.now() - 1; h.offer({ ...offer, kind: 'exchange', participationKey: offer.key, exchangeId: offer.id }); await poll();
+  offer.expiresAt = Date.now() + 20_000; h.offer({ ...offer, kind: 'exchange', participationKey: offer.key, exchangeId: offer.id }); h.chat.coordination.paused = true; await poll();
   h.chat.coordination.paused = false;
   await h.send({ type: 'saveSettings', settings: { chatMode: 'mentions' } }); await poll();
-  assert.equal(h.calls.filter(c => c.url.endsWith('/status')).at(-1).body.observation.exchangeContext, null);
+  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
   await h.send({ type: 'saveSettings', settings: { chatMode: 'participate' } });
-  h.local.data.participationAttempts.push({ ...h.local.data.participationAttempts[0], kind: 'conversation', key: 'unresolved', at: Date.now() - 1, delivery: 'pending', submitted: false });
+  h.central({ ready: false });
   await poll();
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
 });
@@ -494,7 +454,7 @@ test('exchange text changes during final refresh cancel the prepared line', asyn
   const { h, offer } = await exchangeReady(t); let polls = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    if (url.endsWith('/status') && ++polls === 2) offer.text = '@other_companion a changed line.';
+    if (url.endsWith('/api/director/sync') && ++polls === 2) h.offer({ ...offer, kind: 'exchange', participationKey: offer.key, exchangeId: offer.id, text: '@other_companion a changed line.' });
     return originalFetch(url, options);
   };
   await h.send({ type: 'getState' }); await h.flush();
@@ -600,6 +560,7 @@ test('paused player suppresses automatic sends until playback advances again', a
   const h = await harness(t); await tracked(h);
   await h.send({ type: 'saveSettings', settings: { autoReply: true } });
   h.local.data.watchSession.status = 'paused'; h.local.data.watchSession.checkedAt = Date.now();
+  h.offer({ text: 'central reply', replyId: 'paused-mention', replyAuthor: 'alice', replyAt: Date.now() });
   h.chat.messages = [{ id: 'paused-mention', author: 'alice', text: '@qumaris_2489 hello', at: Date.now() }];
   await h.send({ type: 'getState' }); await h.flush();
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
@@ -699,15 +660,16 @@ test('Pause before helper submission records a cancelled attempt rather than unc
   const sending = h.send({ type: 'send', text: 'hello' }); await h.flush();
   assert.ok(release, 'the local intent is waiting to persist');
   await h.send({ type: 'pause' });
-  release(); assert.match((await sending).error, /Setup changed/); await h.flush();
+  release(); assert.match((await sending).error, /Setup changed|Central message cancelled/); await h.flush();
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
   assert.equal(h.local.data.sent[0].delivery, 'cancelled');
-  assert.match(h.local.data.sent[0].reason, /Setup changed/);
+  assert.match(h.local.data.sent[0].reason, /Setup changed|Central message cancelled/);
 });
 
 
 test('participation greets automatically without incoming chat and persists its intent', async t => {
   const h = await harness(t); await tracked(h);
+  h.offer({ text: 'central greeting', kind: 'greeting', participationKey: 'participation:qumaris_2489:test_channel:987654321:greeting' });
   await h.send({ type: 'saveSettings', settings: { autoReply: true, chatMode: 'participate' } });
   await h.send({ type: 'getState' }); await h.flush();
   const sends = h.calls.filter(c => c.url.endsWith('/send'));
@@ -731,6 +693,7 @@ test('a shared suppression keeps the contribution retryable without consuming bu
     }
     return originalFetch(url, options);
   };
+  h.offer({ text: 'central greeting', kind: 'greeting', participationKey: 'participation:qumaris_2489:test_channel:987654321:greeting' });
   await h.send({ type: 'saveSettings', settings: { autoReply: true, chatMode: 'participate' } });
   await h.send({ type: 'getState' }); await h.flush();
   assert.equal(h.calls.filter(x => x.url.endsWith('/send')).length, 1);
@@ -755,6 +718,7 @@ test('a registered companion mention does not trigger automatic reply generation
 test('central host outage holds generation and forwards fresh playback without consuming send budget', async t => {
   const h = await harness(t); await tracked(h);
   h.chat.coordination = { available: false, reason: 'Central host is unavailable; waiting.', accounts: [], textKeys: [], topicStreams: [], replyIds: [] };
+  h.offer({ text: 'central greeting', kind: 'greeting', participationKey: 'participation:qumaris_2489:test_channel:987654321:greeting' });
   await h.send({ type: 'saveSettings', settings: { autoReply: true, chatMode: 'participate' } });
   await h.send({ type: 'getState' }); await h.flush();
   assert.equal(h.calls.filter(x => x.url.endsWith('/send') || x.url.endsWith('/compose')).length, 0);
@@ -767,83 +731,19 @@ test('central host outage holds generation and forwards fresh playback without c
   assert.equal(h.calls.filter(x => x.url.endsWith('/send')).length, 1);
 });
 
-test('a transient central hold retries the same fresh target once using its already prepared AI draft', async t => {
-  const h = await harness(t); let generations = 0, submissions = 0;
-  h.override(url => {
-    if (url.endsWith('/compose')) { generations++; return { ok: true, json: async () => ({ text: 'prepared reply for this target', category: 'greeting' }) }; }
-    if (url.endsWith('/send')) {
-      submissions++; return { ok: true, json: async () => submissions === 1
-        ? { delivery: 'cancelled', suppressed: true, submitted: false, code: 'busy', retryable: true, reason: 'Another companion has this turn.' }
-        : { delivery: 'confirmed', submitted: true, messageId: 'one-live-reply' } };
-    }
-  });
-  await h.send({ type: 'getState' });
-  await h.send({ type: 'saveSettings', settings: { replySource: 'ai', autoReply: true } });
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(submissions, 1); assert.equal(generations, 1); assert.equal(h.local.data.sent.length, 0);
-  assert.equal(h.local.data.handled.includes('qumaris_2489:test_channel:incoming'), false);
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(submissions, 2); assert.equal(generations, 1);
-  const attempts = h.calls.filter(x => x.url.endsWith('/send'));
-  assert.equal(attempts[0].body.text, attempts[1].body.text); assert.equal(attempts[1].body.replyTo, 'incoming');
-  assert.equal(h.local.data.sent.filter(x => x.delivery === 'confirmed').length, 1);
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(submissions, 2);
-});
 
-test('permanent shared duplicate suppression keeps the fresh target handled', async t => {
-  const h = await harness(t); let generations = 0, submissions = 0;
-  h.override(url => {
-    if (url.endsWith('/compose')) { generations++; return { ok: true, json: async () => ({ text: 'already covered reply', category: 'greeting' }) }; }
-    if (url.endsWith('/send')) { submissions++; return { ok: true, json: async () => ({ delivery: 'cancelled', submitted: false, suppressed: true, retryable: false, code: 'duplicate', reason: 'Already covered.' }) }; }
-  });
-  await h.send({ type: 'getState' }); await h.send({ type: 'saveSettings', settings: { replySource: 'ai', autoReply: true } });
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(h.local.data.handled.includes('qumaris_2489:test_channel:incoming'), true);
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(generations, 1); assert.equal(submissions, 1); assert.equal(h.local.data.sent.length, 0);
-});
 
-test('unknown provider outcome never releases a handled target or reuses its draft for retry', async t => {
-  const h = await harness(t); let generations = 0, submissions = 0;
-  h.override(url => {
-    if (url.endsWith('/compose')) { generations++; return { ok: true, json: async () => ({ text: 'one uncertain reply', category: 'greeting' }) }; }
-    if (url.endsWith('/send')) { submissions++; return { ok: true, json: async () => ({ delivery: 'unknown', submitted: false, reason: 'Provider result unavailable.' }) }; }
-  });
-  await h.send({ type: 'getState' }); await h.send({ type: 'saveSettings', settings: { replySource: 'ai', autoReply: true } });
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(h.local.data.sent[0].delivery, 'unknown');
-  h.local.data.sent = []; // Even without the global cooldown, uncertainty stays consumed.
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(h.local.data.handled.includes('qumaris_2489:test_channel:incoming'), true);
-  assert.equal(generations, 1); assert.equal(submissions, 1);
-});
 
-test('a settings revision invalidates a held prepared draft before the fresh target retries', async t => {
-  const h = await harness(t); let generations = 0, submissions = 0;
-  h.override(url => {
-    if (url.endsWith('/compose')) { generations++; return { ok: true, json: async () => ({ text: 'AI draft that must not survive settings change', category: 'greeting' }) }; }
-    if (url.endsWith('/send')) { submissions++; return { ok: true, json: async () => submissions === 1
-      ? { delivery: 'cancelled', suppressed: true, submitted: false, retryable: true, code: 'turn_wait', reason: 'Wait for turn.' }
-      : { delivery: 'confirmed', submitted: true, messageId: 'new-local-reply' } }; }
-  });
-  await h.send({ type: 'getState' }); await h.send({ type: 'saveSettings', settings: { replySource: 'ai', autoReply: true } });
-  await h.send({ type: 'getState' }); await h.flush();
-  await h.send({ type: 'saveSettings', settings: { replySource: 'local' } });
-  await h.send({ type: 'getState' }); await h.flush();
-  const attempts = h.calls.filter(x => x.url.endsWith('/send'));
-  assert.equal(generations, 1); assert.equal(submissions, 2);
-  assert.notEqual(attempts[1].body.text, attempts[0].body.text);
-  assert.equal(h.local.data.sent.at(-1).delivery, 'confirmed');
-});
 
 test('participation cannot send without playback tracking or while the player is paused', async t => {
   const h = await harness(t); h.chat.messages = []; await h.send({ type: 'getState' });
+  h.offer({ text: 'central greeting', kind: 'greeting', participationKey: 'participation:qumaris_2489:test_channel:987654321:greeting' });
   await h.send({ type: 'saveSettings', settings: { autoReply: true, chatMode: 'participate' } });
   await h.send({ type: 'getState' }); await h.flush();
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
   assert.match((await h.send({ type: 'getState' })).activity.reason, /Watch on Twitch/);
-  await tracked(h); h.local.data.watchSession.status = 'paused'; h.local.data.watchSession.checkedAt = Date.now();
+  h.offer(null); await tracked(h); h.local.data.watchSession.status = 'paused'; h.local.data.watchSession.checkedAt = Date.now();
+  h.offer({ text: 'central greeting', kind: 'greeting', participationKey: 'participation:qumaris_2489:test_channel:987654321:greeting' });
   await h.send({ type: 'getState' }); await h.flush();
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
 });
@@ -857,6 +757,7 @@ test('Pause cancels a greeting while its durable intent is being saved', async t
     }
     return originalSet(value);
   };
+  h.offer({ text: 'central greeting', kind: 'greeting', participationKey: 'participation:qumaris_2489:test_channel:987654321:greeting' });
   await h.send({ type: 'saveSettings', settings: { autoReply: true, chatMode: 'participate' } });
   await h.send({ type: 'getState' }); await h.flush(); assert.ok(release);
   await h.send({ type: 'pause' }); release(); await h.flush();
@@ -868,6 +769,7 @@ test('Pause cancels a greeting while its durable intent is being saved', async t
 
 test('an uncertain greeting is not repeated after startup and the hourly history clears', async t => {
   const h = await harness(t); await tracked(h);
+  h.offer({ text: 'central greeting', kind: 'greeting', participationKey: 'participation:qumaris_2489:test_channel:987654321:greeting' });
   await h.send({ type: 'saveSettings', settings: { autoReply: true, autoResume: true, chatMode: 'participate' } });
   await h.send({ type: 'getState' }); await h.flush();
   const entry = h.local.data.participationAttempts[0];
@@ -889,24 +791,6 @@ test('automatic channel navigation resets participation to mention-only', async 
   assert.equal(h.calls.filter(c => c.url.endsWith('/send') && c.body.channel === 'next_channel').length, 0);
 });
 
-test('a newly received direct mention takes priority over the prepared greeting', async t => {
-  const h = await harness(t); await tracked(h); let polls = 0;
-  await h.send({ type: 'saveSettings', settings: { autoReply: true, chatMode: 'participate' } });
-  h.override(url => {
-    if (url.endsWith('/status')) {
-      polls++;
-      if (polls >= 2) h.chat.messages = [{ id: 'fresh-priority', author: 'alice', text: '@qumaris_2489 hello', at: Date.now() }];
-    }
-    return null;
-  });
-  await h.send({ type: 'getState' }); await h.flush();
-  assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
-  await h.send({ type: 'getState' }); await h.flush();
-  const sends = h.calls.filter(c => c.url.endsWith('/send'));
-  assert.equal(sends.length, 1); assert.equal(sends[0].body.replyTo, 'fresh-priority');
-  assert.equal(sends[0].body.kind, undefined);
-});
-
 
 test('simple start cannot arm after another control changes the setup revision', async t => {
   const h = await harness(t);
@@ -916,4 +800,87 @@ test('simple start cannot arm after another control changes the setup revision',
   const result = await h.send({ type: 'saveSettings', expectedRevision: revision, settings: { chatMode: 'participate', autoReply: true, autoResume: true } });
   assert.match(result.error, /Setup changed/);
   assert.equal(h.local.data.settings.autoReply, false);
+});
+
+// Message selection, target priority and no-match consumption now belong to the
+// host director suites. These checks exercise the browser's command boundary.
+test('a stopped disconnected worker imports old browser ledgers without connecting or arming', async t => {
+  const h = await harness(t, { inactive: true }); await h.flush();
+  const pages = h.calls.filter(x => x.url.endsWith('/api/director/import')).map(x => x.body.page);
+  assert.ok(pages.length > 0, 'Reload must import while inactive');
+  const records = pages.flatMap(x => x.records);
+  assert.ok(records.some(x => x.type === 'history' && x.text === 'old uncertain text'));
+  assert.ok(records.some(x => x.type === 'participation' && x.participationKey.endsWith(':greeting')));
+  assert.ok(records.some(x => x.type === 'handled' && x.key.endsWith(':no-match')));
+  assert.equal(h.local.data.directorImport.complete, true);
+  assert.equal(h.local.data.settings.paused, true); assert.equal(h.local.data.settings.autoReply, false);
+  assert.equal(h.calls.some(x => x.url.endsWith('/connect') || x.url.endsWith('/send')), false);
+});
+
+test('an available central controller with no offer never invokes a local message planner', async t => {
+  const h = await harness(t); await tracked(h);
+  await h.send({ type: 'saveSettings', settings: { autoReply: true, chatMode: 'participate', replySource: 'ai' } });
+  h.chat.messages = [{ id: 'fresh-human', author: 'alice', text: '@qumaris_2489 hello', at: Date.now() }];
+  await h.send({ type: 'getState' }); await h.flush();
+  assert.ok(h.calls.some(x => x.url.endsWith('/api/director/sync')));
+  assert.equal(h.calls.some(x => x.url.endsWith('/send') || x.url.endsWith('/api/compose')), false);
+  assert.deepEqual(h.local.data.sent || [], []);
+});
+
+test('manual previews and summaries come from central draft routes without browser-echoed chat', async t => {
+  const h = await harness(t);
+  assert.equal((await h.send({ type: 'pickPhrase', category: 'greeting' })).text, 'central draft');
+  assert.equal((await h.send({ type: 'compose', mode: 'summary' })).summary, 'Central chat summary.');
+  const drafts = h.calls.filter(x => x.url.endsWith('/api/director/draft'));
+  assert.deepEqual(drafts.map(x => x.body.mode), ['phrase', 'summary']);
+  assert.ok(drafts.every(x => !('messages' in x.body) && !('target' in x.body) && !('recentReplies' in x.body)));
+  assert.equal(h.calls.some(x => x.url.endsWith('/send') || x.url.endsWith('/api/compose')), false);
+});
+
+test('controller outage holds manual phrase previews without a local fallback', async t => {
+  const h = await harness(t); h.override(() => { throw Error('controller offline'); });
+  const result = await h.send({ type: 'pickPhrase', category: 'greeting' });
+  assert.match(result.error, /offline/); assert.equal(result.text, undefined);
+  assert.equal(h.calls.some(x => x.url.endsWith('/send')), false);
+});
+
+test('an exact central mention offer reaches the helper with all plan bindings unchanged', async t => {
+  const h = await harness(t); await tracked(h);
+  const at = Date.now(); h.chat.messages = [{ id: 'central-target', author: 'alice', text: '@qumaris_2489 hello', at }];
+  h.offer({ text: 'host-selected wording', replyId: 'central-target', replyAuthor: 'alice', replyAt: at });
+  await h.send({ type: 'saveSettings', settings: { autoReply: true } }); await h.send({ type: 'getState' }); await h.flush();
+  const sends = h.calls.filter(x => x.url.endsWith('/send'));
+  assert.equal(sends.length, 1); assert.equal(sends[0].body.text, 'host-selected wording');
+  assert.equal(sends[0].body.replyTo, 'central-target'); assert.equal(sends[0].body.replyAuthor, 'alice');
+  assert.equal(sends[0].body.authorityEpoch, 'fixture-authority'); assert.ok(sends[0].body.planId);
+  assert.equal(sends[0].body.binding.generation, sends[0].body.controlGeneration);
+  assert.equal(sends[0].body.binding.sessionId, sends[0].body.controlSessionId);
+  assert.equal(sends[0].body.binding.settingsRevision, sends[0].body.settingsRevision);
+  assert.equal(h.calls.some(x => x.url.endsWith('/api/compose')), false);
+});
+
+test('a central offer with altered exact-text hash is rejected before the helper send boundary', async t => {
+  const h = await harness(t); await tracked(h);
+  h.offer({ text: 'altered wording', exactKey: 'f'.repeat(64) });
+  await h.send({ type: 'saveSettings', settings: { autoReply: true } }); await h.send({ type: 'getState' }); await h.flush();
+  assert.equal(h.calls.some(x => x.url.endsWith('/send')), false);
+  assert.equal((h.local.data.sent || []).length, 0);
+});
+
+test('Pause fences a slow central decision without generating or sending locally', async t => {
+  const h = await harness(t); await tracked(h); let release;
+  await h.send({ type: 'saveSettings', settings: { autoReply: true } });
+  h.override((url, options) => {
+    if (!url.endsWith('/api/director/sync')) return null;
+    const body = JSON.parse(options.body);
+    return new Promise(resolve => { release = () => resolve({ ok: true, json: async () => ({ ok: true, director: {
+      protocol: 1, ready: true, authorityEpoch: 'fixture-authority', bankRevision: 1,
+      profile: { id: 'primary', chatMode: 'mentions', replySource: 'local', revision: 1 },
+      plan: { text: 'late decision', binding: { generation: body.controlGeneration, sessionId: body.controlSessionId, settingsRevision: body.settingsRevision } }
+    } }) }); });
+  });
+  const pending = h.send({ type: 'getState' }); await h.flush(); assert.ok(release);
+  await h.send({ type: 'pause' }); release(); await pending; await h.flush();
+  assert.equal(h.local.data.settings.paused, true); assert.equal(h.local.data.settings.autoReply, false);
+  assert.equal(h.calls.some(x => x.url.endsWith('/send') || x.url.endsWith('/api/compose')), false);
 });

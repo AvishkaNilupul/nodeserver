@@ -75,6 +75,19 @@ async function helper(t, config, fake) {
   t.after(close);
   const port = server.address().port;
   const request = (path, body = {}, headers = {}, method = 'POST') => new Promise((resolve, reject) => {
+    // Provision an explicit central manual command in this transport fixture;
+    // production rejects these operations without their paired plan identity.
+    if (path === '/api/twitch/connect' || path === '/api/twitch/send') {
+      body = { ...body, controlGeneration: body.controlGeneration || server.control.generation,
+        controlSessionId: body.controlSessionId || server.control.sessionId };
+      if (path === '/api/twitch/send') {
+        const binding = { generation: body.controlGeneration, sessionId: body.controlSessionId, settingsRevision: 0 };
+        const plan = { planId: `isolation-plan-${fake.snapshot().history.length}`, authorityEpoch: 'isolation-authority', source: 'manual',
+          account: body.account, channel: body.channel, text: body.text, binding };
+        fake.twitch.coordinator = { currentPlan: id => id === plan.planId ? plan : null };
+        body = { ...body, settingsRevision: 0, planId: plan.planId, authorityEpoch: plan.authorityEpoch, binding };
+      }
+    }
     const req = http.request({ hostname: '127.0.0.1', port, path, method, agent: false,
       headers: { Host: '127.0.0.1:8796', Origin: `chrome-extension://${config.extensionId}`,
         Authorization: `Bearer ${config.pairingToken}`, 'Content-Type': 'application/json', ...headers } }, res => {
@@ -91,6 +104,8 @@ async function helper(t, config, fake) {
     req.on('error', reject);
     req.end(JSON.stringify(body));
   });
+  await request('/api/control/bridge', { sessionId: `isolation-${config.extensionId}`, controlGeneration: server.control.generation,
+    state: { settings: { revision: 0, paused: false, autoReply: false } } });
   return { server, port, request, close };
 }
 
@@ -136,7 +151,8 @@ test('disconnecting, closing and restarting the second helper preserves the firs
 test('each helper rejects the other instance origin and pairing token before dispatch', async t => {
   const { fakes, helpers } = await pair(t);
   const paths = ['/api/twitch/status', '/api/twitch/connect', '/api/twitch/disconnect',
-    '/api/twitch/send', '/api/twitch/channel', '/api/twitch/authorize', '/api/twitch/authorization', '/api/compose'];
+    '/api/twitch/send', '/api/twitch/channel', '/api/twitch/authorize', '/api/twitch/authorization', '/api/compose',
+    '/api/director/import', '/api/director/sync', '/api/director/draft', '/api/director/manual', '/api/director/preferences'];
   for (let i = 0; i < helpers.length; i++) {
     const own = CONFIGS[i], other = CONFIGS[1 - i];
     const h = helpers[i];

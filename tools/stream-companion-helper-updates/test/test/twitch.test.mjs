@@ -1,3 +1,4 @@
+import { installDirectorFixture } from './director-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TwitchChat, reconnectUrl, chatScopes } from '../lib/twitch.mjs';
@@ -30,6 +31,7 @@ function harness(t, customFetch) {
       throw new Error('Unexpected test request');
     }
   });
+  installDirectorFixture(client);
   t.after(() => client.disconnect());
   const emit = async (socket, type, payload, extra = {}) => { socket.emit({ metadata: { message_type: type, message_timestamp: new Date(time).toISOString(), ...extra }, payload }); await client.chain; };
   const connect = async () => { await client.connect('companion_test', 'friend_channel'); const socket = Socket.all.at(-1); await emit(socket, 'session_welcome', { session: { id: 'session1', keepalive_timeout_seconds: 10 } }); return socket; };
@@ -58,7 +60,7 @@ test('a helper exchange binds the exact offer and posts the plain partner mentio
   const body = JSON.parse(h.calls.find(x => x.url.endsWith('/chat/messages')).options.body);
   assert.equal(body.message, h.offer.text); assert.match(body.message, /^@other_companion \S/);
   assert.equal(h.client.history.at(-1).text, body.message); assert.equal('reply_parent_message_id' in body, false);
-  assert.deepEqual(h.finishes, [['exchange-permit', 'confirmed']]);
+  assert.deepEqual(h.finishes.map(row => row.slice(0, 2)), [['exchange-permit', 'confirmed']]);
 });
 
 test('unsolicited, malformed, altered and reply-targeted exchange inputs never reserve or send', async t => {
@@ -110,7 +112,7 @@ test('an exchange expiring during begin is certified cancelled before Twitch is 
   const result = await h.client.send(h.input);
   assert.equal(result.suppressed, true); assert.equal(result.submitted, false); assert.equal(result.code, 'exchange_expired');
   assert.equal(h.calls.filter(x => x.url.endsWith('/chat/messages')).length, 0);
-  assert.deepEqual(h.finishes, [['exchange-permit', 'cancelled']]);
+  assert.deepEqual(h.finishes.map(row => row.slice(0, 2)), [['exchange-permit', 'cancelled']]);
 });
 
 test('a human arriving during exchange begin takes priority and cancels the unused permit', async t => {
@@ -118,7 +120,7 @@ test('a human arriving during exchange begin takes priority and cancels the unus
   const result = await h.client.send(h.input);
   assert.equal(result.suppressed, true); assert.equal(result.submitted, false); assert.equal(result.code, 'exchange_quiet');
   assert.equal(h.calls.filter(x => x.url.endsWith('/chat/messages')).length, 0);
-  assert.deepEqual(h.finishes, [['exchange-permit', 'cancelled']]);
+  assert.deepEqual(h.finishes.map(row => row.slice(0, 2)), [['exchange-permit', 'cancelled']]);
 });
 
 test('own, companion and known-bot traffic does not masquerade as fresh human activity at begin', async t => {
@@ -133,7 +135,7 @@ test('an uncertain exchange is retained as consumed and no second provider reque
   assert.equal(h.client.history.at(-1).delivery, 'unknown');
   await assert.rejects(h.client.send(h.input), /ten minutes|already submitted/);
   assert.equal(h.calls.filter(x => x.url.endsWith('/chat/messages')).length, 1);
-  assert.deepEqual(h.finishes, [['exchange-permit', 'unknown']]);
+  assert.deepEqual(h.finishes.map(row => row.slice(0, 2)), [['exchange-permit', 'unknown']]);
 });
 
 test('ordinary casual text is preserved and commands, links and multiline text are still rejected', () => {
@@ -162,10 +164,11 @@ test('known Twitch rejection releases shared reservation while uncertain deliver
   await h.connect();
   h.client.coordinator = { snapshot: () => ({ accounts: [] }), reserve: () => ({ ok: true, reservationId: 'reserved' }), finish: (...args) => finishes.push(args) };
   assert.equal((await h.client.send({ account: 'companion_test', channel: 'friend_channel', text: 'hello' })).delivery, 'rejected');
-  assert.deepEqual(finishes, [['reserved', 'rejected']]);
+  assert.deepEqual(finishes.map(row => row.slice(0, 2)), [['reserved', 'rejected']]);
   h.advance(180001); uncertain = true;
   await assert.rejects(h.client.send({ account: 'companion_test', channel: 'friend_channel', text: 'another greeting' }), /connection failed/);
-  assert.deepEqual(finishes.at(-1), ['reserved', 'unknown']);
+  assert.deepEqual(finishes.at(-1).slice(0, 2), ['reserved', 'unknown']);
+  assert.equal(finishes.at(-1)[2].at, h.client.history.at(-1).at);
 });
 
 test('a known companion cannot trigger an automatic reply loop', async t => {

@@ -1,7 +1,9 @@
 import { ChatSendHolds } from './chat-holds.mjs';
 import { mergeMessages, sendGate, validateReply } from '../extension/core.js';
 import { exchangeOffer } from '../extension/exchange.js';
-import { humanMessages } from '../extension/participation.js';
+import { humanMessages } from '../extension/chat-context.js';
+import { createHash } from 'node:crypto';
+import { messageKey } from '../extension/message-policy.js';
 
 export const chatScopes = ['user:read:chat', 'user:write:chat'];
 export const clipScope = 'clips:edit';
@@ -343,12 +345,16 @@ export class TwitchChat {
     await this.coordinator.refresh({ channel: this.channel || '', connected: this.connected, observation });
   }
 
-  async finishCoordination(reservationId, delivery) {
+  async finishCoordination(reservationId, delivery, attempt) {
     if (!reservationId) return;
     // Twitch delivery is already known independently of a host acknowledgement.
     // The remote adapter durably queues/replays this completion; a host outage
     // must never relabel a confirmed Twitch response as uncertain.
-    try { await this.coordinator?.finish(reservationId, delivery); } catch {}
+    try {
+      if (attempt) await this.coordinator?.finish(reservationId, delivery, { at: attempt.at,
+        messageId: attempt.messageId || '', reason: attempt.reason || '' });
+      else await this.coordinator?.finish(reservationId, delivery);
+    } catch {}
   }
 
   status() {
@@ -357,13 +363,19 @@ export class TwitchChat {
       ...(this.coordinator ? { coordination: this.coordinator.snapshot(this.channel || '') } : {}) };
   }
 
-  async send({ account, channel, text, replyTo = '', replyAuthor = '', category = '', participationKey = '', kind = '', streamId = '', exchangeId, beforeSubmit }) {
+  async send({ account, channel, text, replyTo = '', replyAuthor = '', category = '', participationKey = '', kind = '', streamId = '', exchangeId,
+    planId, authorityEpoch, binding, beforeSubmit }) {
     if (!this.connected || channel !== this.channel) throw new Error('Connect chat to the configured channel first.');
     const hold = this.sendHold(account, channel);
     if (hold.held) return { submitted: false, suppressed: true, delivery: 'cancelled', retryable: false, code: hold.code, reason: hold.reason, sendHold: hold };
     const holdRevision = this.sendHolds.revision(account, channel);
     const generation = this.generation;
     const message = validateReply(text);
+    const plan = this.coordinator?.currentPlan?.(planId, binding);
+    if (!plan || plan.authorityEpoch !== authorityEpoch || plan.text !== message || plan.account !== account || plan.channel !== channel
+      || plan.kind !== kind || plan.streamId !== streamId || plan.participationKey !== participationKey
+      || plan.replyId !== replyTo || plan.replyAuthor !== replyAuthor || plan.category !== category
+      || plan.exactKey !== createHash('sha256').update(message).digest('hex') || plan.textKey !== messageKey(message)) throw new Error('An exact current central message command is required.');
     await this.ensureIdentity(account);
     if (generation !== this.generation || !this.connected) throw new Error('Chat disconnected before submission.');
     const currentHold = this.sendHold(account, channel);
@@ -410,12 +422,13 @@ export class TwitchChat {
     }
     let reservation;
     try { reservation = await this.coordinator?.reserve({ account, channel, text: message, streamId, kind, replyTo,
-      ...(exchange ? { exchangeId } : {}),
+      ...(exchange ? { exchangeId } : {}), planId, authorityEpoch, binding,
       ...(replyTo ? { replyAt: this.messages.find(m => m.id === replyTo)?.at } : {}) }); }
     catch { return { submitted: false, suppressed: true, delivery: 'cancelled', code: 'unavailable', retryable: true, reason: 'Central host is unavailable; waiting before submitting a message.' }; }
     if (reservation && !reservation.ok) return { submitted: false, suppressed: true, delivery: 'cancelled',
       code: reservation.code, retryable: reservation.retryable === true, reason: reservation.reason };
-    const attempt = { at: this.now(), account, channel, text: message, delivery: 'pending', ...(reservation ? { coordinationId: reservation.reservationId } : {}), category: String(category).slice(0, 40), ...(replyTo ? { replyId: replyTo, replyTo: String(replyAuthor).slice(0, 30) } : {}), ...(participationKey ? { participationKey: String(participationKey).slice(0, 400), kind: String(kind).slice(0, 30), streamId: String(streamId).slice(0, 128), ...(exchange ? { exchangeId } : {}) } : {}) };
+    const attempt = { at: this.now(), account, channel, text: message, delivery: 'pending', planId, authorityEpoch,
+      ...(reservation ? { coordinationId: reservation.reservationId } : {}), category: String(category).slice(0, 40), ...(replyTo ? { replyId: replyTo, replyTo: String(replyAuthor).slice(0, 30) } : {}), ...(participationKey ? { participationKey: String(participationKey).slice(0, 400), kind: String(kind).slice(0, 30), streamId: String(streamId).slice(0, 128), ...(exchange ? { exchangeId } : {}) } : {}) };
     this.history = [...this.history.filter(x => x.at > this.now() - 3_600_000), attempt];
     await this.saveHistory(this.history);
     if (generation !== this.generation || !this.connected) {
@@ -425,7 +438,7 @@ export class TwitchChat {
     }
     if (reservation && this.coordinator?.begin) {
       let permission;
-      try { permission = await this.coordinator.begin(reservation.reservationId); }
+      try { permission = await this.coordinator.begin(reservation.reservationId, plan); }
       catch { permission = { ok: false, code: 'unavailable', retryable: true, reason: 'Central host is unavailable; waiting before submitting a message.' }; }
       if (!permission?.ok) {
         attempt.delivery = 'cancelled'; attempt.submitted = false;
@@ -456,6 +469,8 @@ export class TwitchChat {
     }
     try {
       await beforeSubmit?.();
+      const currentPlan = this.coordinator?.currentPlan?.(planId, binding);
+      if (!currentPlan || currentPlan.text !== message || currentPlan.exactKey !== plan.exactKey) throw new Error('The central message command expired or changed before submission.');
       const finalHold = this.sendHold(account, channel);
       if (finalHold.held) throw new Error(finalHold.reason);
     }
@@ -478,16 +493,16 @@ export class TwitchChat {
         await this.refreshCoordination().catch(() => {});
       }
       await this.saveHistory(this.history);
-      await this.finishCoordination(reservation?.reservationId, attempt.delivery);
+      await this.finishCoordination(reservation?.reservationId, attempt.delivery, attempt);
       return { submitted: attempt.delivery === 'confirmed', ...attempt, sendHold: this.sendHold(account, channel) };
     } catch (e) {
       if (attempt.delivery === 'rejected' && attempt.reason === 'followers_only_mode') {
-        await this.finishCoordination(reservation?.reservationId, 'rejected');
+        await this.finishCoordination(reservation?.reservationId, 'rejected', attempt);
         return { submitted: false, ...attempt, sendHold: this.sendHold(account, channel) };
       }
       attempt.delivery = 'unknown';
       await this.saveHistory(this.history);
-      await this.finishCoordination(reservation?.reservationId, 'unknown'); throw e;
+      await this.finishCoordination(reservation?.reservationId, 'unknown', attempt); throw e;
     }
   }
 }

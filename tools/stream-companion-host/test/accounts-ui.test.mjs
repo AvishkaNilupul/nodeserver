@@ -42,7 +42,7 @@ test('hostile public strings are rendered literally and hidden credentials never
   const state = { data, network: 'online', error: '', operations: {}, forms: {} };
   renderAccounts(v, state, { id: 'primary', now: at });
   assert.ok(visible(v).includes(hostile)); assert.ok(!visible(v).includes(data.csrfToken)); assert.ok(!visible(v).includes('should-never-render'));
-  assert.ok(visible(v).includes('Control request')); assert.ok(visible(v).includes('Delivery unconfirmed')); assert.ok(!visible(v).includes('Delivery confirmed'));
+  assert.ok(visible(v).includes('Control request')); assert.ok(!visible(v).includes('Delivery confirmed'));
 });
 
 test('chat, playback, bridge and playback permission remain independent checks', async () => {
@@ -193,7 +193,7 @@ test('invalid commands, unknown IDs, blank messages and unsafe channel URLs neve
   assert.equal(posts, 0);
 });
 
-test('delivery history is newest first for numeric or ISO times regardless of source ordering', () => {
+test('account helper polling never overwrites the shared director delivery history', () => {
   const records = [
     { at: at - 1000, text: 'newer numeric attempt', delivery: 'unknown' },
     { at: at - 9000, text: 'oldest attempt', delivery: 'rejected' },
@@ -201,10 +201,11 @@ test('delivery history is newest first for numeric or ISO times regardless of so
   ];
   for (const sent of [records, [...records].reverse()]) {
     const v = view(), data = snapshot({ instances: [instance({ sent })] });
+    v.nodes['delivery-history'].textContent = 'Retained central delivery record';
+    v.nodes['sent-count'].textContent = '1 central record';
     renderAccounts(v, { data, network: 'online', error: '', operations: {}, forms: {} }, { id: 'primary', now: at });
-    assert.match(v.nodes['delivery-history'].children[0].textContent, /newest ISO attempt/);
-    assert.match(v.nodes['delivery-history'].children[1].textContent, /newer numeric attempt/);
-    assert.match(v.nodes['delivery-history'].children[2].textContent, /oldest attempt/);
+    assert.equal(v.nodes['delivery-history'].textContent, 'Retained central delivery record');
+    assert.equal(v.nodes['sent-count'].textContent, '1 central record');
   }
   assert.equal(records[0].text, 'newer numeric attempt', 'rendering does not reorder the source snapshot');
 });

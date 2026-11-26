@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { messageKey } from '../extension/message-policy.js';
 import { LocalControl, commandInput } from '../lib/local-control.mjs';
 import { createHelper } from '../server.mjs';
 const START = 1800000000000, sessionId = 'worker-session-one';
@@ -26,11 +27,20 @@ async function harness(t, overrides = {}) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
   const request = (path, input = {}, extra = {}) => new Promise((resolve, reject) => {
+    if (path === '/api/twitch/send' && typeof input.text === 'string') {
+      const binding = { generation: input.controlGeneration, sessionId: input.controlSessionId, settingsRevision: 0 };
+      const plan = { planId: 'explicit-test-plan', authorityEpoch: 'test-authority', source: 'manual', account: input.account,
+        channel: input.channel, text: input.text, kind: '', streamId: '', category: '', participationKey: '', replyId: '', replyAuthor: '',
+        textKey: messageKey(input.text), exactKey: createHash('sha256').update(input.text).digest('hex'), binding };
+      twitch.coordinator ||= {};
+      twitch.coordinator.currentPlan = id => id === plan.planId ? plan : null;
+      input = { ...input, settingsRevision: 0, planId: plan.planId, authorityEpoch: plan.authorityEpoch, binding };
+    }
     const req = http.request({ hostname: '127.0.0.1', port: server.address().port, path, method: 'POST', headers: { Host: '127.0.0.1:8796', Origin: 'chrome-extension://unit-test', Authorization: 'Bearer PAIR_PRIVATE', 'Content-Type': 'application/json', ...extra } }, res => {
       let body = ''; res.on('data', chunk => body += chunk); res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
     }); req.on('error', reject); req.end(JSON.stringify(input));
   });
-  const bridge = async extra => (await request('/api/control/bridge', { sessionId, controlGeneration: server.control.generation, ...extra })).body;
+  const bridge = async extra => (await request('/api/control/bridge', { sessionId, controlGeneration: server.control.generation, state: { settings: { revision: 0, allowedChannel: 'sample_channel', paused: false, autoReply: false } }, ...extra })).body;
   await bridge();
   return { server, twitch, request, bridge, calls, advance: ms => time += ms };
 }
@@ -199,7 +209,7 @@ test('hosted send ID binds exact text and expires at the final provider boundary
   twitch.api = async path => { if (path.startsWith('shared_chat/')) return { data: [] }; providerCalls++; return { data: [{ is_sent: true, message_id: 'never' }] }; };
   twitch.coordinator = { reserve: async () => ({ ok: true, reservationId: 'local-manual-permit' }),
     begin: async () => { time += 90001; h.advance(90001); return { ok: true }; }, finish: (...args) => finishes.push(args) };
-  h = await harness(t, { status: () => twitch.status(), disconnect: () => twitch.disconnect(), send: input => twitch.send(input) });
+  h = await harness(t, { status: () => twitch.status(), disconnect: () => twitch.disconnect(), send: input => twitch.send(input), coordinator: twitch.coordinator });
   // status() needs only the regular coordination snapshot, with no raw host data.
   twitch.coordinator.snapshot = () => ({ available: true, accounts: ['sample_account'] });
   const queued = await h.request('/api/control/command', { requestId: randomUUID(), action: 'send', params: { text: 'exact reviewed text' } });

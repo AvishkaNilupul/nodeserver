@@ -14,10 +14,13 @@ const STATIC = new Map([
   ["/accounts/primary", "text/html"], ["/accounts/test", "text/html"], ["/accounts/third", "text/html"],
   ["/app.js", "text/javascript"], ["/accounts.js", "text/javascript"],
   ["/controller-path.js", "text/javascript"],
+  ["/messages", "text/html"], ["/messages.js", "text/javascript"], ["/messages.css", "text/css"],
   ["/clips.js", "text/javascript"], ["/clips.css", "text/css"],
   ["/style.css", "text/css"], ["/accounts.css", "text/css"],
 ]);
-const DATA = new Set(["/api/status", "/api/accounts", "/api/channels", "/api/clips"]);
+const DATA = new Set(["/api/status", "/api/accounts", "/api/channels", "/api/clips", "/api/director"]);
+const DIRECTOR_HISTORY = /^\/api\/director\/history\/(all|primary|test|third)\/([0-9]{1,16})$/;
+const DIRECTOR_MUTATIONS = new Set(["/api/director/bank", "/api/director/cancel"]);
 const CHANNEL_LOOKUP = /^\/api\/channels\/[a-z0-9_]{3,25}$/;
 const COMMAND = /^\/api\/accounts\/(primary|test|third)\/command$/;
 const BROWSER = /^\/api\/accounts\/(primary|test|third)\/browser$/;
@@ -62,6 +65,43 @@ function validClipAction(path, body) {
   if (path.endsWith("/authorization")) return exact(body, ["accountId", "action"])
     && ["primary", "test", "third"].includes(body.accountId) && ["start", "poll"].includes(body.action);
   return false;
+}
+
+function validDirectorAction(path, body) {
+  const id = value => typeof value === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(value);
+  if (path === "/api/director/cancel") return exact(body, ["requestId", "planId"])
+    && id(body.requestId) && id(body.planId);
+  if (!exact(body, ["requestId", "expectedRevision", "bank"]) || !id(body.requestId)
+      || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
+      || !exact(body.bank, ["entries", "profiles"]) || Buffer.byteLength(JSON.stringify(body.bank)) > 60000) return false;
+  const ids = ["primary", "test", "third"], bank = body.bank;
+  if (!Array.isArray(bank.profiles) || bank.profiles.length !== 3
+      || new Set(bank.profiles.map(p => p?.id)).size !== 3
+      || !bank.profiles.every(p => exact(p, ["id", "chatMode", "replySource"]) && ids.includes(p.id)
+        && ["mentions", "participate"].includes(p.chatMode) && ["local", "ai"].includes(p.replySource))) return false;
+  const replies = ["greeting", "checkin", "goodday", "roughday", "quietday", "thanks", "farewell", "goodnight", "welcome",
+    "dayfollowup", "reciprocal", "quietfollowup", "dayplans", "capabilities", "automation", "game", "streamtitle", "livestatus"];
+  return Array.isArray(bank.entries) && bank.entries.length >= 1 && bank.entries.length <= 128
+    && new Set(bank.entries.map(e => e?.id)).size === bank.entries.length && bank.entries.every(entry => {
+      if (!exact(entry, ["id", "kind", "category", "lines", "accountIds", "enabled"])
+          || typeof entry.id !== "string" || !/^[a-z0-9_:-]{1,80}$/.test(entry.id) || typeof entry.enabled !== "boolean"
+          || !Array.isArray(entry.accountIds) || entry.accountIds.length < 1 || entry.accountIds.length > 3
+          || new Set(entry.accountIds).size !== entry.accountIds.length || !entry.accountIds.every(x => ids.includes(x))
+          || !Array.isArray(entry.lines) || entry.lines.length < 1 || entry.lines.length > 16) return false;
+      const categoryValid = entry.kind === "topic" ? ["general", "just chatting", "music", "art"].includes(entry.category)
+        : entry.kind === "reply" ? replies.includes(entry.category)
+        : ["greeting", "exchange"].includes(entry.kind) && entry.category === entry.kind;
+      if (!categoryValid || entry.kind === "exchange" && entry.lines.length !== 2) return false;
+      const placeholders = entry.kind === "topic" || entry.kind === "reply" && entry.category === "game" ? ["{game}"]
+        : entry.kind === "reply" && entry.category === "streamtitle" ? ["{title}"] : [];
+      return entry.lines.every(line => {
+        if (typeof line !== "string" || line !== line.trim() || line.length < 1 || line.length > 260
+            || /^[/.]|[\r\n\u0000-\u001f\u007f]|https?:\/\/|www\./i.test(line)) return false;
+        let literal = line;
+        for (const token of placeholders) literal = literal.split(token).join("");
+        return !/[{}]/.test(literal);
+      });
+    });
 }
 
 function publicOrigin(value) {
@@ -165,8 +205,11 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
     if (suffix === null || /[?%\\\u0000-\u0020\u007f]/.test(suffix)) return errorResponse(res, 404, "not_found", "Controller route not found.");
     if (suffix === "" && req.method === "GET") return res.redirect(302, `${MOUNT}/accounts`);
     req.controllerPath = suffix;
-    const isData = DATA.has(suffix) || CHANNEL_LOOKUP.test(suffix), isControl = suffix === "/api/control", isCommand = COMMAND.test(suffix), isBrowser = BROWSER.test(suffix), isClip = CLIP.test(suffix);
-    const mutation = isControl || isCommand || isBrowser || isClip;
+    const history = DIRECTOR_HISTORY.exec(suffix);
+    const isData = DATA.has(suffix) || CHANNEL_LOOKUP.test(suffix) || !!history && Number.isSafeInteger(Number(history[2])),
+      isControl = suffix === "/api/control", isCommand = COMMAND.test(suffix), isBrowser = BROWSER.test(suffix), isClip = CLIP.test(suffix),
+      isDirector = DIRECTOR_MUTATIONS.has(suffix);
+    const mutation = isControl || isCommand || isBrowser || isClip || isDirector;
     if (!STATIC.has(suffix) && !isData && !mutation) return errorResponse(res, 404, "not_found", "Controller route not found.");
     if (req.method !== (mutation ? "POST" : "GET") || req.get("upgrade")) return errorResponse(res, 405, "method_not_allowed", "This controller method is not supported.");
     if (!configured) return unavailable(req, res, false);
@@ -179,7 +222,7 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
       let valid = false;
       try {
         if (Buffer.byteLength(JSON.stringify(req.body)) > MAX_BODY) return errorResponse(res, 413, "request_too_large", "Controller request is too large.");
-        valid = isClip ? validClipAction(suffix, req.body) : isBrowser ? exact(req.body, ["requestId"]) && typeof req.body.requestId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(req.body.requestId)
+        valid = isDirector ? validDirectorAction(suffix, req.body) : isClip ? validClipAction(suffix, req.body) : isBrowser ? exact(req.body, ["requestId"]) && typeof req.body.requestId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(req.body.requestId)
           : isControl ? object(req.body) && Object.keys(req.body).length === 1
           && ["paused", "exchangesEnabled"].includes(Object.keys(req.body)[0]) && typeof Object.values(req.body)[0] === "boolean" : validCommand(req.body);
       } catch { /* Invalid bodies are rejected before contacting the Mac. */ }

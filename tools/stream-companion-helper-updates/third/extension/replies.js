@@ -1,3 +1,5 @@
+import { normalizeStreamContext } from './chat-context.js';
+export { normalizeStreamContext } from './chat-context.js';
 import { replyOpportunity, validateReply } from './core.js';
 import { messageKey } from './message-policy.js';
 
@@ -69,17 +71,6 @@ export const replyBank = Object.freeze({
   ])
 });
 
-export function normalizeStreamContext(raw, channel, now = Date.now()) {
-  const expected = String(channel || '').toLowerCase();
-  if (!raw || typeof raw !== 'object' || !/^[a-z0-9_]{3,25}$/.test(expected)
-    || typeof raw.channel !== 'string' || raw.channel.toLowerCase() !== expected
-    || !Number.isFinite(raw.checkedAt) || raw.checkedAt < now - 120_000 || raw.checkedAt > now + 5_000) return null;
-  const clean = (value, size) => typeof value === 'string'
-    ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, size) : '';
-  return { channel: expected, title: clean(raw.title, 160), gameName: clean(raw.gameName, 100),
-    streamId: typeof raw.streamId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(raw.streamId) ? raw.streamId : '',
-    isLive: typeof raw.isLive === 'boolean' ? raw.isLive : null, checkedAt: raw.checkedAt };
-}
 
 function messageBody(text, account) {
   if (typeof text !== 'string' || !/^[a-z0-9_]{3,25}$/i.test(account || '')) return '';

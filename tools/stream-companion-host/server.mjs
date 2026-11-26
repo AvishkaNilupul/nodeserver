@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { timingSafeEqual, randomBytes } from 'node:crypto';
+import { timingSafeEqual, randomBytes, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { HostStore } from './lib/store.mjs';
 import { createAccountManager } from './lib/accounts.mjs';
@@ -14,13 +14,16 @@ const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 export const REMOTE_PREFIX = '/admin/stream-companion';
 const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const STATIC = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ['/messages', ['messages.html', 'text/html; charset=utf-8']], ['/messages.js', ['messages.js', 'text/javascript; charset=utf-8']], ['/messages.css', ['messages.css', 'text/css; charset=utf-8']],
   ...['/accounts', '/accounts/primary', '/accounts/test', '/accounts/third'].map(path => [path, ['account.html', 'text/html; charset=utf-8']]),
   ['/accounts.js', ['accounts.js', 'text/javascript; charset=utf-8']], ['/accounts.css', ['accounts.css', 'text/css; charset=utf-8']],
   ['/controller-path.js', ['controller-path.js', 'text/javascript; charset=utf-8']],
   ['/clips.js', ['clips.js', 'text/javascript; charset=utf-8']], ['/clips.css', ['clips.css', 'text/css; charset=utf-8']]]);
-const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels', '/api/clips']);
+const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels', '/api/clips', '/api/director']);
+const DIRECTOR_HISTORY = /^\/api\/director\/history\/(all|primary|test|third)\/([0-9]{1,16})$/;
 const CHANNEL_LOOKUP = /^\/api\/channels\/([a-z0-9_]{3,25})$/;
 const REMOTE_POST = new Set(['/api/control', '/api/accounts/primary/command', '/api/accounts/test/command', '/api/accounts/third/command',
+  '/api/director/bank', '/api/director/cancel',
   '/api/accounts/primary/browser', '/api/accounts/test/browser', '/api/accounts/third/browser', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization']);
 const failure = (message, status) => Object.assign(new Error(message), { status });
 
@@ -77,9 +80,9 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         // Match the literal request target. Decoding or normalizing here could
         // turn an unlisted remote URL into a privileged local/internal route.
         path = rawPath.slice(REMOTE_PREFIX.length);
-        if (!REMOTE_GET.has(path) && !CHANNEL_LOOKUP.test(path) && !REMOTE_POST.has(path)) return send(res, 404, { error: 'Not found.' });
+        if (!REMOTE_GET.has(path) && !CHANNEL_LOOKUP.test(path) && !DIRECTOR_HISTORY.test(path) && !REMOTE_POST.has(path)) return send(res, 404, { error: 'Not found.' });
         if (req.headers.upgrade !== undefined || /\bupgrade\b/i.test(String(req.headers.connection || ''))
-          || !(req.method === 'GET' && (REMOTE_GET.has(path) || CHANNEL_LOOKUP.test(path)) || req.method === 'POST' && REMOTE_POST.has(path))) {
+          || !(req.method === 'GET' && (REMOTE_GET.has(path) || CHANNEL_LOOKUP.test(path) || DIRECTOR_HISTORY.test(path)) || req.method === 'POST' && REMOTE_POST.has(path))) {
           return send(res, 405, { error: 'Unsupported controller method.' });
         }
       }
@@ -89,6 +92,12 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         if (req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined || req.headers['sec-fetch-dest'] !== undefined || req.headers['sec-fetch-user'] !== undefined) return send(res, 403, { error: 'Internal client required.' });
         const client = clients.find(c => c.id === req.headers['x-companion-id']);
         if (!client || !equal(req.headers.authorization, `Bearer ${client.token}`)) return send(res, 403, { error: 'Invalid coordination pairing.' });
+        const directorMethods = { '/internal/director/import': 'importPage', '/internal/director/observe': 'observe', '/internal/director/manual': 'manual',
+          '/internal/director/draft': 'draft', '/internal/director/generated': 'generated', '/internal/director/preferences': 'preferences' };
+        if (Object.hasOwn(directorMethods, path)) {
+          if (!store.director) throw failure('Central message authority is unavailable.', 503);
+          return send(res, 200, store.director[directorMethods[path]](client.id, await bodyJSON(req)));
+        }
         if (path === '/internal/clips/permit') {
           if (!clips) throw failure('Clip controls are unavailable.', 503);
           return send(res, 200, clips.permit(client.id, await bodyJSON(req)));
@@ -104,11 +113,26 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         if (!sameOrigin(req)) return send(res, 403, { error: 'Open the local host page to view status.' });
         return send(res, 200, { ...store.status(), csrfToken });
       }
+      const historyPage = DIRECTOR_HISTORY.exec(path);
+      if (path === '/api/director' || historyPage) {
+        if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
+        if (!sameOrigin(req)) return send(res, 403, { error: 'Open the controller to view messages.' });
+        if (!store.director) throw failure('Central message authority is unavailable.', 503);
+        if (historyPage) store.transaction(() => store.expire());
+        return send(res, 200, { ...(historyPage ? store.director.history(historyPage[1], Number(historyPage[2])) : store.director.status()), csrfToken });
+      }
+      if (path === '/api/director/bank' || path === '/api/director/cancel') {
+        if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
+        if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the controller message controls.' });
+        if (!store.director) throw failure('Central message authority is unavailable.', 503);
+        return send(res, 200, path.endsWith('/bank') ? store.director.saveBank(await bodyJSON(req)) : store.director.cancel(await bodyJSON(req)));
+      }
       if (path === '/api/accounts') {
         if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
         if (!sameOrigin(req)) return send(res, 403, { error: 'Open the local account pages to view status.' });
         const value = await accounts.snapshot();
         return send(res, 200, { ...value, instances: value.instances.map(instance => ({ ...instance,
+          ...(store.director ? { sent: store.director.history(instance.id).history } : {}),
           browser: { ...instance.browser, canOpen: browserLauncher.available(instance.id) === true } })), csrfToken });
       }
       if (path === '/api/clips') {
@@ -147,7 +171,11 @@ export function createHostServer({ store, clients, accounts = createAccountManag
       if (accountCommand) {
         if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
         if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the local account controls.' });
-        return send(res, 200, await accounts.command(accountCommand[1], await bodyJSON(req)));
+        const body = await bodyJSON(req), result = await accounts.command(accountCommand[1], body);
+        if (store.director && ['start', 'settings'].includes(body.action)) {
+          store.director.preferences(accountCommand[1], { requestId: `profile:${createHash('sha256').update(JSON.stringify([accountCommand[1], body.requestId])).digest('hex')}`, chatMode: body.params.chatMode, replySource: body.params.replySource });
+        }
+        return send(res, 200, result);
       }
       if (path === '/api/control') {
         if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
@@ -174,7 +202,7 @@ export function createHostServer({ store, clients, accounts = createAccountManag
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const config = JSON.parse(await readFile(new URL('./private/config.json', import.meta.url), 'utf8'));
-  const store = new HostStore({ clients: config.clients });
+  const store = new HostStore({ clients: config.clients, directorEnabled: true });
   const remoteToken = await loadRemoteToken();
   let browserProfiles;
   try { browserProfiles = await loadBrowserProfiles(); }

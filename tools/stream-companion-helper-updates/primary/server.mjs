@@ -2,12 +2,13 @@ import http from 'node:http';
 import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { composeRequest, generate } from './lib/composer.mjs';
+import { generate } from './lib/composer.mjs';
 import { TwitchChat } from './lib/twitch.mjs';
 import { ChatSendHolds } from './lib/chat-holds.mjs';
 import { HostCoordinator } from './lib/host-coordinator.mjs';
 import { LocalControl } from './lib/local-control.mjs';
 import { ViewerClips } from './lib/clips.mjs';
+import { DirectorAdapter } from './lib/director-adapter.mjs';
 
 const equal = (a, b) => { const aa = Buffer.from(a), bb = Buffer.from(b); return aa.length === bb.length && timingSafeEqual(aa, bb); };
 const respond = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(data)); };
@@ -21,7 +22,7 @@ export async function savePrivate(url, value) {
 
 export function createHelper({ config, twitch = new TwitchChat(), generateImpl = generate, now = Date.now, control: suppliedControl, intentFile, clipFile, clips: suppliedClips } = {}) {
   const expectedOrigin = `chrome-extension://${config.extensionId}`;
-  let modelBusy = false, calls = [], serial = Promise.resolve(), generation = 0;
+  let serial = Promise.resolve(), generation = 0;
   const locked = fn => {
     const expected = generation;
     const run = () => { if (expected !== generation) throw new Error('Operation cancelled by disconnect.'); return fn(); };
@@ -30,6 +31,7 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
   const control = suppliedControl || new LocalControl({ twitch, now, intentFile, secrets: [config.pairingToken, config.apiKey, config.extensionId],
     onIntent: () => { generation++; } });
   const clips = suppliedClips || new ViewerClips({ twitch, control, now, file: clipFile });
+  const director = new DirectorAdapter({ twitch, control, config, generateImpl, now });
   const server = http.createServer(async (req, res) => {
     if (req.headers.host !== '127.0.0.1:8792') return respond(res, 403, { error: 'Invalid host.' });
     if (req.url === '/health' && req.method === 'GET') return respond(res, 200, { ok: true, version: '0.12.0', transport: 'twitch-api', configured: !!config.apiKey, extensionId: config.extensionId });
@@ -55,6 +57,11 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
       if (req.url === '/api/control/status') return respond(res, 200, control.status());
       if (req.url === '/api/control/command') return respond(res, 200, control.command(input));
       if (req.url === '/api/control/bridge') return respond(res, 200, control.bridge(input));
+      if (req.url === '/api/director/import') return respond(res, 200, await director.import(input));
+      if (req.url === '/api/director/sync') return respond(res, 200, await director.sync(input));
+      if (req.url === '/api/director/draft' || req.url === '/api/compose') return respond(res, 200, await director.draft(input));
+      if (req.url === '/api/director/manual') return respond(res, 200, await director.manual(input));
+      if (req.url === '/api/director/preferences') return respond(res, 200, await director.preferences(input));
       if (req.url === '/api/twitch/status') { await twitch.refreshCoordination?.(input.observation); return respond(res, 200, twitch.status()); }
       // Pause must interrupt slow authorization/connection work, not wait for it.
       if (req.url === '/api/twitch/disconnect') {
@@ -85,19 +92,10 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
           return { ...result, ...(intent ? { intent: control.intent() } : {}) };
         },
         '/api/twitch/channel': () => twitch.inspectChannel(input.account, input.channel),
-        '/api/twitch/send': () => { control.guard(input, { action: 'send' }); return twitch.send({ ...input, beforeSubmit: () => control.guard(input, { action: 'send' }) }); }
+        '/api/twitch/send': () => { director.guardSend(input); return twitch.send({ ...input, beforeSubmit: () => director.guardSend(input) }); }
       };
       if (Object.hasOwn(actions, req.url)) return respond(res, 200, await locked(actions[req.url]));
-      if (req.url !== '/api/compose') return respond(res, 404, { error: 'Not found.' });
-      const sendHold = twitch.sendHold?.(input.account, input.channel);
-      if (sendHold?.held) return respond(res, 409, { error: sendHold.reason });
-      calls = calls.filter(at => at > Date.now() - 3_600_000);
-      if (modelBusy || calls.length >= 30) return respond(res, 429, { error: 'The helper is busy or the hourly model budget is exhausted.' });
-      let composeInput; try { composeInput = composeRequest(input); } catch (e) { e.status = 400; throw e; }
-      if (!config.apiKey) return respond(res, 503, { error: 'Configure the model provider in private/config.json.' });
-      modelBusy = true; calls.push(Date.now());
-      try { return respond(res, 200, await generateImpl(composeInput, config)); }
-      finally { modelBusy = false; }
+      return respond(res, 404, { error: 'Not found.' });
     } catch (e) { respond(res, e.status || 502, { error: req.url.startsWith('/api/control/') || req.url.startsWith('/api/clips/') ? control.diagnostic(e.message) : e.message }); }
   });
   server.control = control; server.clips = clips;

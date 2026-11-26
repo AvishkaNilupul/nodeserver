@@ -1,3 +1,4 @@
+import { installDirectorFixture } from './director-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, rmSync, writeFileSync } from 'node:fs';
@@ -26,6 +27,7 @@ function fixture(t) {
   twitch.coordinator = { observation: { channel: CHANNEL, autoReply: true, exchangeContext: { streamId: '789' } }, seed() {}, snapshot: () => ({ accounts: [], available: true, paused: false }),
     reserve: async intent => { reserves.push(intent); return { ok: true, reservationId: `permit-${reserves.length}` }; },
     begin: async () => ({ ok: true }), finish: async (...args) => finishes.push(args), refresh: async input => { observations.push(input); } };
+  installDirectorFixture(twitch);
   t.after(() => { twitch.disconnect(); rmSync(dir, { recursive: true, force: true }); });
   return { twitch, holds, file, calls, saved, finishes, reserves, observations, advance: ms => { time += ms; }, accept: () => { rejected = false; }, defer: fn => { beforeResponse = fn; } };
 }
@@ -41,7 +43,7 @@ test('followers-only is a room requirement, not an account denial or follow clai
 test('a real follower rejection consumes exactly one attempt then durably blocks every send category before provider or reserve work', async t => {
   const f = fixture(t), first = await send(f.twitch);
   assert.equal(first.delivery, 'rejected'); assert.equal(first.sendHold.held, true); assert.equal(f.twitch.connected, true);
-  assert.equal(f.twitch.history.length, 1); assert.deepEqual(f.finishes, [['permit-1', 'rejected']]);
+  assert.equal(f.twitch.history.length, 1); assert.deepEqual(f.finishes.map(row => row.slice(0, 2)), [['permit-1', 'rejected']]);
   const calls = f.calls.length, reserves = f.reserves.length;
   for (const extra of [{}, { replyTo: 'fresh-mention' }, { kind: 'greeting', participationKey: 'greeting' }, { kind: 'topic', participationKey: 'topic' }, { kind: 'conversation', participationKey: 'conversation' }, { kind: 'exchange', exchangeId: 'scene', participationKey: 'exchange:scene' }]) {
     f.advance(600001); const result = await send(f.twitch, extra); assert.equal(result.suppressed, true); assert.equal(result.retryable, false); assert.equal(result.submitted, false);
@@ -103,5 +105,5 @@ test('history persistence failure after a known follower rejection cannot relabe
   f.twitch.saveHistory = async () => { if (++writes > 1) throw Error('History storage unavailable.'); };
   const result = await send(f.twitch);
   assert.equal(result.delivery, 'rejected'); assert.equal(f.twitch.history[0].delivery, 'rejected');
-  assert.equal(f.holds.status(ACCOUNT, CHANNEL).held, true); assert.deepEqual(f.finishes, [['permit-1', 'rejected']]);
+  assert.equal(f.holds.status(ACCOUNT, CHANNEL).held, true); assert.deepEqual(f.finishes.map(row => row.slice(0, 2)), [['permit-1', 'rejected']]);
 });

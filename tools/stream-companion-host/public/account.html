@@ -7,15 +7,17 @@
   <title>Accounts · Stream Companion</title>
   <link rel="stylesheet" href="__COMPANION_BASE__/accounts.css">
   <link rel="stylesheet" href="__COMPANION_BASE__/clips.css">
+  <link rel="stylesheet" href="__COMPANION_BASE__/messages.css">
   <script type="module" src="__COMPANION_BASE__/accounts.js"></script>
   <script type="module" src="__COMPANION_BASE__/clips.js"></script>
+  <script type="module" src="__COMPANION_BASE__/messages.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to account controls</a>
   <div class="shell" data-accounts-app>
     <header class="page-header">
       <a class="brand" href="__COMPANION_BASE__/accounts"><span class="brand-mark" aria-hidden="true">c.</span><span>Stream Companion<small>Local account controls</small></span></a>
-      <nav aria-label="Main navigation"><a href="__COMPANION_BASE__/accounts" aria-current="page">Accounts</a><a href="__COMPANION_BASE__/">Shared coordination</a><a id="back-to-server" href="/superadmin.html" hidden>Back to server</a></nav>
+      <nav aria-label="Main navigation"><a href="__COMPANION_BASE__/accounts" aria-current="page">Accounts</a><a href="__COMPANION_BASE__/messages">Messages</a><a href="__COMPANION_BASE__/">Shared coordination</a><a id="back-to-server" href="/superadmin.html" hidden>Back to server</a></nav>
     </header>
     <main id="main">
       <div class="page-heading"><div><p class="eyebrow" id="page-eyebrow">Your companions</p><h1 id="page-title">Three accounts. One place.</h1><p id="page-description">Open an account to manage its stream, conversation and recent activity.</p></div><span class="pill" id="network-status" role="status" aria-live="polite">Connecting</span></div>
@@ -25,7 +27,7 @@
       <section id="accounts-overview" aria-label="Companion accounts">
         <section class="quick-start panel" aria-labelledby="quick-heading">
           <div class="section-heading"><div><p class="eyebrow">Quick start</p><h2 id="quick-heading">Pick a stream. Choose your accounts.</h2></div><span class="pill" id="quick-channel-status" role="status">Checking channel</span></div>
-          <p class="quick-intro">One click opens the selected Chrome profiles if needed, then opens the stream and starts their automatic chat.</p>
+          <p class="quick-intro">One click opens the selected Chrome profiles if needed, then starts the stream using their saved central conversation settings.</p>
           <div class="quick-channel-row"><label for="quick-channel">Channel<select id="quick-channel"><option value="aviskarex">aviskarex · Favorite</option></select></label><button class="subtle" id="quick-refresh" type="button">Refresh live channels</button></div>
           <p class="field-note quick-channel-detail" id="quick-channel-detail">aviskarex is pinned here for quick access.</p>
           <details class="quick-other-channel"><summary>Find another channel</summary><div class="quick-lookup-row"><label for="quick-lookup">Channel login<input id="quick-lookup" type="text" placeholder="Twitch channel login" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="25" pattern="[A-Za-z0-9_]{3,25}"></label><button id="quick-find" type="button">Find channel</button></div></details>
@@ -46,12 +48,13 @@
       <div id="account-detail" hidden>
         <a class="back-link" href="__COMPANION_BASE__/accounts">All accounts</a>
         <div class="notice" id="account-reason" role="status" hidden></div>
+        <section class="panel central-message-summary" aria-labelledby="central-message-heading"><p class="eyebrow">Shared message control</p><h2 id="central-message-heading">Messages &amp; assignments</h2><p id="central-message-settings">Waiting for central message settings.</p><p id="central-message-notice" class="field-note" role="status">Checking central history.</p><div class="actions"><a href="__COMPANION_BASE__/messages">Manage message bank &amp; account assignments</a></div></section>
         <section class="control-panel panel" aria-labelledby="stream-controls-heading">
           <div class="section-heading"><div><p class="eyebrow">Session controls</p><h2 id="stream-controls-heading">Choose a stream</h2></div><span class="pill" id="session-state">Checking session</span></div>
           <form id="session-form">
             <div class="settings-grid"><label class="channel-field">Channel<input id="channel" name="channel" type="text" placeholder="Channel login" autocomplete="off" autocapitalize="none" spellcheck="false" minlength="3" maxlength="25" pattern="[A-Za-z0-9_]{3,25}" required><span class="field-note">Twitch channel login · 3–25 characters</span></label>
-              <label>Conversation mode<select id="chat-mode" name="chatMode"><option value="mentions">Reply to mentions</option><option value="participate">Participate occasionally</option></select></label>
-              <label>Reply source<select id="reply-source" name="replySource"><option value="local">Local replies</option><option value="ai">AI replies</option></select></label>
+              <label>Conversation mode<select id="chat-mode" name="chatMode" disabled><option value="mentions">Reply to mentions</option><option value="participate">Participate occasionally</option></select><span class="field-note">Managed in Messages</span></label>
+              <label>Reply source<select id="reply-source" name="replySource" disabled><option value="local">Bank replies</option><option value="ai">AI replies</option></select><span class="field-note">Managed in Messages</span></label>
             </div>
             <div class="actions"><button class="primary" id="start" type="submit" disabled>Start companion</button><button class="danger" id="stop" type="button" disabled>Stop</button><button id="watch" type="button" disabled>Open stream</button><button class="subtle" id="save-settings" type="button" disabled>Save settings</button></div>
             <label class="check-label"><input id="auto-resume" name="autoResume" type="checkbox"><span>Recover this session automatically<small>Applies after Start. Saving settings does not restart a stopped session.</small></span></label>
@@ -65,7 +68,7 @@
           <section class="panel" aria-labelledby="broadcast-heading"><p class="eyebrow">On stream</p><h2 id="broadcast-heading">Broadcast & activity</h2><div id="broadcast"></div></section>
           <section class="panel" aria-labelledby="compose-heading"><p class="eyebrow">Review before sending</p><h2 id="compose-heading">Draft a message</h2><p class="section-description">Create a reply or a chat summary, then review the result. Drafting never posts to chat.</p><div class="actions compact"><button id="draft" type="button" disabled>Draft reply</button><button id="summary" type="button" disabled>Summarize chat</button></div><div id="draft-result" class="draft-result" role="status" hidden></div><label class="message-label" for="message-text">Message to review<textarea id="message-text" rows="5" maxlength="300" placeholder="Write a message or request a draft."></textarea></label><div class="send-row"><span class="field-note" id="text-count">0 / 300</span><button class="primary" id="send" type="button" disabled>Send reviewed message</button></div><p class="field-note">Manual sends still use account, playback, duplicate and pacing checks.</p></section>
           <section class="panel" aria-labelledby="incoming-heading"><div class="section-heading"><div><p class="eyebrow">Recent public chat</p><h2 id="incoming-heading">Incoming messages</h2></div><span class="pill" id="chat-count">—</span></div><div id="chat-digest" class="section-description"></div><ol class="message-list" id="incoming-chat"></ol></section>
-          <section class="panel" aria-labelledby="delivery-heading"><div class="section-heading"><div><p class="eyebrow">Actual delivery records</p><h2 id="delivery-heading">Sent & attempted</h2></div><span class="pill" id="sent-count">—</span></div><ol class="message-list" id="delivery-history"></ol></section>
+          <section class="panel" aria-labelledby="delivery-heading"><div class="section-heading"><div><p class="eyebrow">Central delivery records</p><h2 id="delivery-heading">Sent &amp; attempted</h2></div><span class="pill" id="sent-count">—</span></div><p class="field-note">The same retained outcomes appear in shared message history.</p><ol class="message-list director-timeline" id="delivery-history"><li class="empty">Waiting for central delivery history.</li></ol><p class="section-description"><a href="__COMPANION_BASE__/messages">Open outgoing messages &amp; full history</a></p></section>
           <section class="panel" aria-labelledby="drops-heading"><div class="section-heading"><div><p class="eyebrow">Channel rewards</p><h2 id="drops-heading">Drops</h2></div><span class="pill" id="drops-state">Checking</span></div><div id="drops-detail"></div><div class="actions compact"><button id="drops-enable" type="button" disabled>Enable claims</button><button id="drops-disable" type="button" disabled>Disable claims</button><button id="drops-check" type="button" disabled>Check drops</button></div></section>
           <section class="panel" aria-labelledby="recent-heading"><p class="eyebrow">Recent control requests</p><h2 id="recent-heading">Command history</h2><ol class="message-list" id="command-history"></ol></section>
         </div>

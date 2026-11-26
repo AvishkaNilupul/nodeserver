@@ -198,7 +198,8 @@ export class LocalControl {
   settings(raw = {}) {
     return { allowedChannel: login(raw.allowedChannel) ? raw.allowedChannel : '', paused: this.stopped || raw.paused === true,
       autoReply: !this.stopped && raw.autoReply === true, autoResume: raw.autoResume === true,
-      chatMode: raw.chatMode === 'participate' ? 'participate' : 'mentions', replySource: raw.replySource === 'ai' ? 'ai' : 'local' };
+      chatMode: raw.chatMode === 'participate' ? 'participate' : 'mentions', replySource: raw.replySource === 'ai' ? 'ai' : 'local',
+      revision: Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0 };
   }
   messages(raw) {
     return (Array.isArray(raw) ? raw : []).slice(-60).filter(object).map(x => ({ id: this.text(x.id, 160),

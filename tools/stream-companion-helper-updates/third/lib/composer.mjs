@@ -1,5 +1,5 @@
 import { cleanMessage, validateReply } from '../extension/core.js';
-import { normalizeStreamContext } from '../extension/replies.js';
+import { normalizeStreamContext } from '../extension/chat-context.js';
 
 export function composeRequest(raw) {
   if (!raw || !['reply', 'summary'].includes(raw.mode)) throw new Error('Invalid compose mode.');

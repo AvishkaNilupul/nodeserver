@@ -1,4 +1,5 @@
 import { controllerBasePath, basePathFromModule, controllerPath, responseError, requestNetwork, networkTitle, connectionMessage, configureControllerMount, bindControllerLifecycle } from './controller-path.js';
+import { savedDirectorProfile } from './messages.js';
 
 const POLL_MS = 2500;
 const HOST_FRESH_MS = 10000;
@@ -53,7 +54,7 @@ function commandParams(action, params = {}) {
   return null;
 }
 
-export function createAccountsController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, sleepImpl = ms => new Promise(resolve => setTimeout(resolve, ms)), browserWaitMs = 30000, browserGraceMs = 7500, browserPollMs = 1000, startWaitMs = 90000, startPollMs = 1000, basePath = '' } = {}) {
+export function createAccountsController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, sleepImpl = ms => new Promise(resolve => setTimeout(resolve, ms)), browserWaitMs = 30000, browserGraceMs = 7500, browserPollMs = 1000, startWaitMs = 90000, startPollMs = 1000, basePath = '', profileProvider = null } = {}) {
   basePath = controllerBasePath(basePath);
   const state = { basePath, data: null, network: 'loading', error: '', operations: {}, forms: {}, browserPreparations: {}, quick: {
     channel: 'aviskarex', selection: 'primary', lookup: '', channels: [{ login: 'aviskarex', displayName: 'aviskarex', isLive: null }],
@@ -70,6 +71,8 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       for (const [key, value] of Object.entries(instance.settings ? { channel: settings.allowedChannel || instance.channel || '', chatMode: validMode(settings.chatMode) ? settings.chatMode : 'mentions', replySource: validSource(settings.replySource) ? settings.replySource : 'local', autoResume: settings.autoResume === true } : {})) {
         if (!form.dirty[key]) form[key] = value;
       }
+      const central = profileProvider?.(instance.id, now());
+      if (central) { form.chatMode = central.chatMode; form.replySource = central.replySource; }
       form.initialized ||= !!instance.settings;
       const operation = state.operations[instance.id];
       if (!operation) continue;
@@ -186,6 +189,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     if (!IDS.has(id) || !ACTIONS.has(action) || !hostFresh(state, now()) || typeof state.data?.csrfToken !== 'string' || !state.data.csrfToken || state.data.csrfToken.length > 256) return false;
     const instance = instanceFor(state, id);
     if (!instance) return false;
+    if (profileProvider && ['start', 'settings'].includes(action) && !profileProvider(id, now())) return false;
     const local = state.operations[id];
     const localPending = local && (local.transport || active(local.command, now()));
     const serverPending = active(instance.controls?.pending, now());
@@ -204,7 +208,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (wasPreparing) { state.error = 'Browser startup was cancelled. The Mac could not confirm Stop; check account status before another action.'; emit(); }
       return false;
     }
-    const exactParams = commandParams(action, params);
+    let exactParams = commandParams(action, params);
     if (!exactParams) { state.error = action === 'send' ? 'Use 1–300 characters on one line, without links or chat commands. Remove spaces at the start and end.' : 'Check the channel and selected settings.'; emit(); return false; }
     if (action === 'start') {
       const version = ++startVersions[id];
@@ -213,6 +217,11 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         catch (error) { if (version === startVersions[id]) { state.error = error.quickPublic ? error.message : 'Could not connect the selected browser. No companion was started; check the Mac before trying again.'; emit(); } return false; }
       }
       if (version !== startVersions[id] || !startEligible(id, null, true)) return false;
+    }
+    if (profileProvider && ['start', 'settings'].includes(action)) {
+      const central = profileProvider(id, now());
+      if (!central) { state.error = 'Central account settings are not current. Refresh Messages before starting or saving session settings.'; emit(); return false; }
+      exactParams = { ...exactParams, chatMode: central.chatMode, replySource: central.replySource };
     }
     const rid = requestId(), at = now();
     const operation = { requestId: rid, action, params: exactParams, transport: true, textRevision: formFor(id).textRevision,
@@ -556,18 +565,8 @@ function renderMessages(view, instance, now) {
     const node = view.el('li'), meta = view.el('div', undefined, 'message-meta'); meta.append(view.el('strong', text(message.author, 'Unknown author')), view.el('span', age(message.at, now)));
     node.append(meta, view.el('p', text(message.text, ''), 'message-body')); return node;
   }) : [empty(view, 'No incoming chat recorded yet.', 'li')]));
-  const sent = list(instance?.sent).filter(message => message && typeof message === 'object')
-    .sort((a, b) => (timestamp(b.at) || 0) - (timestamp(a.at) || 0)).slice(0, 50);
-  view.nodes['sent-count'].textContent = `${sent.length} shown`;
-  view.nodes['delivery-history'].replaceChildren(...(sent.length ? sent.map(message => {
-    const node = view.el('li'), meta = view.el('div', undefined, 'message-meta'), delivery = text(message.delivery, 'unconfirmed');
-    meta.append(view.el('strong', message.channel ? `#${message.channel}` : 'Channel unknown'), view.el('span', age(message.at, now)));
-    const status = view.el('span', label({ confirmed: 'Delivery confirmed', rejected: 'Delivery rejected', unknown: 'Delivery unconfirmed', submitted: 'Submitted · unconfirmed', suppressed: 'Suppressed', failed: 'Failed', pending: 'Pending' }, delivery, `Delivery: ${delivery}`), 'delivery'); status.setAttribute('data-tone', delivery === 'confirmed' ? 'good' : ['rejected', 'failed'].includes(delivery) ? 'error' : 'warn');
-    node.append(meta, status, view.el('p', text(message.text, ''), 'message-body'));
-    if (message.reason) node.append(view.el('p', message.reason, 'message-detail'));
-    if (message.replyTo) node.append(view.el('p', `Reply to ${message.replyTo}`, 'message-detail'));
-    return node;
-  }) : [empty(view, 'No delivery records yet. Queued commands are not chat delivery records.', 'li')]));
+  // The shared director module owns delivery history on account pages. Helper
+  // status polling must never replace its authoritative rows with local copies.
 }
 function renderDrops(view, instance, now) {
   const drops = instance?.drops;
@@ -612,7 +611,7 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n.stop.textContent = operation?.action === 'stop' && (operation.transport || active(operation.command, now)) ? `${commandState(operation.command)}…` : 'Stop';
   const settings = instance?.settings;
   const currentBridge = online && bridgeFresh(instance, now);
-  n['settings-current'].textContent = !instance?.browser?.lastSeenAt ? 'Settings unverified. Waiting for the browser’s first check-in.' : settings ? `${currentBridge ? 'Current' : 'Last reported settings'}: ${settings.chatMode === 'participate' ? 'Occasional participation' : 'Mentions'} · ${settings.replySource === 'ai' ? 'AI replies' : 'Local replies'} · recovery ${settings.autoResume ? 'on' : 'off'} · ${settings.autoReply ? 'automatic replies on' : 'automatic replies off'}` : 'Current settings unavailable.';
+  n['settings-current'].textContent = !instance?.browser?.lastSeenAt ? 'Settings unverified. Waiting for the browser’s first check-in.' : settings ? `${currentBridge ? 'Current session' : 'Last reported settings'}: ${settings.chatMode === 'participate' ? 'Occasional participation' : 'Mentions'} · ${settings.replySource === 'ai' ? 'AI replies' : 'Bank replies'} · recovery ${settings.autoResume ? 'on' : 'off'} · ${settings.autoReply ? 'automatic replies on' : 'automatic replies off'}` : 'Current settings unavailable.';
   const video = playback(instance, now, !online);
   n['status-checks'].replaceChildren(check(view, 'Chat connection', !online ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected', instance?.channel ? `#${instance.channel}` : 'No current chat channel', online && instance?.connected ? 'good' : 'warn'), check(view, 'Video playback', video.title, video.detail, video.tone), check(view, 'Browser bridge', !online ? 'Unverified' : currentBridge ? 'Current' : 'Unavailable', `Last check-in: ${age(instance?.browser?.lastSeenAt, now)}`, currentBridge ? 'good' : 'warn'), check(view, 'Playback access', !online ? 'Unverified' : instance?.permissions?.playbackAccess === true ? 'Granted' : 'Required', !online ? 'Waiting for a fresh host response.' : instance?.permissions?.playbackAccess === true ? 'Permission is separate from playback.' : 'Grant in the extension fallback controls.', online && instance?.permissions?.playbackAccess === true ? 'good' : 'warn'));
   renderOperation(view, state, instance, id, now); renderBroadcast(view, instance, now, online && currentBridge); renderMessages(view, instance, now); renderDrops(view, instance, now);
@@ -622,7 +621,7 @@ if (globalThis.document?.querySelector('[data-accounts-app]')) {
   const basePath = basePathFromModule(import.meta.url);
   const document = globalThis.document, id = accountFromPath(globalThis.location.pathname, basePath), view = createAccountsView(document);
   configureControllerMount(document, basePath);
-  const controller = createAccountsController({ basePath, onState: state => renderAccounts(view, state, { id, canCommand: controller.canCommand }) });
+  const controller = createAccountsController({ basePath, profileProvider: savedDirectorProfile, onState: state => renderAccounts(view, state, { id, canCommand: controller.canCommand }) });
   if (id) {
     const n = view.nodes;
     for (const [node, key] of [['channel','channel'],['chat-mode','chatMode'],['reply-source','replySource'],['message-text','text']]) n[node].addEventListener('input', () => controller.edit(id, key, n[node].value));

@@ -102,6 +102,7 @@ export class ExchangeEngine {
     if (!finite && this.s.clients.size !== 2) return [];
     return this.db.prepare('SELECT * FROM host_clients WHERE channel=?').all(channel)
       .filter(c => this.s.clients.has(c.client_id) && this.s.eligible(c) && c.exchange_stream_id
+        && (!this.s.director || this.s.director.profile(c.client_id).chatMode === 'participate' && this.s.director.canPlan(c.client_id))
         && c.exchange_checked_at > 0 && c.exchange_checked_at >= this.s.now() - EXCHANGE_POLICY.contextMs
         && c.exchange_checked_at <= this.s.now() + 5000)
       .sort((a, b) => a.account.localeCompare(b.account));
@@ -114,6 +115,8 @@ export class ExchangeEngine {
       WHERE e.channel=? AND ((a.account=? AND b.account=?) OR (a.account=? AND b.account=?))
       ORDER BY e.rowid DESC LIMIT 1`).get(channel, a.account, b.account, b.account, a.account) || { last_run: 0, initiator: '' };
   }
+  scenes(pair = null) { return this.s.director ? this.s.director.scenes(pair) : SCENES; }
+  render(sceneId, turn, other) { return this.s.director ? this.s.director.renderScene(sceneId, turn, other) : renderLine(sceneId, turn, other); }
   partners(channel, run = null) {
     const active = this.eligiblePartners(channel);
     if (run) {
@@ -128,6 +131,7 @@ export class ExchangeEngine {
     for (let i = 0; i < active.length; i++) for (let j = i + 1; j < active.length; j++) {
       const a = active[i], b = active[j];
       if (a.exchange_stream_id !== b.exchange_stream_id) continue;
+      if (!this.scenes([a, b]).length) continue;
       pairs.push({ pair: [a, b], last: this.lastPair(channel, [a, b]).last_run,
         key: `${a.account}:${b.account}` });
     }
@@ -203,7 +207,7 @@ export class ExchangeEngine {
         }
         const current = this.db.prepare('SELECT * FROM host_exchange_schedules WHERE channel=?').get(channel);
         const used = new Set(this.db.prepare('SELECT scene_id FROM host_used_scenes WHERE channel=?').all(channel).map(x => x.scene_id));
-        const remaining = SCENES.filter(x => !used.has(x.id));
+        const remaining = this.scenes(pair).filter(x => !used.has(x.id));
         if (!remaining.length) { this.schedule(channel, 0, 'exhausted', 'All curated scenes have been used; exchanges remain quiet.'); continue; }
         if (current.next_at && current.next_at <= this.s.now() && ['waiting_for_partners', 'paused'].includes(current.state)) {
           this.schedule(channel, this.s.now() + this.delay('interval'), 'scheduled', 'A fresh warmup follows the companions returning.'); continue;
@@ -221,7 +225,7 @@ export class ExchangeEngine {
         for (const [i, c] of [first, second].entries()) {
           const other = i ? first : second, turn = i + 1;
           this.db.prepare("INSERT INTO host_exchange_lines(id,exchange_id,turn,account,other_account,text_key,not_before,expires_at,state) VALUES (?,?,?,?,?,?,?,?,?)")
-            .run(randomUUID(), id, turn, c.account, other.account, messageKey(renderLine(scene.id, turn, other.account)), i ? 0 : this.s.now(), deadline, i ? 'waiting' : 'offered');
+            .run(randomUUID(), id, turn, c.account, other.account, messageKey(this.render(scene.id, turn, other.account)), i ? 0 : this.s.now(), deadline, i ? 'waiting' : 'offered');
         }
         this.db.prepare("UPDATE host_exchange_schedules SET last_initiator=?,next_at=?,state='turn_1',reason='First companion line is due.' WHERE channel=?").run(first.account, this.s.now(), channel);
         this.s.event('', channel, 'exchange', 'A new two-line companion exchange was scheduled.');
@@ -240,7 +244,7 @@ export class ExchangeEngine {
     // presence must not invalidate the helper's final local validation.
     if (!g.ok && !(g.code === 'exchange_wait' && line.state === 'leased')) return undefined;
     return { id: line.id, account: line.account, channel, streamId: run.stream_id, key: `exchange:${line.id}`,
-      text: renderLine(run.scene_id, line.turn, line.other_account), notBefore: line.not_before, expiresAt: line.expires_at };
+      text: this.render(run.scene_id, line.turn, line.other_account), notBefore: line.not_before, expiresAt: line.expires_at };
   }
   validate(c, p, begin = false) {
     const line = this.db.prepare('SELECT * FROM host_exchange_lines WHERE id=?').get(p.exchangeId || p.exchange_id || '');
@@ -286,6 +290,6 @@ export class ExchangeEngine {
     return { enabled: this.enabled, intervalMinMs: EXCHANGE_POLICY.intervalMinMs, intervalMaxMs: EXCHANGE_POLICY.intervalMaxMs,
       replyMinMs: EXCHANGE_POLICY.replyMinMs, replyMaxMs: EXCHANGE_POLICY.replyMaxMs,
       channels: this.db.prepare('SELECT * FROM host_exchange_schedules ORDER BY channel').all().map(x => ({ channel: x.channel, state: x.state, nextAt: iso(x.next_at), reason: x.reason,
-        usedScenes: this.db.prepare('SELECT COUNT(*) AS n FROM host_used_scenes WHERE channel=?').get(x.channel).n, totalScenes: SCENES.length })) };
+        usedScenes: this.db.prepare('SELECT COUNT(*) AS n FROM host_used_scenes WHERE channel=?').get(x.channel).n, totalScenes: this.scenes().length })) };
   }
 }

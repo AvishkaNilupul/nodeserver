@@ -1,10 +1,14 @@
 # Stream Companion Host
 
+The Mac host owns the message bank, automatic decisions and outgoing history for the three existing personal companions. **Messages** edits the central catalog and shows the same delivery rows used by account details. Extensions report browser evidence and execute exact server plans; helpers retain Twitch authorization and final identity/channel/Stop checks. The protected site remains its existing typed gateway.
+
+Current authority, schemas and paused migration contract: [CENTRAL-DIRECTOR-1126.md](docs/CENTRAL-DIRECTOR-1126.md). Design: [ADR-003](docs/ADR-003-central-director.md). The sections below retain the original coordination, operations and paired-exchange history. Never restore an older SQLite or journal over newer outcomes, or resume an older extension's automatic planner during rollback.
+
 Optional remote access is available through the server's **Bots → Twitch Controller** menu, using its existing superadmin login and two-factor requirements. The protected route is `/admin/stream-companion/accounts`. Chrome, Twitch authorization, helper credentials and the coordination database stay on the Mac. The Mac must be awake and signed in, with the intended Chrome profiles open. Remote installation or reconnecting never starts a stopped companion.
 
 Remote setup uses a separate private `private/remote.json` pairing, a fixed loopback reverse connection configured in `private/tunnel.json`, and matching private gateway settings on the server. Neither private file belongs in source control. The local URLs below continue to work. `npm run remote:status` checks the Mac connection; `remote:stop` disables outside access without changing companion intent. See [remote controller contract](docs/REMOTE-CONTROLLER.md).
 
-Local account controls and shared turn-taking for the two existing personal Twitch companions. Open [Accounts](http://127.0.0.1:8795/accounts) for routine Start/Stop, stream, settings and activity controls, or [Shared coordination](http://127.0.0.1:8795/) for shared limits and exchanges. The original read-only dashboard at8794 remains independent.
+Local account controls and shared turn-taking for the three existing personal Twitch companions. Open [Accounts](http://127.0.0.1:8795/accounts) for routine Start/Stop, stream, settings and activity controls, [Messages](http://127.0.0.1:8795/messages) for the central bank and outgoing history, or [Shared coordination](http://127.0.0.1:8795/) for shared limits and exchanges. The original read-only dashboard at8794 remains independent.
 
 The coordination page shows each account's connection, playback observation, readiness, waiting reason, shared channel allowance and recent decisions. **Pause coordination** holds new turn grants across both accounts; **Resume coordination** restores central eligibility. Neither button signs into Twitch or arms a stopped companion. Start/Stop each companion on its own account page; the existing extension Simple and Advanced pages remain available as fallback controls.
 
@@ -12,11 +16,12 @@ The coordination page shows each account's connection, playback observation, rea
 
 The routine controls are now available locally:
 
-- [Both accounts](http://127.0.0.1:8795/accounts)
+- [All accounts](http://127.0.0.1:8795/accounts)
 - [Main companion](http://127.0.0.1:8795/accounts/primary)
 - [Second companion](http://127.0.0.1:8795/accounts/test)
+- [Third companion](http://127.0.0.1:8795/accounts/third)
 
-Either account page can control its designated account from either browser profile. Start selects the channel, reply mode/source and recovery preference, then opens the real Twitch watch page in that account's Chrome profile. Stop interrupts a pending Start and saves a private hold across helper restarts. Open stream returns to the tracked watch tab. Safe settings can be saved while stopped without resuming it. Existing extension controls remain a fallback.
+Each account page controls its designated account. Start selects the channel and recovery preference, uses the mode/source saved in Messages, then opens the real Twitch watch page in that account's Chrome profile. Stop interrupts a pending Start and saves a private hold across helper restarts. Open stream returns to the tracked watch tab. Safe settings can be saved while stopped without resuming it. Existing extension controls retain local Stop and final execution checks; automatic content selection stays central.
 
 Pages show independent chat, video, browser check-in and permission status; current broadcast metadata; incoming public chat; retained delivery history; pending/completed commands; and earned-drop controls. Reply drafts and summaries are separate from explicit reviewed-message sending. An accepted command is shown as queued until the browser confirms it. Missing or stale browser state is unverified, not proof of playback. Verified offline channels can be armed to wait for the stream to return; known offline metadata blocks automatic posts.
 

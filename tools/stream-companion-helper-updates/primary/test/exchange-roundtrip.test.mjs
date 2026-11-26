@@ -1,3 +1,4 @@
+import { installDirectorFixture } from './director-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -33,6 +34,7 @@ async function harness(t, hooks = {}) {
       } });
     twitch = new TwitchChat({ credentials: { account: client.account, userId: String(123 + i) }, coordinator, now: () => time,
       saveHistory: async history => saved[i].push(structuredClone(history)) });
+    installDirectorFixture(twitch);
     twitch.connected = true; twitch.channel = channel; twitch.broadcasterId = '456'; twitch.ensureIdentity = async () => {};
     twitch.inspectChannel = async () => ({ streamContext: { isLive: true, streamId }, sharedChat: false, chatSettings: {} });
     twitch.api = async (path, body) => {
@@ -71,7 +73,7 @@ test('two real adapters complete only the exact scheduled plain two-line exchang
   assert.equal((await h.send(first)).delivery, 'confirmed');
   const request = h.requests.find(x => x.path === '/internal/reserve');
   assert.equal(request.body.exchangeId, first.offer.id); assert.equal(request.body.replyId, '');
-  assert.equal('text' in request.body, false); assert.equal('replyAt' in request.body, false);
+  assert.equal(request.body.text, first.offer.text); assert.ok(request.body.planId); assert.ok(request.body.authorityEpoch); assert.equal('replyAt' in request.body, false);
   await h.refresh(); assert.equal(h.offers().length, 0);
   await h.tick(180_000); await h.refresh();
   const second = h.offers()[0]; assert.ok(second); assert.notEqual(second.h.client.account, first.h.client.account);
