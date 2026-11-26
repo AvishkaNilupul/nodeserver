@@ -32,3 +32,7 @@ The host stores scene identifiers, timestamps and outcomes rather than incoming 
 Curated scenes give predictable boundaries and exact-text validation, with a finite supply. When all scenes have been used in a channel, the feature stops until new scenes are added. Slow intervals keep this secondary to the stream's conversation. Requiring both profiles to stay fresh means a browser observation interruption can cancel an exchange, which is preferable to continuing alone or replaying old lines after recovery.
 
 Revisit scene authoring if the owner wants a larger collection. Revisit hosting only if the browser workers move to an always-on machine; this feature does not keep a sleeping Mac online.
+
+## 2026-11-26 roster amendment
+
+The fourth personal companion extends the fixed eligible roster to four, yielding six possible pairs. The two-line scene, immutable partner binding, shared limits and consumed-scene semantics are unchanged. The migration preserves prior scene identities and all delivery history; [FOURTH-PROFILE-1126.md](FOURTH-PROFILE-1126.md) is the rollout contract.

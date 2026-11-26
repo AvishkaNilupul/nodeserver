@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { defaultBank, validateBank, renderBankLine, digest, opaque, exact, record, failure, PROFILE_IDS, REPLY_CATEGORIES } from './bank.mjs';
+import { defaultBank, validateBank, upgradeBankForFourth, renderBankLine, digest, opaque, exact, record, failure, PROFILE_IDS, REPLY_CATEGORIES } from './bank.mjs';
 import { messageKey, SCENES } from './exchanges.mjs';
 import { localReply, normalizeStreamContext } from './reply-policy.mjs';
 import { validateReply, replyOpportunity } from './text-policy.mjs';
@@ -38,6 +38,8 @@ export class Director {
     if (!this.db.prepare('PRAGMA table_info(director_plans)').all().some(x => x.name === 'target_key')) this.db.exec("ALTER TABLE director_plans ADD COLUMN target_key TEXT NOT NULL DEFAULT ''");
     this.s.transaction(() => {
       if (!this.db.prepare('SELECT 1 FROM director_banks LIMIT 1').get()) this.db.prepare('INSERT INTO director_banks VALUES (1,?,?,?)').run(JSON.stringify(validateBank(defaultBank())), this.s.now(), 'initial-defaults');
+      const current = this.bank(), upgraded = upgradeBankForFourth(current.bank);
+      if (upgraded) this.db.prepare('INSERT INTO director_banks VALUES (?,?,?,?)').run(current.revision + 1, JSON.stringify(upgraded), this.s.now(), 'migration/fourth/v1');
       for (const c of this.s.clients.values()) this.db.prepare('INSERT OR IGNORE INTO director_profiles(client_id) VALUES (?)').run(c.id);
       for (const scene of SCENES) this.db.prepare('INSERT OR IGNORE INTO director_scenes VALUES (?,?,?)').run(digest(JSON.stringify(scene.lines)), scene.id, JSON.stringify(scene.lines));
       this.registerScenes(this.bank().bank);
@@ -209,6 +211,12 @@ export class Director {
     if (old) {
       if (old.account !== value.account || old.channel !== value.channel || old.text_key && value.textKey && old.text_key !== value.textKey) throw failure('History identity changed.', 409);
       const upgrade = (rank[value.delivery] ?? -1) > (rank[old.delivery] ?? -1);
+      // Reopening the host can backfill consumed opportunities without making
+      // an unchanged historical send appear to be a new observation.
+      const changed = upgrade || old.text === null && value.text != null
+        || !old.category && !!value.category || !old.reply_id && !!value.replyId || !old.reply_to && !!value.replyTo
+        || !!value.messageId && value.delivery === 'confirmed' && value.messageId !== old.message_id;
+      if (!changed) return;
       this.db.prepare('UPDATE director_history SET text=COALESCE(text,?),delivery=?,updated_at=?,submitted=?,category=CASE WHEN category=\'\' THEN ? ELSE category END,reply_id=CASE WHEN reply_id=\'\' THEN ? ELSE reply_id END,reply_to=CASE WHEN reply_to=\'\' THEN ? ELSE reply_to END,message_id=CASE WHEN ?<>\'\' AND ?=\'confirmed\' THEN ? ELSE message_id END,reason=CASE WHEN ? THEN ? ELSE reason END WHERE attempt_id=?')
         .run(value.text ?? null, upgrade ? value.delivery : old.delivery, this.s.now(), upgrade ? Number(value.submitted) : old.submitted, value.category || '', value.replyId || '', value.replyTo || '', value.messageId || '', value.delivery, value.messageId || '', Number(upgrade), value.reason || '', value.attemptId);
       return;
@@ -511,7 +519,7 @@ export class Director {
         imports, plans: this.db.prepare("SELECT * FROM director_plans WHERE state IN ('offered','leased','generating','submitting','unknown') ORDER BY created_at DESC LIMIT 30").all().map(row => {
           const p = JSON.parse(row.payload_json); return { planId: row.id, accountId: row.client_id, account: p.account, channel: p.channel, streamId: p.streamId, kind: p.kind, text: p.text,
             category: p.category, source: p.source, state: row.state, notBefore: p.notBefore, expiresAt: p.expiresAt, reason: row.reason, cancellable: ['offered', 'leased', 'generating'].includes(row.state) };
-        }), ...this.history(), lastMutation: current.requestId === 'initial-defaults' || current.requestId.startsWith('seed:') ? null : { requestId: current.requestId, revision: current.revision } };
+        }), ...this.history(), lastMutation: current.requestId === 'initial-defaults' || current.requestId.startsWith('seed:') || current.requestId === 'migration/fourth/v1' ? null : { requestId: current.requestId, revision: current.revision } };
     });
   }
 }

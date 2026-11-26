@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 const SOURCES = Object.freeze([
   { id: 'primary', name: 'Main companion', port: 8792, configPath: new URL('../../stream-companion/private/config.json', import.meta.url) },
   { id: 'test', name: 'Second companion', port: 8793, configPath: new URL('../../stream-companion-test/private/config.json', import.meta.url) },
-  { id: 'third', name: 'Third companion', port: 8796, configPath: new URL('../../stream-companion-third/private/config.json', import.meta.url) }
+  { id: 'third', name: 'Third companion', port: 8796, configPath: new URL('../../stream-companion-third/private/config.json', import.meta.url) },
+  { id: 'fourth', name: 'Fourth companion', port: 8797, configPath: new URL('../../stream-companion-fourth/private/config.json', import.meta.url) }
 ]);
 const LOGIN = /^[a-z0-9_]{3,25}$/;
 const ACTIONS = new Set(['start', 'stop', 'watch', 'settings', 'draft', 'send', 'drops-enable', 'drops-disable', 'drops-check']);

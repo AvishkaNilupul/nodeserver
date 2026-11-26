@@ -1,6 +1,8 @@
 # Stream Companion Host
 
-The Mac host owns the message bank, automatic decisions and outgoing history for the three existing personal companions. **Messages** edits the central catalog and shows the same delivery rows used by account details. Extensions report browser evidence and execute exact server plans; helpers retain Twitch authorization and final identity/channel/Stop checks. The protected site remains its existing typed gateway.
+Fourth-profile setup and additive migration: [FOURTH-PROFILE-1126.md](docs/FOURTH-PROFILE-1126.md). Existing bank revisions, delivery records, imports and consumed scenes remain intact.
+
+The Mac host owns the message bank, automatic decisions and outgoing history for the four personal companions. **Messages** edits the central catalog and shows the same delivery rows used by account details. Extensions report browser evidence and execute exact server plans; helpers retain Twitch authorization and final identity/channel/Stop checks. The protected site remains its existing typed gateway.
 
 Current authority, schemas and paused migration contract: [CENTRAL-DIRECTOR-1126.md](docs/CENTRAL-DIRECTOR-1126.md). Design: [ADR-003](docs/ADR-003-central-director.md). The sections below retain the original coordination, operations and paired-exchange history. Never restore an older SQLite or journal over newer outcomes, or resume an older extension's automatic planner during rollback.
 
@@ -8,9 +10,9 @@ Optional remote access is available through the server's **Bots → Twitch Contr
 
 Remote setup uses a separate private `private/remote.json` pairing, a fixed loopback reverse connection configured in `private/tunnel.json`, and matching private gateway settings on the server. Neither private file belongs in source control. The local URLs below continue to work. `npm run remote:status` checks the Mac connection; `remote:stop` disables outside access without changing companion intent. See [remote controller contract](docs/REMOTE-CONTROLLER.md).
 
-Local account controls and shared turn-taking for the three existing personal Twitch companions. Open [Accounts](http://127.0.0.1:8795/accounts) for routine Start/Stop, stream, settings and activity controls, [Messages](http://127.0.0.1:8795/messages) for the central bank and outgoing history, or [Shared coordination](http://127.0.0.1:8795/) for shared limits and exchanges. The original read-only dashboard at8794 remains independent.
+Local account controls and shared turn-taking for the four personal Twitch companions. Open [Accounts](http://127.0.0.1:8795/accounts) for routine Start/Stop, stream, settings and activity controls, [Messages](http://127.0.0.1:8795/messages) for the central bank and outgoing history, or [Shared coordination](http://127.0.0.1:8795/) for shared limits and exchanges. The original read-only dashboard at8794 remains independent.
 
-The coordination page shows each account's connection, playback observation, readiness, waiting reason, shared channel allowance and recent decisions. **Pause coordination** holds new turn grants across both accounts; **Resume coordination** restores central eligibility. Neither button signs into Twitch or arms a stopped companion. Start/Stop each companion on its own account page; the existing extension Simple and Advanced pages remain available as fallback controls.
+The coordination page shows each account's connection, playback observation, readiness, waiting reason, shared channel allowance and recent decisions. **Pause coordination** holds new turn grants across all companions; **Resume coordination** restores central eligibility. Neither button signs into Twitch or arms a stopped companion. Start/Stop each companion on its own account page; the existing extension Simple and Advanced pages remain available as fallback controls.
 
 ## Account pages
 
@@ -20,6 +22,7 @@ The routine controls are now available locally:
 - [Main companion](http://127.0.0.1:8795/accounts/primary)
 - [Second companion](http://127.0.0.1:8795/accounts/test)
 - [Third companion](http://127.0.0.1:8795/accounts/third)
+- [Fourth companion](http://127.0.0.1:8795/accounts/fourth)
 
 Each account page controls its designated account. Start selects the channel and recovery preference, uses the mode/source saved in Messages, then opens the real Twitch watch page in that account's Chrome profile. Stop interrupts a pending Start and saves a private hold across helper restarts. Open stream returns to the tracked watch tab. Safe settings can be saved while stopped without resuming it. Existing extension controls retain local Stop and final execution checks; automatic content selection stays central.
 
@@ -33,7 +36,7 @@ Account control is loopback-only with same-origin/CSRF checks. The server reads 
 
 - Accounts exchange presence and turn proposals through this host. An optional **Occasional bot exchanges** mode adds short two-line exchanges between participating companion accounts in the same live broadcast.
 - One generic category question per channel/broadcast and one companion answer per incoming message. Case, punctuation and spacing changes do not bypass recent duplicate suppression.
-- Shared channel limit: six actual attempts/hour, at least three minutes apart across both accounts. Existing per-account ten-minute participation spacing remains.
+- Shared channel limit: six actual attempts/hour, at least three minutes apart across all companions. Existing per-account ten-minute participation spacing remains.
 - Fresh direct replies precede generic questions. Equally eligible waiting companions alternate away from the last speaker. Stale playback, disconnected clients and old-channel proposals cannot take a turn.
 - Unused leases expire. Known confirmed/rejected outcomes survive restart and completion replay; uncertain provider delivery holds its opportunity without retry. A host outage holds new sends without consuming a send allowance.
 

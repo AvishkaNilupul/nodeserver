@@ -7,8 +7,8 @@ import { createAccountsController } from '../public/accounts.js';
 import { defaultBank, validateBank } from '../lib/bank.mjs';
 
 const at = Date.parse('2026-11-26T04:00:00Z');
-const bank = () => ({ entries: [{ id: 'hello', kind: 'greeting', category: 'greeting', lines: ['hello chat'], accountIds: ['primary', 'test', 'third'], enabled: true }], profiles: ['primary', 'test', 'third'].map(id => ({ id, chatMode: 'mentions', replySource: 'local' })) });
-const snapshot = extra => ({ protocol: 1, ready: false, reason: 'Waiting for imported history.', updatedAt: new Date(at).toISOString(), csrfToken: 'fixture-ephemeral-csrf', revision: 1, bank: bank(), profiles: ['primary', 'test', 'third'].map(id => ({ id, account: `${id}_account`, chatMode: 'mentions', replySource: 'local', ready: false, reason: 'History pending.' })), plans: [], history: [], imports: [], nextBeforeId: null, lastMutation: null, ...extra });
+const bank = () => ({ entries: [{ id: 'hello', kind: 'greeting', category: 'greeting', lines: ['hello chat'], accountIds: ['primary', 'test', 'third'], enabled: true }], profiles: ['primary', 'test', 'third', 'fourth'].map(id => ({ id, chatMode: 'mentions', replySource: 'local' })) });
+const snapshot = extra => ({ protocol: 1, ready: false, reason: 'Waiting for imported history.', updatedAt: new Date(at).toISOString(), csrfToken: 'fixture-ephemeral-csrf', revision: 1, bank: bank(), profiles: ['primary', 'test', 'third', 'fourth'].map(id => ({ id, account: `${id}_account`, chatMode: 'mentions', replySource: 'local', ready: false, reason: 'History pending.' })), plans: [], history: [], imports: [], nextBeforeId: null, lastMutation: null, ...extra });
 const response = (value, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => structuredClone(value) });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const ctrl = (fetchImpl, extra = {}) => { let n = 0; return createDirectorController({ fetchImpl, now: () => at, requestId: () => `request-${++n}`, ...extra }); };
@@ -32,7 +32,7 @@ test('bank payload explicitly whitelists canonical input and strips response/pri
   const input = bank(); input.revision = 42; input.private = 'never'; input.entries[0].textKey = 'fingerprint'; input.entries[0].token = 'never'; input.profiles[0].account = 'never';
   assert.deepEqual(bankPayload(input), bank()); assert.doesNotMatch(JSON.stringify(bankPayload(input)), /never|fingerprint|revision/);
   assert.equal(bankValidation(bank()), '');
-  assert.equal(bankValidation(defaultBank()), ''); assert.deepEqual(validateBank(bankPayload(defaultBank())), defaultBank());
+  assert.equal(bankValidation(defaultBank()), ''); assert.deepEqual(validateBank(bankPayload(defaultBank())), validateBank(defaultBank()));
 });
 
 test('bank validation covers kind/category limits, exact exchanges, templates, commands and byte bounds', () => {

@@ -168,8 +168,8 @@ test('snapshot and all fixed clip status reads run concurrently within one timeo
   f.accounts.snapshot = async () => { started.push('snapshot'); await barrier.promise; return originalSnapshot(); };
   f.accounts.clipStatus = async id => { started.push(id); await barrier.promise; return originalStatus(id); };
   const ticking = f.c.tick(); await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(started, ['snapshot', 'primary', 'test', 'third']);
-  barrier.resolve(); await ticking;
+  try { assert.deepEqual(started, ['snapshot', 'primary', 'test', 'third', 'fourth']); }
+  finally { barrier.resolve(); await ticking; }
 });
 
 test('authorization start requires held disconnected account and exposes public fields only', async t => {

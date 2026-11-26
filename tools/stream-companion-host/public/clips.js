@@ -1,8 +1,12 @@
 import { basePathFromModule, controllerBasePath, controllerPath, requestNetwork, networkTitle, bindControllerLifecycle } from './controller-path.js';
 
-const IDS = ['primary', 'test', 'third'];
-const CREATORS = Object.freeze({ primary: ['primary'], test: ['test'], third: ['third'], both: ['primary', 'test'], 'primary-third': ['primary', 'third'], 'test-third': ['test', 'third'], all: ['primary', 'test', 'third'] });
-const CREATOR_LABELS = { primary: 'Main account', test: 'Second account', third: 'Third account', both: 'Main + second', 'primary-third': 'Main + third', 'test-third': 'Second + third', all: 'All three' };
+const IDS = ['primary', 'test', 'third', 'fourth'];
+const CREATORS = Object.freeze({ primary: ['primary'], test: ['test'], third: ['third'], fourth: ['fourth'], both: ['primary', 'test'],
+  'primary-third': ['primary', 'third'], 'test-third': ['test', 'third'], 'primary-fourth': ['primary', 'fourth'], 'test-fourth': ['test', 'fourth'], 'third-fourth': ['third', 'fourth'],
+  'original-three': ['primary', 'test', 'third'], 'primary-test-fourth': ['primary', 'test', 'fourth'], 'primary-third-fourth': ['primary', 'third', 'fourth'], 'test-third-fourth': ['test', 'third', 'fourth'], all: ['primary', 'test', 'third', 'fourth'] });
+const CREATOR_LABELS = { primary: 'Main account', test: 'Second account', third: 'Third account', fourth: 'Fourth account', both: 'Main + second',
+  'primary-third': 'Main + third', 'test-third': 'Second + third', 'primary-fourth': 'Main + fourth', 'test-fourth': 'Second + fourth', 'third-fourth': 'Third + fourth',
+  'original-three': 'Original three', 'primary-test-fourth': 'Main + second + fourth', 'primary-third-fourth': 'Main + third + fourth', 'test-third-fourth': 'Second + third + fourth', all: 'All four' };
 const accountLabel = id => CREATOR_LABELS[id] || 'Account';
 const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const LOGIN = /^[a-z0-9_]{3,25}$/;

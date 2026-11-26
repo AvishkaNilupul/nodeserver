@@ -1,0 +1,23 @@
+{
+  "name": "stream-companion-fourth",
+  "version": "0.12.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "setup": "node setup.mjs",
+    "service:install": "node service.mjs install",
+    "service:start": "node service.mjs start",
+    "service:stop": "node service.mjs stop",
+    "service:status": "node service.mjs status",
+    "service:restart": "node service.mjs restart",
+    "service:uninstall": "node service.mjs uninstall"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}

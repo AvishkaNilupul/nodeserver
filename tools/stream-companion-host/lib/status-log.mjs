@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const IDS = ['primary', 'test', 'third'];
+const IDS = ['primary', 'test', 'third', 'fourth'];
 const WATCH = new Set(['playing', 'paused', 'buffering', 'stalled', 'ad', 'advertisement', 'offline', 'ended', 'checking', 'commercial', 'error', 'unknown']);
 const CODES = ['authorization_revoked', 'chat_user_banned', 'user_removed', 'version_removed', 'unknown_reason'];
 const LIMIT = 1024 * 1024, CHECKPOINT_MS = 60_000, FRESH_MS = 45_000;

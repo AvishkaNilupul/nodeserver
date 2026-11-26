@@ -167,9 +167,9 @@ test('a definitive authorization start failure is shown without a pending lock e
   assert.match(f.c.getState().error, /not accepted/); assert.ok(!f.c.getState().error.includes('Unreadable'));
 });
 
-test('all seven finite clip creator subsets save and create with exact account identities', async () => {
+test('original clip choices plus preserved original-three and all-four save and create with exact identities', async () => {
   const choices = { primary: ['primary'], test: ['test'], third: ['third'], both: ['primary', 'test'],
-    'primary-third': ['primary', 'third'], 'test-third': ['test', 'third'], all: ['primary', 'test', 'third'] };
+    'primary-third': ['primary', 'third'], 'test-third': ['test', 'third'], 'original-three': ['primary', 'test', 'third'], all: ['primary', 'test', 'third', 'fourth'] };
   for (const [selection, accountIds] of Object.entries(choices)) {
     const f = fixture({ data: snapshot({ accounts: [account(), account('test'), account('third', { account: 'third_account' })] }) });
     await f.c.refresh(); f.c.edit('selection', selection);
@@ -184,7 +184,7 @@ test('all seven finite clip creator subsets save and create with exact account i
 test('saved third pairs roundtrip without silently becoming the original two accounts', async () => {
   for (const [accountIds, selection, label] of [
     [['primary', 'third'], 'primary-third', 'Main + third'], [['third', 'test'], 'test-third', 'Second + third'],
-    [['primary', 'test'], 'both', 'Main + second'], [['primary', 'test', 'third'], 'all', 'All three']
+    [['primary', 'test'], 'both', 'Main + second'], [['primary', 'test', 'third'], 'original-three', 'Original three']
   ]) {
     const f = fixture({ data: snapshot({ settings: { enabled: true, channel: 'aviskarex', accountIds }, accounts: [account(), account('test'), account('third')] }) });
     await f.c.refresh(); assert.equal(f.c.getState().form.selection, selection);

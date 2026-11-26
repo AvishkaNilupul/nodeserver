@@ -3,7 +3,8 @@ import { SCENES } from './exchanges.mjs';
 import { replyBank } from './reply-policy.mjs';
 import { validateReply } from './text-policy.mjs';
 
-export const PROFILE_IDS = Object.freeze(['primary', 'test', 'third']);
+export const PROFILE_IDS = Object.freeze(['primary', 'test', 'third', 'fourth']);
+const LEGACY_PROFILE_IDS = Object.freeze(['primary', 'test', 'third']);
 export const REPLY_CATEGORIES = Object.freeze([...Object.keys(replyBank), 'game', 'streamtitle', 'livestatus']);
 export const TOPIC_CATEGORIES = Object.freeze(['general', 'just chatting', 'music', 'art']);
 export const digest = value => createHash('sha256').update(value).digest('hex');
@@ -31,14 +32,14 @@ export function defaultBank() {
   ], profiles: PROFILE_IDS.map(id => ({ id, chatMode: 'mentions', replySource: 'local' })) };
 }
 
-export function validateBank(input) {
+function validateBankForRoster(input, profileIds) {
   if (!exact(input, ['entries', 'profiles']) || !Array.isArray(input.entries) || input.entries.length < 1 || input.entries.length > 128
-    || !Array.isArray(input.profiles) || input.profiles.length !== 3 || Buffer.byteLength(JSON.stringify(input)) > 60000) throw failure('The message bank is invalid or too large.');
+    || !Array.isArray(input.profiles) || input.profiles.length !== profileIds.length || Buffer.byteLength(JSON.stringify(input)) > 60000) throw failure('The message bank is invalid or too large.');
   const seen = new Set();
   const entries = input.entries.map(item => {
     if (!exact(item, ['id', 'kind', 'category', 'lines', 'accountIds', 'enabled']) || typeof item.id !== 'string' || !/^[a-z0-9_:-]{1,80}$/.test(item.id) || seen.has(item.id)
       || !['greeting', 'topic', 'reply', 'exchange'].includes(item.kind) || typeof item.enabled !== 'boolean'
-      || !Array.isArray(item.accountIds) || !item.accountIds.length || item.accountIds.length > 3 || new Set(item.accountIds).size !== item.accountIds.length || item.accountIds.some(id => !PROFILE_IDS.includes(id))
+      || !Array.isArray(item.accountIds) || !item.accountIds.length || item.accountIds.length > profileIds.length || new Set(item.accountIds).size !== item.accountIds.length || item.accountIds.some(id => !profileIds.includes(id))
       || !Array.isArray(item.lines) || !item.lines.length || item.lines.length > 16 || item.kind === 'exchange' && item.lines.length !== 2) throw failure('A message bank entry is invalid.');
     const categories = item.kind === 'reply' ? REPLY_CATEGORIES : item.kind === 'topic' ? TOPIC_CATEGORIES : [item.kind];
     if (!categories.includes(item.category)) throw failure('Choose a supported message category.');
@@ -54,12 +55,29 @@ export function validateBank(input) {
     });
     return { id: item.id, kind: item.kind, category: item.category, lines, accountIds: [...item.accountIds].sort(), enabled: item.enabled };
   });
-  const profiles = PROFILE_IDS.map(id => {
+  const profiles = profileIds.map(id => {
     const matches = input.profiles.filter(profile => profile?.id === id), profile = matches[0];
-    if (matches.length !== 1 || !exact(profile, ['id', 'chatMode', 'replySource']) || !['mentions', 'participate'].includes(profile.chatMode) || !['local', 'ai'].includes(profile.replySource)) throw failure('The three message profiles are required.');
+    if (matches.length !== 1 || !exact(profile, ['id', 'chatMode', 'replySource']) || !['mentions', 'participate'].includes(profile.chatMode) || !['local', 'ai'].includes(profile.replySource)) throw failure('Every supported message profile is required.');
     return { id, chatMode: profile.chatMode, replySource: profile.replySource };
   });
   return { entries, profiles };
+}
+
+export function validateBank(input) { return validateBankForRoster(input, PROFILE_IDS); }
+
+// A new immutable revision extends only the previously shared groups. Existing
+// revisions and selective assignments never become defaults for another account.
+export function upgradeBankForFourth(input) {
+  if (Array.isArray(input?.profiles) && input.profiles.length === PROFILE_IDS.length) {
+    validateBank(input);
+    return null;
+  }
+  const previous = validateBankForRoster(input, LEGACY_PROFILE_IDS);
+  return validateBank({
+    entries: previous.entries.map(entry => ({ ...entry, accountIds: entry.accountIds.length === LEGACY_PROFILE_IDS.length
+      && LEGACY_PROFILE_IDS.every(id => entry.accountIds.includes(id)) ? [...entry.accountIds, 'fourth'] : entry.accountIds })),
+    profiles: [...previous.profiles, { id: 'fourth', chatMode: 'mentions', replySource: 'local' }]
+  });
 }
 
 export function renderBankLine(line, context) {

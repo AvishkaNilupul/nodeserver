@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { detectHighlight } from './highlights.mjs';
 import { activationUrl } from './accounts.mjs';
 
-const IDS = new Set(['primary', 'test', 'third']), LOGIN = /^[a-z0-9_]{3,25}$/, REQUEST = /^[A-Za-z0-9_:-]{1,160}$/;
+const IDS = new Set(['primary', 'test', 'third', 'fourth']), LOGIN = /^[a-z0-9_]{3,25}$/, REQUEST = /^[A-Za-z0-9_:-]{1,160}$/;
 const STATES = new Set(['queued', 'submitting', 'pending', 'confirmed', 'failed', 'cancelled', 'unknown']);
 const TERMINAL = new Set(['confirmed', 'failed', 'cancelled']);
 const COOLDOWN = 600_000, HOUR = 3_600_000;

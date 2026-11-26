@@ -41,13 +41,13 @@ test('three creator subsets stay exact and manual creation still chooses only on
     c.configure({ enabled: true, channel: 'live_channel', accountIds });
     assert.deepEqual(c.snapshot().settings.accountIds, accountIds);
   }
-  assert.throws(() => c.configure({ enabled: true, channel: 'live_channel', accountIds: [...IDS, 'fourth'] }));
+  assert.throws(() => c.configure({ enabled: true, channel: 'live_channel', accountIds: [...IDS, 'fifth'] }));
   assert.throws(() => c.configure({ enabled: true, channel: 'live_channel', accountIds: ['third', 'third'] }));
   const result = await c.create({ requestId: 'third-moment', channel: 'live_channel', accountIds: ['third'] });
   assert.equal(result.job.accountId, 'third'); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].id, 'third');
   const duplicate = await c.create({ requestId: 'all-same-moment', channel: 'live_channel', accountIds: IDS });
   assert.equal(duplicate.job.requestId, result.job.requestId); assert.equal(f.calls.length, 1);
-  const state = c.snapshot(); assert.deepEqual(state.accounts.map(a => a.id), IDS); assert.equal(state.accounts[2].canAuthorize, true);
+  const state = c.snapshot(); assert.deepEqual(state.accounts.map(a => a.id), [...IDS, 'fourth']); assert.equal(state.accounts[2].canAuthorize, true);
 });
 
 test('the third companion cannot become human highlight evidence when unavailable', async t => {
@@ -126,7 +126,7 @@ test('third page, browser and command routes stay finite and protected locally a
     assert.equal((await f.request(prefix + '/api/accounts/third/browser', { method: 'POST', body: { requestId: 'third-open' }, headers: mutation })).status, 200);
     assert.deepEqual(f.calls.at(-1), { action: 'browser', id: 'third', requestId: 'third-open' });
     const after = f.calls.length;
-    for (const path of ['/api/accounts/fourth/browser', '/api/accounts/third/browser/', '/api/accounts/third/browser?x=1']) {
+    for (const path of ['/api/accounts/fifth/browser', '/api/accounts/third/browser/', '/api/accounts/third/browser?x=1']) {
       assert.ok((await f.request(prefix + path, { method: 'POST', body: { requestId: 'no-action' }, headers: mutation })).status >= 400);
     }
     assert.equal(f.calls.length, after);

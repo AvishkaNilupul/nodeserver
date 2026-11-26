@@ -216,9 +216,9 @@ test('the third profile has a fixed path, separate card and separate detail iden
   const third = instance({ id: 'third', name: 'Third companion', account: 'third_account' });
   const c = controller(async () => reply(snapshot({ instances: [instance(), instance({ id: 'test', name: 'Second companion', account: 'second_account' }), third] })));
   await c.refresh(); const v = view(); renderAccounts(v, c.getState(), { now: at, canCommand: c.canCommand });
-  assert.equal(v.nodes['account-cards'].children.length, 3); assert.match(v.nodes['account-cards'].textContent, /Third companion/);
+  assert.equal(v.nodes['account-cards'].children.length, 4); assert.match(v.nodes['account-cards'].textContent, /Third companion/);
   const links = v.nodes['account-cards'].children.map(card => card.children.at(-1).attributes.href);
-  assert.deepEqual(links, ['/accounts/primary', '/accounts/test', '/accounts/third']);
+  assert.deepEqual(links, ['/accounts/primary', '/accounts/test', '/accounts/third', '/accounts/fourth']);
   renderAccounts(v, c.getState(), { id: 'third', now: at, canCommand: c.canCommand });
   assert.equal(v.nodes['page-eyebrow'].textContent, 'Third profile'); assert.equal(v.nodes['page-title'].textContent, 'Third companion');
   assert.match(v.nodes['page-description'].textContent, /third_account/);

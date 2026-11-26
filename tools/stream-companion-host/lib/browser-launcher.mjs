@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
-const IDS = new Set(['primary', 'test', 'third']);
+const IDS = new Set(['primary', 'test', 'third', 'fourth']);
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PROFILE = /^(?:Default|Profile [1-9][0-9]{0,2})$/;
 const REQUEST_ID = /^[A-Za-z0-9:_-]{1,160}$/;
@@ -12,10 +12,11 @@ const invalidConfig = () => Error('Browser profile setup is invalid.');
 
 function validatedProfiles(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || !['primary,test', 'primary,test,third'].includes(Object.keys(value).sort().join(','))
+      || !['primary,test', 'primary,test,third', 'fourth,primary,test,third'].includes(Object.keys(value).sort().join(','))
       || Object.values(value).some(profile => typeof profile !== 'string' || !PROFILE.test(profile))
       || new Set(Object.values(value)).size !== Object.keys(value).length) throw invalidConfig();
-  return Object.freeze({ primary: value.primary, test: value.test, ...(Object.hasOwn(value, 'third') ? { third: value.third } : {}) });
+  return Object.freeze({ primary: value.primary, test: value.test, ...(Object.hasOwn(value, 'third') ? { third: value.third } : {}),
+    ...(Object.hasOwn(value, 'fourth') ? { fourth: value.fourth } : {}) });
 }
 
 // This optional file is written from the existing, verified Chrome profile

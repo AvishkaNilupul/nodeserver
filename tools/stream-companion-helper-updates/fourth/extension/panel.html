@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Stream Companion Fourth</title><link rel="stylesheet" href="panel.css"></head>
+<body>
+  <header><div class="eyebrow">STREAM COMPANION</div><h1>Watch together.<br>Stay in the chat.</h1><p>Casual conversation, with automation disclosed in the profile.</p><span id="connection" class="badge">Connecting…</span></header>
+  <main><section><a href="simple.html" target="_blank" rel="noopener" style="color:#d1bddf">Open Simple chat ↗</a></section>
+    <section class="session-overview" aria-labelledby="sessionTitle"><h2 id="sessionTitle">Live session</h2>
+      <div class="session-status"><p class="status-label">Playback</p><strong id="playbackStatus">Checks off</strong><p id="playbackDetail" class="hint"></p></div>
+      <div class="session-status"><p class="status-label">Chat</p><strong id="chatActivity">Chat disconnected</strong><p id="chatActivityDetail" class="hint"></p></div>
+      <div class="session-status"><p class="status-label">Chat activity</p><strong id="replyActivity">Automatic chat off</strong><p id="replyActivityDetail" class="hint"></p></div>
+      <div class="actions"><button id="openTwitch">Watch on Twitch</button><button id="stopWatching" class="quiet" disabled>Stop checks</button></div>
+      <p class="hint">Uses Twitch’s normal player and ads. Playback checks and channel syncing apply only to the stream tab opened here. Use Twitch’s controls for video and sound.</p>
+      <div class="latest-reply" aria-labelledby="latestReplyTitle"><h3 id="latestReplyTitle">Last confirmed message</h3><p id="latestReplyText">No confirmed message yet.</p><p id="latestReplyMeta" class="hint"></p><p id="latestAttemptState" class="hint"></p></div>
+    </section>
+    <section><div class="section-title"><h2>Your setup</h2><button id="pause" class="quiet">Pause companion</button></div>
+      <label>Companion account<input id="account" autocomplete="off" placeholder="Twitch login"></label>
+      <label>Chat channel<input id="allowedChannel" autocomplete="off" placeholder="One channel login"></label>
+      <label>Local pairing token<input id="pairingToken" type="password" autocomplete="off" placeholder="From private/config.json"></label>
+      <label>Reply source<select id="replySource"><option value="local">Local reply bank</option><option value="ai">AI provider</option></select></label>
+      <label>Chat mode<select id="chatMode"><option value="mentions">Mentions only</option><option value="participate">Join the conversation</option></select></label>
+      <p id="chatModeHelp" class="hint">Mentions only answers fresh direct @mentions.</p>
+      <label class="check"><input id="autoReply" type="checkbox"> Automatic chat</label>
+      <label class="check"><input id="autoResume" type="checkbox"> Keep running while I’m away</label>
+      <p class="hint">Joining starts with one greeting, then useful conversation or an occasional question about the stream’s category, at least 10 minutes apart. In a quiet room it sends at most one greeting and one question per broadcast, then waits for fresh chat. It requires the selected live stream to be playing. A channel or account change resets the mode to Mentions only.</p>
+      <p class="hint">Away mode reconnects after interruptions and restores your selected chat setting after restarts. Keep this Mac awake and this Chrome profile open. Pause or Disconnect turns away mode off. All messages share a limit of 6 attempts per hour, at least 3 minutes apart; direct mentions keep that 3-minute spacing.</p>
+      <button id="save">Save setup</button>
+      <p id="permissionState" class="hint"></p>
+    </section>
+    <section><h2>Connect official Twitch chat</h2>
+      <p class="hint">Register a <strong>Public</strong> app in the <a href="https://dev.twitch.tv/console/apps" target="_blank" rel="noopener">Twitch developer console</a>, category Chat Bot. If a redirect address is required, use http://localhost:8797. This connection uses device authorization and needs no client secret.</p>
+      <label>Twitch app Client ID<input id="clientId" autocomplete="off" placeholder="From your Twitch developer app"></label>
+      <div class="actions"><button id="authorize">Authorize account</button><button id="authorization" class="secondary" disabled>I authorized it</button></div>
+      <p id="authState" class="hint"></p><a id="authLink" hidden target="_blank" rel="noopener">Open Twitch authorization</a>
+      <div class="actions"><button id="connect" class="secondary">Connect chat</button><button id="disconnect" class="quiet">Disconnect</button></div>
+      <p id="chatState" class="hint"></p>
+      <p class="hint">Sending stops during shared-chat sessions.</p>
+    </section>
+    <section class="drops-section"><details><summary>Earned drops <span id="dropsBadge" class="hint">Off</span></summary>
+      <p class="hint">Automatically claim earned Drops from Twitch’s inventory every five minutes. Keep the inventory tab open; the companion replaces it with a fresh inventory when checking. The stream keeps playing separately. Account connections and purchases need your action.</p>
+      <div class="actions"><button id="dropsEnable">Enable automatic claims</button><button id="dropsDisable" class="quiet">Stop claims</button><button id="dropsCheck" class="secondary">Check now</button></div>
+      <p class="hint">Uses the separate inventory tab and claims only earned rewards for the configured account.</p>
+      <p id="dropsState" class="hint">Automatic claims are off.</p><div id="dropsHistory" class="hint"></div></details>
+    </section>
+    <section><h2>Conversation</h2><p id="stats" class="hint">Connect Twitch chat to receive messages.</p><div id="topics" class="topics"></div><div class="actions"><button id="summary" class="secondary">Catch me up</button><button id="reply">Draft a reply</button></div></section>
+    <section><div class="section-title"><h2 id="draftTitle">Message</h2><button id="manual" class="quiet">Write a message</button></div>
+      <label>Phrase type<select id="phraseCategory"><option value="greeting">Greeting</option><option value="checkin">How’s it going?</option><option value="goodday">Good day</option><option value="roughday">Rough day</option><option value="quietday">Just chilling</option><option value="thanks">Thanks</option><option value="welcome">Welcome</option><option value="farewell">Goodbye</option><option value="goodnight">Good night</option><option value="automation">About automation</option></select></label>
+      <button id="pickPhrase" class="secondary">Pick a phrase</button><p class="hint">Local previews work before Twitch is connected. Keep it short and conversational.</p>
+      <div id="summaryText"></div><textarea id="draft" maxlength="300" rows="3" aria-label="Reply draft" placeholder="Write a message or pick a phrase."></textarea><p id="reason" class="hint"></p><p id="messagePreview" class="hint"></p><button id="send" disabled>Send message</button><p id="sendState" class="hint"></p>
+    </section>
+    <section><h2>Recent chat</h2><div id="chat" class="chat"><p class="hint">Messages arrive through Twitch EventSub.</p></div></section>
+    <section><h2>Send history</h2><div id="history" class="hint">No messages submitted.</div></section>
+    <p id="lastError" class="hint"></p><p id="status" role="status" aria-live="polite"></p>
+  </main><footer>v0.12.0 · Twitch site + chat companion · one account · one channel</footer><script type="module" src="panel.js"></script>
+</body></html>

@@ -11,7 +11,7 @@ const LOCAL_ORIGIN = "http://127.0.0.1:8795";
 const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const STATIC = new Map([
   ["/", "text/html"], ["/accounts", "text/html"],
-  ["/accounts/primary", "text/html"], ["/accounts/test", "text/html"], ["/accounts/third", "text/html"],
+  ["/accounts/primary", "text/html"], ["/accounts/test", "text/html"], ["/accounts/third", "text/html"], ["/accounts/fourth", "text/html"],
   ["/app.js", "text/javascript"], ["/accounts.js", "text/javascript"],
   ["/controller-path.js", "text/javascript"],
   ["/messages", "text/html"], ["/messages.js", "text/javascript"], ["/messages.css", "text/css"],
@@ -19,11 +19,11 @@ const STATIC = new Map([
   ["/style.css", "text/css"], ["/accounts.css", "text/css"],
 ]);
 const DATA = new Set(["/api/status", "/api/accounts", "/api/channels", "/api/clips", "/api/director"]);
-const DIRECTOR_HISTORY = /^\/api\/director\/history\/(all|primary|test|third)\/([0-9]{1,16})$/;
+const DIRECTOR_HISTORY = /^\/api\/director\/history\/(all|primary|test|third|fourth)\/([0-9]{1,16})$/;
 const DIRECTOR_MUTATIONS = new Set(["/api/director/bank", "/api/director/cancel"]);
 const CHANNEL_LOOKUP = /^\/api\/channels\/[a-z0-9_]{3,25}$/;
-const COMMAND = /^\/api\/accounts\/(primary|test|third)\/command$/;
-const BROWSER = /^\/api\/accounts\/(primary|test|third)\/browser$/;
+const COMMAND = /^\/api\/accounts\/(primary|test|third|fourth)\/command$/;
+const BROWSER = /^\/api\/accounts\/(primary|test|third|fourth)\/browser$/;
 const CLIP = /^\/api\/clips\/(create|settings|authorization)$/;
 const object = (x) => !!x && typeof x === "object" && !Array.isArray(x);
 const exact = (x, keys) => object(x) && Object.keys(x).length === keys.length && keys.every((key) => Object.hasOwn(x, key));
@@ -54,8 +54,8 @@ function validCommand(body) {
 }
 
 function validClipAction(path, body) {
-  const ids = value => Array.isArray(value) && value.length >= 1 && value.length <= 3
-    && new Set(value).size === value.length && value.every(id => ["primary", "test", "third"].includes(id));
+  const ids = value => Array.isArray(value) && value.length >= 1 && value.length <= 4
+    && new Set(value).size === value.length && value.every(id => ["primary", "test", "third", "fourth"].includes(id));
   const channel = value => typeof value === "string" && /^[a-z0-9_]{3,25}$/.test(value);
   if (path.endsWith("/settings")) return exact(body, ["enabled", "channel", "accountIds"])
     && typeof body.enabled === "boolean" && channel(body.channel) && ids(body.accountIds);
@@ -63,7 +63,7 @@ function validClipAction(path, body) {
     && typeof body.requestId === "string" && /^[A-Za-z0-9:_-]{1,160}$/.test(body.requestId)
     && channel(body.channel) && ids(body.accountIds);
   if (path.endsWith("/authorization")) return exact(body, ["accountId", "action"])
-    && ["primary", "test", "third"].includes(body.accountId) && ["start", "poll"].includes(body.action);
+    && ["primary", "test", "third", "fourth"].includes(body.accountId) && ["start", "poll"].includes(body.action);
   return false;
 }
 
@@ -74,9 +74,9 @@ function validDirectorAction(path, body) {
   if (!exact(body, ["requestId", "expectedRevision", "bank"]) || !id(body.requestId)
       || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
       || !exact(body.bank, ["entries", "profiles"]) || Buffer.byteLength(JSON.stringify(body.bank)) > 60000) return false;
-  const ids = ["primary", "test", "third"], bank = body.bank;
-  if (!Array.isArray(bank.profiles) || bank.profiles.length !== 3
-      || new Set(bank.profiles.map(p => p?.id)).size !== 3
+  const ids = ["primary", "test", "third", "fourth"], bank = body.bank;
+  if (!Array.isArray(bank.profiles) || bank.profiles.length !== 4
+      || new Set(bank.profiles.map(p => p?.id)).size !== 4
       || !bank.profiles.every(p => exact(p, ["id", "chatMode", "replySource"]) && ids.includes(p.id)
         && ["mentions", "participate"].includes(p.chatMode) && ["local", "ai"].includes(p.replySource))) return false;
   const replies = ["greeting", "checkin", "goodday", "roughday", "quietday", "thanks", "farewell", "goodnight", "welcome",
@@ -85,7 +85,7 @@ function validDirectorAction(path, body) {
     && new Set(bank.entries.map(e => e?.id)).size === bank.entries.length && bank.entries.every(entry => {
       if (!exact(entry, ["id", "kind", "category", "lines", "accountIds", "enabled"])
           || typeof entry.id !== "string" || !/^[a-z0-9_:-]{1,80}$/.test(entry.id) || typeof entry.enabled !== "boolean"
-          || !Array.isArray(entry.accountIds) || entry.accountIds.length < 1 || entry.accountIds.length > 3
+          || !Array.isArray(entry.accountIds) || entry.accountIds.length < 1 || entry.accountIds.length > 4
           || new Set(entry.accountIds).size !== entry.accountIds.length || !entry.accountIds.every(x => ids.includes(x))
           || !Array.isArray(entry.lines) || entry.lines.length < 1 || entry.lines.length > 16) return false;
       const categoryValid = entry.kind === "topic" ? ["general", "just chatting", "music", "art"].includes(entry.category)

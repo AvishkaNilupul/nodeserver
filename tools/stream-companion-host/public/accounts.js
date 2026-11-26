@@ -4,12 +4,12 @@ import { savedDirectorProfile } from './messages.js';
 const POLL_MS = 2500;
 const HOST_FRESH_MS = 10000;
 const BRIDGE_FRESH_MS = 45000;
-const IDS = new Set(['primary', 'test', 'third']);
-const QUICK_SELECTIONS = Object.freeze({ primary: ['primary'], test: ['test'], third: ['third'], both: ['primary', 'test'], all: ['primary', 'test', 'third'] });
+const IDS = new Set(['primary', 'test', 'third', 'fourth']);
+const QUICK_SELECTIONS = Object.freeze({ primary: ['primary'], test: ['test'], third: ['third'], fourth: ['fourth'], both: ['primary', 'test'], all: ['primary', 'test', 'third', 'fourth'] });
 const quickIds = selection => [...(QUICK_SELECTIONS[selection] || [])];
-const companionName = id => ({ primary: 'Main companion', test: 'Second companion', third: 'Third companion' })[id] || 'Companion';
-const accountName = id => ({ primary: 'Main account', test: 'Second account', third: 'Third account' })[id] || 'Account';
-const ordinal = id => ({ primary: 'main', test: 'second', third: 'third' })[id] || 'selected';
+const companionName = id => ({ primary: 'Main companion', test: 'Second companion', third: 'Third companion', fourth: 'Fourth companion' })[id] || 'Companion';
+const accountName = id => ({ primary: 'Main account', test: 'Second account', third: 'Third account', fourth: 'Fourth account' })[id] || 'Account';
+const ordinal = id => ({ primary: 'main', test: 'second', third: 'third', fourth: 'fourth' })[id] || 'selected';
 const ACTIONS = new Set(['start', 'stop', 'watch', 'settings', 'draft', 'send', 'drops-enable', 'drops-disable', 'drops-check']);
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'expired']);
 const ACTION_LABELS = { start: 'Start companion', stop: 'Stop companion', watch: 'Open stream', settings: 'Save settings', draft: 'Create draft', send: 'Send reviewed message', 'drops-enable': 'Enable drop claims', 'drops-disable': 'Disable drop claims', 'drops-check': 'Check drops' };
@@ -33,7 +33,7 @@ export function age(value, now = Date.now()) {
 export function accountFromPath(pathname, basePath = '') {
   const base = controllerBasePath(basePath);
   if (typeof pathname !== 'string' || base && !pathname.startsWith(`${base}/`)) return null;
-  const match = /^\/accounts\/(primary|test|third)\/?$/.exec(pathname.slice(base.length));
+  const match = /^\/accounts\/(primary|test|third|fourth)\/?$/.exec(pathname.slice(base.length));
   return match ? match[1] : null;
 }
 function hostFresh(state, now) { return state.network === 'online' && fresh(state.data?.updatedAt, HOST_FRESH_MS, now); }
@@ -61,7 +61,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     channelsAt: null, loading: false, busy: false, action: '', error: '', message: '', outcomes: {}, targetIds: [], targetChannel: ''
   } };
   let flight = null, timer = null, channelFlight = null, quickRun = 0;
-  const startVersions = { primary: 0, test: 0, third: 0 };
+  const startVersions = { primary: 0, test: 0, third: 0, fourth: 0 };
   const emit = () => onState(state);
   const formFor = id => state.forms[id] ||= { initialized: false, channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '', textRevision: 0, dirty: {} };
   function reconcile() {
@@ -304,7 +304,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (typeof shared?.paused !== 'boolean' || !fresh(shared.updatedAt, HOST_FRESH_MS, now())) throw quickFailure('Shared coordination status is not current. Refresh and try again.');
       return shared;
     };
-    const resumeBlocked = () => [...IDS].filter(id => !ids.includes(id) && (id !== 'third' || instanceFor(state, id))).some(id => {
+    const resumeBlocked = () => [...IDS].filter(id => !ids.includes(id)).some(id => {
       const instance = instanceFor(state, id), pending = instance?.controls?.pending, local = state.operations[id];
       return instance?.available !== true || active(pending, now()) && pending.action === 'start'
         || local?.action === 'start' && (local.transport || active(local.command, now()))
@@ -424,7 +424,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     stop() { if (timer !== null) clearIntervalImpl(timer); timer = null; } };
 }
 
-const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed','quick-channel','quick-channel-status','quick-channel-detail','quick-refresh','quick-lookup','quick-find','quick-account-primary','quick-account-test','quick-account-both','quick-account-third','quick-account-all','quick-primary-label','quick-test-label','quick-third-label','quick-start','quick-stop','quick-error','quick-message','quick-outcomes','quick-outcome-heading'];
+const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed','quick-channel','quick-channel-status','quick-channel-detail','quick-refresh','quick-lookup','quick-find','quick-account-primary','quick-account-test','quick-account-both','quick-account-third','quick-account-fourth','quick-account-all','quick-primary-label','quick-test-label','quick-third-label','quick-fourth-label','quick-start','quick-stop','quick-error','quick-message','quick-outcomes','quick-outcome-heading'];
 export function createAccountsView(document) {
   const nodes = Object.fromEntries(NODE_IDS.map(id => [id, document.getElementById(id)]));
   function el(tag, content, className) { const node = document.createElement(tag); if (content !== undefined) node.textContent = String(content); if (className) node.className = className; return node; }
@@ -480,12 +480,13 @@ function renderQuick(view, state, now, canCommand) {
   n['quick-primary-label'].textContent = text(instanceFor(state, 'primary')?.account, 'Main account');
   n['quick-test-label'].textContent = text(instanceFor(state, 'test')?.account, 'Second account');
   n['quick-third-label'].textContent = text(instanceFor(state, 'third')?.account, 'Third account');
+  n['quick-fourth-label'].textContent = text(instanceFor(state, 'fourth')?.account, 'Fourth account');
   for (const value of Object.keys(QUICK_SELECTIONS)) { n[`quick-account-${value}`].checked = q.selection === value; n[`quick-account-${value}`].disabled = q.busy; }
   for (const key of ['quick-channel', 'quick-lookup', 'quick-find', 'quick-refresh']) n[key].disabled = q.busy || q.loading;
   n['quick-refresh'].textContent = q.loading ? 'Checking channels…' : 'Refresh live channels';
   const ids = quickIds(q.selection);
   n['quick-start'].disabled = q.busy || q.loading || !validChannel(q.channel) || ids.some(id => !canCommand(id, 'start'));
-  n['quick-start'].textContent = q.busy && q.action === 'start' ? 'Starting selected accounts…' : q.selection === 'all' ? 'Open stream & start all three' : q.selection === 'both' ? 'Open stream & start main + second' : 'Open stream & start chat';
+  n['quick-start'].textContent = q.busy && q.action === 'start' ? 'Starting selected accounts…' : q.selection === 'all' ? 'Open stream & start all four' : q.selection === 'both' ? 'Open stream & start main + second' : 'Open stream & start chat';
   n['quick-stop'].disabled = q.busy && q.action === 'stop' || !ids.some(id => state.browserPreparations?.[id] || canCommand(id, 'stop'));
   n['quick-stop'].textContent = q.busy && q.action === 'stop' ? 'Stopping…' : 'Stop selected';
   n['quick-error'].textContent = q.error || ''; n['quick-error'].hidden = !q.error;
@@ -589,7 +590,7 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n['accounts-overview'].hidden = !!id; n['account-detail'].hidden = !id;
   if (!id) { renderQuick(view, state, now, canCommand); renderCards(view, state, now); return; }
   const instance = instanceFor(state, id), form = state.forms[id] || { channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '' };
-  n['page-eyebrow'].textContent = id === 'primary' ? 'Primary profile' : id === 'test' ? 'Second profile' : 'Third profile';
+  n['page-eyebrow'].textContent = id === 'primary' ? 'Primary profile' : id === 'test' ? 'Second profile' : id === 'third' ? 'Third profile' : 'Fourth profile';
   n['page-title'].textContent = text(instance?.name, companionName(id));
   n['page-description'].textContent = instance?.account ? `@${instance.account} · controls stay with this account’s browser profile.` : 'Waiting for this account to report its status.';
   const preparation = state.browserPreparations?.[id];

@@ -1,17 +1,20 @@
 import { controllerBasePath, basePathFromModule, controllerPath, responseError, requestNetwork, networkTitle, connectionMessage, configureControllerMount, bindControllerLifecycle } from './controller-path.js';
 
-export const ACCOUNT_IDS = Object.freeze(['primary', 'test', 'third']);
+export const ACCOUNT_IDS = Object.freeze(['primary', 'test', 'third', 'fourth']);
 export const MESSAGE_KINDS = Object.freeze(['greeting', 'topic', 'reply', 'exchange']);
 export const REPLY_CATEGORIES = Object.freeze(['greeting', 'checkin', 'goodday', 'roughday', 'quietday', 'thanks', 'farewell', 'goodnight', 'welcome', 'dayfollowup', 'reciprocal', 'quietfollowup', 'dayplans', 'capabilities', 'automation', 'game', 'streamtitle', 'livestatus']);
 export const TOPIC_CATEGORIES = Object.freeze(['general', 'just chatting', 'music', 'art']);
-const NAMES = { primary: 'Main account', test: 'Second account', third: 'Third account' };
+const NAMES = { primary: 'Main account', test: 'Second account', third: 'Third account', fourth: 'Fourth account' };
 const KINDS = { greeting: 'Greeting', topic: 'Category question', reply: 'Reply', conversation: 'Conversation reply', manual: 'Reviewed message', exchange: 'Paired exchange' };
 const POLL_MS = 2500, FRESH_MS = 10000;
 const rows = value => Array.isArray(value) ? value : [];
 const stamp = value => typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN;
 const safe = value => typeof value === 'string' ? value : '';
 const known = (map, key, fallback) => Object.hasOwn(map, key ?? '') ? map[key] : fallback;
-const bankString = value => JSON.stringify(bankPayload(value));
+const bankString = value => {
+  const bank = bankPayload(value);
+  return JSON.stringify({ ...bank, entries: bank.entries.map(entry => ({ ...entry, accountIds: [...entry.accountIds].sort() })) });
+};
 let savedDirectorState = null;
 export function savedDirectorProfile(id, now = Date.now()) {
   return savedDirectorState && directorFresh(savedDirectorState, now)
@@ -39,7 +42,7 @@ export function bankValidation(bank) {
     }
     if (entry.kind === 'reply' ? !REPLY_CATEGORIES.includes(entry.category) : entry.kind === 'topic' ? !TOPIC_CATEGORIES.includes(entry.category) : entry.category !== entry.kind) return prefix + 'choose a supported category.';
   }
-  if (rows(bank.profiles).length !== 3 || new Set(bank.profiles.map(profile => profile.id)).size !== 3 || bank.profiles.some(profile => !ACCOUNT_IDS.includes(profile.id) || !['mentions', 'participate'].includes(profile.chatMode) || !['local', 'ai'].includes(profile.replySource))) return 'Choose a conversation mode and reply source for each account.';
+  if (rows(bank.profiles).length !== ACCOUNT_IDS.length || new Set(bank.profiles.map(profile => profile.id)).size !== ACCOUNT_IDS.length || bank.profiles.some(profile => !ACCOUNT_IDS.includes(profile.id) || !['mentions', 'participate'].includes(profile.chatMode) || !['local', 'ai'].includes(profile.replySource))) return 'Choose a conversation mode and reply source for each account.';
   if (new TextEncoder().encode(JSON.stringify(bankPayload(bank))).length > 60000) return 'The message bank is too large. Remove some options before saving.';
   return '';
 }
@@ -345,7 +348,7 @@ export function renderAccountDirector(document, state, accountId, now = Date.now
 
 if (globalThis.document) {
   const document = globalThis.document, fullPage = document.querySelector('[data-messages-app]');
-  const basePath = basePathFromModule(import.meta.url), match = new RegExp(`^${basePath}/accounts/(primary|test|third)/?$`).exec(globalThis.location.pathname), overview = globalThis.location.pathname === `${basePath}/accounts`;
+  const basePath = basePathFromModule(import.meta.url), match = new RegExp(`^${basePath}/accounts/(primary|test|third|fourth)/?$`).exec(globalThis.location.pathname), overview = globalThis.location.pathname === `${basePath}/accounts`;
   if (fullPage || match || overview) {
     let view; const controller = createDirectorController({ basePath, publishProfiles: true, onState: state => { if (fullPage) renderMessages(view, state, controller); else if (match) renderAccountDirector(document, state, match[1]); } });
     if (fullPage) { view = createMessagesView(document, controller); configureControllerMount(document, basePath); }

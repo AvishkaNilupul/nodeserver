@@ -96,7 +96,7 @@ export class ExchangeEngine {
     return { streamId: x.streamId, checkedAt: x.checkedAt, lastHumanAt: x.lastHumanAt };
   }
   eligiblePartners(channel) {
-    const finite = [...this.s.clients.keys()].every(id => ['primary', 'test', 'third'].includes(id));
+    const finite = [...this.s.clients.keys()].every(id => ['primary', 'test', 'third', 'fourth'].includes(id));
     // Retain the original generic two-client store contract without extending
     // pair selection to arbitrary larger rosters.
     if (!finite && this.s.clients.size !== 2) return [];

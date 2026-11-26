@@ -109,7 +109,7 @@ function post(client, path, body, csrf, headers = {}) {
 
 test('every page, asset and API uses the real superadmin and two-factor guards before reaching the Mac', async t => {
   const f = await fixture(t);
-  for (const path of ['/accounts', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex', '/api/accounts/primary/browser', '/clips.js', '/clips.css', '/api/clips', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization', '/messages', '/messages.js', '/messages.css', '/api/director', '/api/director/history/all/0', '/api/director/bank', '/api/director/cancel']) {
+  for (const path of ['/accounts', '/accounts/fourth', '/accounts.js', '/api/status', '/api/accounts', '/api/channels', '/api/channels/aviskarex', '/api/accounts/primary/browser', '/api/accounts/fourth/browser', '/api/accounts/fourth/command', '/clips.js', '/clips.css', '/api/clips', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization', '/messages', '/messages.js', '/messages.css', '/api/director', '/api/director/history/all/0', '/api/director/history/fourth/0', '/api/director/bank', '/api/director/cancel']) {
     assert.equal((await request(f.port, BASE + path)).status, 401);
     const normal = await f.client('admin'); assert.equal((await normal.request(path)).status, 403);
   }
@@ -139,7 +139,7 @@ test('central messages use bounded fixed reads and exact single-forward bank/can
     if (path.includes('/api/')) assert.equal(response.data.csrfToken, csrf);
   }
   const bank = { entries: [{ id: 'topic_general', kind: 'topic', category: 'general', lines: ['Enjoying {game}.'], accountIds: ['primary', 'third'], enabled: true }],
-    profiles: ['primary', 'test', 'third'].map(id => ({ id, chatMode: 'mentions', replySource: 'local' })) };
+    profiles: ['primary', 'test', 'third', 'fourth'].map(id => ({ id, chatMode: 'mentions', replySource: 'local' })) };
   for (const [path, body] of [
     ['/api/director/bank', { requestId: 'bank-save-1', expectedRevision: 1, bank }],
     ['/api/director/cancel', { requestId: 'cancel-1', planId: 'plan-1' }]
@@ -575,7 +575,47 @@ test('third companion routes and all finite creator subsets preserve protected b
     assert.equal(f.seen.length, before + 1);
   }
   const before = f.seen.length;
-  for (const ids of [['primary', 'test', 'third', 'fourth'], ['third', 'third'], ['fourth']]) assert.equal((await post(c, '/api/clips/settings', { enabled: true, channel: 'aviskarex', accountIds: ids }, token)).status, 400);
-  assert.equal((await post(c, '/api/accounts/fourth/command', command('stop'), token)).status, 404);
+  for (const ids of [['primary', 'test', 'third', 'fourth', 'fifth'], ['third', 'third'], ['fifth']]) assert.equal((await post(c, '/api/clips/settings', { enabled: true, channel: 'aviskarex', accountIds: ids }, token)).status, 400);
+  assert.equal((await post(c, '/api/accounts/fifth/command', command('stop'), token)).status, 404);
   assert.equal(f.seen.length, before);
+});
+
+test('fourth companion routes and every exact four-account clip subset remain bounded and authenticated', async t => {
+  const f = await fixture(t), c = await f.client(), csrf = await nonce(c);
+  assert.equal((await c.request('/accounts/fourth')).status, 200);
+  for (const [path, body] of [
+    ['/api/accounts/fourth/browser', { requestId: 'fourth-browser' }],
+    ['/api/accounts/fourth/command', command('stop')],
+    ['/api/clips/authorization', { accountId: 'fourth', action: 'start' }]
+  ]) {
+    const before = f.seen.length;
+    assert.equal((await post(c, path, body, 'wrong')).status, 403);
+    assert.equal((await post(c, path, body, csrf, { Origin: 'https://outside.example' })).status, 403);
+    assert.equal(f.seen.length, before);
+    assert.equal((await post(c, path, body, csrf)).status, 200);
+    assert.equal(f.seen.length, before + 1); assert.deepEqual(f.seen.at(-1).body, body);
+  }
+  const ids = ['primary', 'test', 'third', 'fourth'];
+  for (let mask = 1; mask < 16; mask++) {
+    const accountIds = ids.filter((_, index) => mask & (1 << index));
+    const body = { enabled: false, channel: 'aviskarex', accountIds };
+    const before = f.seen.length;
+    assert.equal((await post(c, '/api/clips/settings', body, csrf)).status, 200);
+    assert.equal(f.seen.length, before + 1); assert.deepEqual(f.seen.at(-1).body.accountIds, accountIds);
+  }
+  const oldThree = { enabled: false, channel: 'aviskarex', accountIds: ['primary', 'test', 'third'] };
+  assert.equal((await post(c, '/api/clips/settings', oldThree, csrf)).status, 200);
+  assert.deepEqual(f.seen.at(-1).body, oldThree, 'old three-account selections cannot expand into all four');
+  f.setHandler((_req, res) => respond(res, 200, { history: [], nextBeforeId: null, csrfToken: UPSTREAM_TOKEN }));
+  const history = await c.request('/api/director/history/fourth/0');
+  assert.equal(history.status, 200); assert.equal(history.data.csrfToken, csrf);
+  const before = f.seen.length;
+  for (const path of ['/accounts/fifth', '/api/accounts/fifth/browser', '/api/accounts/fourth/command/extra', '/api/director/history/fifth/0', '/api/director/history/fourth/0?limit=1000'])
+    assert.equal((await c.request(path)).status, 404, path);
+  for (const accountIds of [['primary', 'test', 'third', 'fourth', 'fifth'], ['fourth', 'fourth'], ['fifth']])
+    assert.equal((await post(c, '/api/clips/settings', { ...oldThree, accountIds }, csrf)).status, 400);
+  const threeProfileBank = { entries: [{ id: 'greeting', kind: 'greeting', category: 'greeting', lines: ['hello'], accountIds: ['primary'], enabled: true }],
+    profiles: ids.slice(0, 3).map(id => ({ id, chatMode: 'mentions', replySource: 'local' })) };
+  assert.equal((await post(c, '/api/director/bank', { requestId: 'missing-fourth-profile', expectedRevision: 1, bank: threeProfileBank }, csrf)).status, 400);
+  assert.equal(f.seen.length, before, 'unsupported identities and stale bank shapes cannot reach the Mac');
 });

@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Simple chat · Stream Companion Fourth</title><link rel="stylesheet" href="panel.css"><link rel="stylesheet" href="simple.css"></head>
+<body><div class="shell">
+<header><div class="eyebrow">STREAM COMPANION FOURTH</div><h1>Pick a stream.<br>Join the chat.</h1><p>Your existing companion, with the essentials up front.</p><a href="panel.html" target="_blank" rel="noopener">Advanced controls</a></header>
+<main>
+<section><label for="channel">Twitch channel</label><input id="channel" list="channels" placeholder="Channel name or Twitch URL" autocomplete="off" spellcheck="false"><datalist id="channels"></datalist><p id="account" class="hint"></p>
+<div class="actions"><button id="start" disabled>Start chatting</button><button id="stop" class="secondary">Stop</button></div>
+<p class="hint">Opens the stream and joins the conversation automatically. Keep this Chrome profile open and the Mac awake. Uses your saved reply source and existing pacing.</p><p id="status" role="status" aria-live="polite"></p></section>
+<section aria-label="Live session"><div class="session-status"><p class="status-label">Automatic chat</p><strong id="activity">Loading…</strong><p id="activityDetail" class="hint"></p></div><div class="session-status"><p class="status-label">Stream</p><strong id="playback">Checking…</strong><p id="playbackDetail" class="hint"></p></div><p id="connection" class="hint"></p></section>
+<section class="latest-reply"><h3>Last confirmed message in this channel</h3><p id="lastMessage">No confirmed message yet.</p><p id="lastMeta" class="hint"></p><p id="attempt" class="hint"></p></section>
+</main><footer>One account · one channel · existing conversation engine</footer></div><script type="module" src="simple.js"></script></body></html>

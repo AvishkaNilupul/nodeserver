@@ -15,16 +15,16 @@ export const REMOTE_PREFIX = '/admin/stream-companion';
 const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const STATIC = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']], ['/style.css', ['style.css', 'text/css; charset=utf-8']],
   ['/messages', ['messages.html', 'text/html; charset=utf-8']], ['/messages.js', ['messages.js', 'text/javascript; charset=utf-8']], ['/messages.css', ['messages.css', 'text/css; charset=utf-8']],
-  ...['/accounts', '/accounts/primary', '/accounts/test', '/accounts/third'].map(path => [path, ['account.html', 'text/html; charset=utf-8']]),
+  ...['/accounts', '/accounts/primary', '/accounts/test', '/accounts/third', '/accounts/fourth'].map(path => [path, ['account.html', 'text/html; charset=utf-8']]),
   ['/accounts.js', ['accounts.js', 'text/javascript; charset=utf-8']], ['/accounts.css', ['accounts.css', 'text/css; charset=utf-8']],
   ['/controller-path.js', ['controller-path.js', 'text/javascript; charset=utf-8']],
   ['/clips.js', ['clips.js', 'text/javascript; charset=utf-8']], ['/clips.css', ['clips.css', 'text/css; charset=utf-8']]]);
 const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels', '/api/clips', '/api/director']);
-const DIRECTOR_HISTORY = /^\/api\/director\/history\/(all|primary|test|third)\/([0-9]{1,16})$/;
+const DIRECTOR_HISTORY = /^\/api\/director\/history\/(all|primary|test|third|fourth)\/([0-9]{1,16})$/;
 const CHANNEL_LOOKUP = /^\/api\/channels\/([a-z0-9_]{3,25})$/;
-const REMOTE_POST = new Set(['/api/control', '/api/accounts/primary/command', '/api/accounts/test/command', '/api/accounts/third/command',
+const REMOTE_POST = new Set(['/api/control', '/api/accounts/primary/command', '/api/accounts/test/command', '/api/accounts/third/command', '/api/accounts/fourth/command',
   '/api/director/bank', '/api/director/cancel',
-  '/api/accounts/primary/browser', '/api/accounts/test/browser', '/api/accounts/third/browser', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization']);
+  '/api/accounts/primary/browser', '/api/accounts/test/browser', '/api/accounts/third/browser', '/api/accounts/fourth/browser', '/api/clips/create', '/api/clips/settings', '/api/clips/authorization']);
 const failure = (message, status) => Object.assign(new Error(message), { status });
 
 export async function loadRemoteToken({ file = new URL('./private/remote.json', import.meta.url), readFileImpl = readFile } = {}) {
@@ -158,7 +158,7 @@ export function createHostServer({ store, clients, accounts = createAccountManag
           : await channels.snapshot();
         return send(res, 200, { ...value, csrfToken });
       }
-      const browserOpen = /^\/api\/accounts\/(primary|test|third)\/browser$/.exec(path);
+      const browserOpen = /^\/api\/accounts\/(primary|test|third|fourth)\/browser$/.exec(path);
       if (browserOpen) {
         if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
         if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the account controls to open a browser.' });
@@ -167,7 +167,7 @@ export function createHostServer({ store, clients, accounts = createAccountManag
           || !/^[A-Za-z0-9:_-]{1,160}$/.test(body.requestId)) throw failure('Invalid browser request.', 400);
         return send(res, 200, await browserLauncher.open(browserOpen[1], body.requestId));
       }
-      const accountCommand = /^\/api\/accounts\/(primary|test|third)\/command$/.exec(path);
+      const accountCommand = /^\/api\/accounts\/(primary|test|third|fourth)\/command$/.exec(path);
       if (accountCommand) {
         if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
         if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the local account controls.' });

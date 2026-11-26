@@ -18,7 +18,7 @@ function fixture({ closed = ['primary'], cachedClosed = [], connect = true, brow
   let time = START, rid = 0, commandId = 0, paused = true, tick;
   const calls = [], messages = [], nodes = new Map();
   const view = createAccountsView({ getElementById: id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); }, createElement: tag => new Node(tag) });
-  const instances = ['primary', 'test', ...(third ? ['third'] : [])].map(id => ({ id, account: `${id}_account`, name: id === 'primary' ? 'Main companion' : 'Second companion',
+  const instances = ['primary', 'test', 'third', 'fourth'].map(id => ({ id, account: `${id}_account`, name: ({ primary: 'Main companion', test: 'Second companion', third: 'Third companion', fourth: 'Fourth companion' })[id],
     available: true, authorized: true, connected: false, settings: { paused: true, autoReply: false, autoResume: false, replySource: 'local', chatMode: 'mentions' },
     permissions: { playbackAccess: true }, browser: { online: !closed.includes(id), canOpen: true, lastSeenAt: new Date(time).toISOString() }, controls: { pending: null, recent: [] } }));
   const heartbeat = new Set(instances.filter(instance => instance.browser.online && !cachedClosed.includes(instance.id)).map(instance => instance.id));
@@ -37,7 +37,7 @@ function fixture({ closed = ['primary'], cachedClosed = [], connect = true, brow
       return response({ updatedAt: new Date(time).toISOString(), csrfToken: 'fixture-browser-csrf', instances });
     }
     if (options.method === 'GET' && path.endsWith('/api/status')) return response({ updatedAt: new Date(time).toISOString(), csrfToken: 'fixture-browser-csrf', paused });
-    const opening = /\/api\/accounts\/(primary|test|third)\/browser$/.exec(path);
+    const opening = /\/api\/accounts\/(primary|test|third|fourth)\/browser$/.exec(path);
     if (opening) {
       assert.equal(options.method, 'POST'); assert.deepEqual(Object.keys(call.body), ['requestId']);
       assert.equal(options.headers['X-CSRF-Token'], 'fixture-browser-csrf');
@@ -46,7 +46,7 @@ function fixture({ closed = ['primary'], cachedClosed = [], connect = true, brow
       return response({ ok: true, state: 'opening' });
     }
     if (path.endsWith('/api/control')) { paused = call.body.paused; return response({ ok: true, paused }); }
-    const action = /\/api\/accounts\/(primary|test|third)\/command$/.exec(path);
+    const action = /\/api\/accounts\/(primary|test|third|fourth)\/command$/.exec(path);
     if (action) {
       const instance = instances.find(value => value.id === action[1]);
       const command = { ...call.body, id: `command-${++commandId}`, state: 'queued', createdAt: time, expiresAt: time + 90000 };
@@ -82,7 +82,7 @@ test('a closed selected profile opens once, then a new heartbeat allows its Star
 
 test('both closed profiles connect before either selected Start can be posted', async () => {
   const f = fixture({ closed: ['primary', 'test'], before: (call, { instances }) => {
-    if (call.path.endsWith('/command') && call.body.action === 'start') assert.ok(instances.every(instance => instance.browser.online && Date.parse(instance.browser.lastSeenAt) > START));
+    if (call.path.endsWith('/command') && call.body.action === 'start') assert.ok(instances.filter(instance => ['primary', 'test'].includes(instance.id)).every(instance => instance.browser.online && Date.parse(instance.browser.lastSeenAt) > START));
   } });
   await f.controller.refresh(); f.controller.editQuick('selection', 'both');
   assert.equal(await f.controller.quickStart(), true);
@@ -234,14 +234,14 @@ test('a closed third profile opens only its fixed browser and supports individua
   assert.equal(Object.keys(f.controller.getState().browserPreparations).length, 0);
 });
 
-test('all three closed browsers prove readiness before any selected Start', async () => {
-  const f = fixture({ third: true, closed: ['primary', 'test', 'third'], before: (call, { instances }) => {
+test('all four closed browsers prove readiness before any selected Start', async () => {
+  const f = fixture({ third: true, closed: ['primary', 'test', 'third', 'fourth'], before: (call, { instances }) => {
     if (call.body?.action === 'start') assert.ok(instances.every(instance => instance.browser.online && Date.parse(instance.browser.lastSeenAt) > START));
   } });
   await f.controller.refresh(); f.controller.editQuick('selection', 'all');
   assert.equal(await f.controller.quickStart(), true);
-  assert.deepEqual(f.opens().map(call => call.path), ['primary', 'test', 'third'].map(id => `${BASE}/api/accounts/${id}/browser`));
-  assert.deepEqual(f.commands().map(call => call.path), ['primary', 'test', 'third'].map(id => `${BASE}/api/accounts/${id}/command`));
+  assert.deepEqual(f.opens().map(call => call.path), ['primary', 'test', 'third', 'fourth'].map(id => `${BASE}/api/accounts/${id}/browser`));
+  assert.deepEqual(f.commands().map(call => call.path), ['primary', 'test', 'third', 'fourth'].map(id => `${BASE}/api/accounts/${id}/command`));
 });
 
 test('Stop during third browser preparation cancels its later Start and Resume', async () => {
@@ -252,6 +252,29 @@ test('Stop during third browser preparation cancels its later Start and Resume',
   await f.controller.refresh(); f.controller.editQuick('selection', 'third');
   assert.equal(await f.controller.quickStart(), false);
   assert.deepEqual(f.commands().map(call => call.body.action), ['stop']);
+  assert.equal(f.posts().some(call => call.path.endsWith('/api/control')), false);
+  assert.equal(Object.keys(f.controller.getState().browserPreparations).length, 0);
+});
+
+test('a closed fourth profile opens only its fixed browser and supports individual Start', async () => {
+  const f = fixture({ closed: ['fourth'], detail: 'fourth' }); await f.controller.refresh();
+  assert.equal(f.controller.canCommand('fourth', 'start'), true);
+  assert.equal(await f.controller.command('fourth', 'start', { channel: 'aviskarex', chatMode: 'mentions', replySource: 'local', autoResume: false }), true);
+  assert.deepEqual(f.opens().map(call => call.path), [`${BASE}/api/accounts/fourth/browser`]);
+  assert.deepEqual(f.commands().map(call => call.path), [`${BASE}/api/accounts/fourth/command`]);
+  assert.equal(f.view.nodes['page-eyebrow'].textContent, 'Fourth profile'); assert.equal(f.view.nodes['page-title'].textContent, 'Fourth companion');
+  assert.equal(Object.keys(f.controller.getState().browserPreparations).length, 0);
+  for (const instance of f.instances.filter(instance => instance.id !== 'fourth')) { assert.equal(instance.settings.paused, true); assert.equal(instance.settings.autoReply, false); }
+});
+
+test('Stop during fourth browser preparation cannot later Start or Resume any profile', async () => {
+  let f, stopped = false;
+  f = fixture({ closed: ['fourth'], connect: false, sleep: async () => {
+    if (!stopped) { stopped = true; assert.equal(await f.controller.command('fourth', 'stop'), true); }
+  } });
+  await f.controller.refresh(); f.controller.editQuick('selection', 'fourth');
+  assert.equal(await f.controller.quickStart(), false);
+  assert.deepEqual(f.commands().map(call => [call.path, call.body.action]), [[`${BASE}/api/accounts/fourth/command`, 'stop']]);
   assert.equal(f.posts().some(call => call.path.endsWith('/api/control')), false);
   assert.equal(Object.keys(f.controller.getState().browserPreparations).length, 0);
 });

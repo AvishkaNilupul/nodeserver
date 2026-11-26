@@ -141,7 +141,7 @@ test('third mapping is optional for old installations and only a distinct fixed 
   await f.launcher.open('third', 'third-only');
   assert.deepEqual(f.calls[0].args, ['--profile-directory=Profile 23', '--new-window', 'http://127.0.0.1:8795/accounts/third']);
   assert.equal(f.calls[0].binary, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
-  for (const mapping of [{ ...triple, third: profiles.primary }, { ...triple, third: profiles.test }, { ...triple, third: '../Profile 23' }, { ...triple, fourth: 'Profile 24' }]) {
+  for (const mapping of [{ ...triple, third: profiles.primary }, { ...triple, third: profiles.test }, { ...triple, third: '../Profile 23' }, { ...triple, fifth: 'Profile 24' }]) {
     assert.throws(() => createBrowserLauncher({ profiles: mapping }), /Browser profile setup is invalid/);
   }
 });
