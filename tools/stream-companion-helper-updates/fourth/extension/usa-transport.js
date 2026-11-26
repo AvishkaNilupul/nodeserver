@@ -53,7 +53,12 @@ async function boundedText(response, maximum, signal) {
 export class UsaBrowserRelay {
   constructor({ settings, access, post, fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, now = Date.now,
     sessionId = () => crypto.randomUUID(), setTimer = setTimeout, clearTimer = clearTimeout, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval } = {}) {
-    Object.assign(this, { settings, access, post, fetch: fetchImpl, WebSocket: WebSocketImpl, now, makeSession: sessionId, setTimer, clearTimer, setInterval: setIntervalImpl, clearInterval: clearIntervalImpl });
+    // WorkerGlobalScope host methods require their original global receiver.
+    // Capture each dependency once; keep injected functions' arguments/results
+    // intact without calling a browser native with the relay as its receiver.
+    const hostCall = fn => (...args) => Reflect.apply(fn, globalThis, args);
+    Object.assign(this, { settings, access, post, fetch: hostCall(fetchImpl), WebSocket: WebSocketImpl, now, makeSession: sessionId,
+      setTimer: hostCall(setTimer), clearTimer: hostCall(clearTimer), setInterval: hostCall(setIntervalImpl), clearInterval: hostCall(clearIntervalImpl) });
     this.sessionId = sessionId(); this.epoch = ''; this.version = 0; this.identity = ''; this.leaseExpiresAt = 0;
     this.seen = new Map(); this.sockets = new Map(); this.requests = new Set(); this.tasks = new Set(); this.lastCheckAt = 0; this.reason = 'setup';
   }

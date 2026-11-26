@@ -129,3 +129,52 @@ test('valid empty HTTP204 result is completed and no stale proof is presented as
   const f=fixture(t);f.provider(()=>new Response(null,{status:204}));f.queue.push(f.fetchJob());await f.pump();assert.deepEqual(completed(f)[0].body.result,{ok:true,status:204,headers:[],body:''});
   f.advance(5001);assert.equal(f.relay.status().ready,false);
 });
+
+for (const mode of ['injected browser functions', 'captured browser defaults']) {
+  test(`browser host-function receivers survive relay startup, proof, dispatch and cleanup with ${mode}`, async t => {
+    const calls = [], timers = new Map(); let queued = true;
+    const now = 1800000000000;
+    const settings = { account: 'companion_fourth', pairingToken: 'strict-receiver-own-pairing', paused: true };
+    const browser = {
+      setTimeout(callback, delay) { assert.equal(this, globalThis, 'native timeout requires its global receiver'); const timer = { unref() {} }; timers.set(timer, { callback, delay }); calls.push('setTimeout'); return timer; },
+      clearTimeout(timer) { assert.equal(this, globalThis, 'native timeout cleanup requires its global receiver'); timers.delete(timer); calls.push('clearTimeout'); },
+      setInterval(callback, delay) { assert.equal(this, globalThis, 'native interval requires its global receiver'); assert.equal(delay, 1000); calls.push('setInterval'); return { unref() {} }; },
+      clearInterval() { assert.equal(this, globalThis, 'native interval cleanup requires its global receiver'); calls.push('clearInterval'); },
+      async fetch(url) {
+        assert.equal(this, globalThis, 'native fetch requires its global receiver');
+        calls.push(url === TRACE_URL ? 'trace' : 'provider');
+        assert.ok(url === TRACE_URL || url === 'https://api.twitch.tv/helix/users?login=companion_fourth');
+        return new Response(url === TRACE_URL ? 'ip=203.0.113.42\nloc=US\n' : '{}');
+      }
+    };
+    const options = { settings: async () => settings, access: async () => true, now: () => now, sessionId: () => 'strict-receiver-browser-session',
+      post: async (path, body) => {
+        if (path.endsWith('/poll')) {
+          const job = queued && body.proof ? { id: 'strict-receiver-job', kind: 'fetch', expiresAt: now + 10000,
+            url: 'https://api.twitch.tv/helix/users?login=companion_fourth', method: 'GET', headers: [['authorization', 'Bearer fixture-token'], ['client-id', 'fixtureclient123']] } : null;
+          if (job) queued = false;
+          return { ok: true, epoch: 'strict-receiver-helper-epoch', leaseExpiresAt: now + 15000, needsProof: !body.proof, job };
+        }
+        if (path.endsWith('/begin')) return { ok: true, expiresAt: now + 10000 };
+        assert.ok(path.endsWith('/complete')); assert.equal(body.result.ok, true); calls.push('completed'); return { ok: true };
+      } };
+    let relay;
+    if (mode === 'injected browser functions') relay = new UsaBrowserRelay({ ...options, fetchImpl: browser.fetch, setTimer: browser.setTimeout, clearTimer: browser.clearTimeout, setIntervalImpl: browser.setInterval, clearIntervalImpl: browser.clearInterval });
+    else {
+      // Capture browser-like native defaults, then restore Node globals before
+      // running anything asynchronous or touching the test runner's own timers.
+      const original = Object.fromEntries(Object.keys(browser).map(key => [key, globalThis[key]]));
+      try { Object.assign(globalThis, browser); relay = new UsaBrowserRelay(options); }
+      finally { Object.assign(globalThis, original); }
+    }
+    t.after(() => relay.stop());
+    relay.start();
+    for (let i = 0; i < 4; i++) { await relay.tick(); await flush(); }
+    assert.equal(relay.status().ready, true);
+    assert.equal(calls.filter(call => call === 'provider').length, 1);
+    assert.equal(calls.filter(call => call === 'completed').length, 1);
+    relay.stop();
+    for (const operation of ['setInterval', 'setTimeout', 'clearTimeout', 'clearInterval', 'trace']) assert.ok(calls.includes(operation), `${operation} must execute through its real lifecycle`);
+    assert.equal(timers.size, 0, 'all native timeout handles are cleared');
+  });
+}
