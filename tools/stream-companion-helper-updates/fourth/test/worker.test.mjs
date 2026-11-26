@@ -262,7 +262,7 @@ test('baseline has no Twitch access; drops request only optional scripting and T
   assert.deepEqual(m.host_permissions, ['http://127.0.0.1:8797/*']);
   assert.equal(m.content_scripts, undefined);
   assert.deepEqual(m.optional_permissions, ['scripting']);
-  assert.deepEqual(m.optional_host_permissions, ['https://www.twitch.tv/*']);
+  assert.deepEqual(m.optional_host_permissions, ['https://www.twitch.tv/*', 'https://id.twitch.tv/*', 'https://api.twitch.tv/*', 'https://www.cloudflare.com/*', 'https://eventsub.wss.twitch.tv/*']);
 });
 
 test('old viewing/follow settings are stripped and startup cannot resume automation', async t => {

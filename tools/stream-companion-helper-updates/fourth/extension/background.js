@@ -4,10 +4,11 @@ import { DropClaims } from './drops.js';
 import { WatchSession } from './watch.js';
 import { exchangeContext, humanMessages, normalizeStreamContext } from './chat-context.js';
 import { LocalControlBridge } from './local-control.js';
+import { UsaBrowserRelay, hasUsaAccess } from './usa-transport.js';
 
 const defaults = { account: '', allowedChannel: '', autoReply: false, autoResume: false, chatMode: 'mentions', replySource: 'local', pairingToken: '', paused: false, clientId: '' };
 let serial = Promise.resolve(), autoInFlight = false, recoveryInFlight = false, operationEpoch = 0;
-let controlBridge, migrationGate = null;
+let controlBridge, usaRelay, migrationGate = null;
 let messageDirector = null, browserImportFlight = null, browserImported = false;
 const locked = fn => {
   const epoch = operationEpoch;
@@ -170,6 +171,8 @@ async function migrate() {
   chat = { connected: false, messages: [], channel: '', account: '' };
   await chrome.alarms.clearAll();
   await chrome.alarms.create('companion-chat', { periodInMinutes: 0.5 });
+  await chrome.alarms.create('companion-usa', { periodInMinutes: 1 });
+  usaRelay.start();
   await chrome.alarms.create('companion-drops', { periodInMinutes: 5 });
   if (s.paused) await drops.stop('Companion is paused.');
   await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -347,7 +350,9 @@ function panelSender(sender) {
 }
 
 async function handle(message) {
+  if (message.type === 'usaStatus') { usaRelay.start(); await usaRelay.tick(); return usaRelay.status(); }
   if (message.type === 'pause') {
+    usaRelay.reset('stopped');
     const stop = helper('/api/twitch/disconnect').catch(() => {});
     await pauseLocal(); await stop;
     return { ok: true };
@@ -360,7 +365,7 @@ async function handle(message) {
     }
     s = await settings();
     const permissions = chrome.permissions?.getAll ? await chrome.permissions.getAll() : { permissions: [], origins: [] };
-    return { settings: s, chat: { ...chat, digest: digest(chat.messages) }, watch: await watch.state(), activity, drops: await drops.state(), sent: (await chrome.storage.local.get('sent')).sent || [], helperError, permissions,
+    return { usa: usaRelay.status(), settings: s, chat: { ...chat, digest: digest(chat.messages) }, watch: await watch.state(), activity, drops: await drops.state(), sent: (await chrome.storage.local.get('sent')).sent || [], helperError, permissions,
       lastError: (await chrome.storage.local.get('lastError')).lastError };
   }
   if (message.type === 'saveSettings') {
@@ -388,6 +393,7 @@ async function handle(message) {
     }
     if (next.paused || next.account !== old.account) await drops.stop(next.paused ? 'Companion is paused.' : 'Account changed. Enable claims for the new account explicitly.');
     await updateSettings(next, { expectedRevision: old.revision });
+    usaRelay.settingsChanged(next); usaRelay.start(); void usaRelay.tick();
     if (changed || next.paused) {
       operationEpoch++; watchTransition = false;
       await watch.stop('Setup changed. Open the stream again to resume playback checks.');
@@ -420,10 +426,13 @@ async function handle(message) {
     if (epoch !== operationEpoch) throw new Error('Connect cancelled by Stop or changed setup.');
     return helper('/api/twitch/connect', { account: next.account, channel: next.allowedChannel, explicitStart: true }, next, binding);
   }
-  if (s.paused) throw new Error('Companion is paused.');
+  // Authorization can finish while chat remains stopped; the helper's browser
+  // transport still requires current USA proof before any external request.
   if (message.type === 'authorize') return helper('/api/twitch/authorize', { clientId: s.clientId, account: s.account }, s);
   if (message.type === 'authorization') return helper('/api/twitch/authorization', {}, s);
+  if (s.paused) throw new Error('Companion is paused.');
   if (message.type === 'disconnect') {
+    usaRelay.reset('stopped');
     operationEpoch++;
     watchTransition = false;
     await watch.stop('Chat disconnected. Playback checks stopped.');
@@ -490,6 +499,7 @@ function requestRecovery() {
   }).catch(e => chrome.storage.local.set({ lastError: { at: Date.now(), message: e.message } })).finally(() => { recoveryInFlight = false; });
 }
 chrome.alarms.onAlarm.addListener(async alarm => {
+  if (alarm.name === 'companion-usa') { usaRelay.start(); await usaRelay.tick(); return; }
   await controlBridge?.poll();
   if (alarm.name === 'companion-drops') { await drops.run({ reload: true }); return; }
   if (alarm.name !== 'companion-chat') return;
@@ -501,6 +511,7 @@ chrome.tabs?.onUpdated?.addListener((tabId, changeInfo, tab) => { void watch.han
 chrome.tabs?.onRemoved?.addListener(tabId => { void watch.handleTabRemoved(tabId).catch(e => setActivity('error', e.message)); });
 
 async function pauseLocal(expectedGeneration) {
+  usaRelay?.reset('stopped');
   const epoch = ++operationEpoch;
   const current = () => epoch === operationEpoch && (!expectedGeneration || controlBridge?.intent?.generation === expectedGeneration);
   watchTransition = false; messageDirector = null;
@@ -624,6 +635,22 @@ async function executeControl(command, check) {
   if (command.action === 'drops-check') { check(); await drops.run({ reload: true }); check(); return { ok: true, reason: (await drops.state()).status }; }
   throw new Error('Unsupported local control.');
 }
+
+const relayChrome = chrome;
+usaRelay = new UsaBrowserRelay({ settings, access: () => hasUsaAccess(relayChrome), post: async (path, body, s) => {
+  if (!['/api/usa-transport/poll', '/api/usa-transport/begin', '/api/usa-transport/complete', '/api/usa-transport/event'].includes(path)) throw Error('Invalid paired connection.');
+  const response = await fetch(`http://127.0.0.1:8797${path}`, { method: 'POST', credentials: 'omit', cache: 'no-store', redirect: 'error',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.pairingToken}` }, body: JSON.stringify(body), signal: AbortSignal.timeout(2500) });
+  if (!response.ok) throw Error('The paired connection is held.');
+  const text = await response.text(); if (new TextEncoder().encode(text).length > 131072) throw Error('Invalid paired connection.');
+  return JSON.parse(text);
+} });
+relayChrome.storage.onChanged?.addListener((changes, area) => {
+  if (area === 'local' && changes.settings) { usaRelay.settingsChanged(changes.settings.newValue); void usaRelay.tick(); }
+});
+relayChrome.permissions?.onRemoved?.addListener(() => { usaRelay.reset('access'); void usaRelay.tick(); });
+usaRelay.start();
+void relayChrome.alarms.create('companion-usa', { periodInMinutes: 1 });
 
 controlBridge = new LocalControlBridge({ transport: input => helper('/api/control/bridge', input), state: controlBrowserState,
   execute: executeControl, onIntent: async intent => {

@@ -4,6 +4,7 @@ import { exchangeOffer } from '../extension/exchange.js';
 import { humanMessages } from '../extension/chat-context.js';
 import { createHash } from 'node:crypto';
 import { messageKey } from '../extension/message-policy.js';
+import { blockedUsTransport } from './usa-transport.mjs';
 
 export const chatScopes = ['user:read:chat', 'user:write:chat'];
 export const clipScope = 'clips:edit';
@@ -26,11 +27,12 @@ export function reconnectUrl(raw) {
   return url.href;
 }
 
-// Tokens stay in the paired loopback helper. No browser cookies, playback,
-// follows, browser input, or public-page navigation are used by this transport.
+// Tokens persist only in the paired helper. Fourth passes bounded credentials
+// ephemerally to its paired browser worker for the USA relay; no browser cookies
+// or page input are used by this transport.
 export class TwitchChat {
-  constructor({ credentials = {}, history = [], coordinator = null, saveCredentials = async () => {}, saveHistory = async () => {}, fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sendHolds = new ChatSendHolds({ now }) } = {}) {
-    Object.assign(this, { credentials, history, coordinator, saveCredentials, saveHistory, fetch: fetchImpl, WebSocket: WebSocketImpl, now, setTimer, clearTimer, sendHolds });
+  constructor({ credentials = {}, history = [], coordinator = null, saveCredentials = async () => {}, saveHistory = async () => {}, fetchImpl = blockedUsTransport.fetch, WebSocketImpl = blockedUsTransport.WebSocket, transport = blockedUsTransport, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sendHolds = new ChatSendHolds({ now }) } = {}) {
+    Object.assign(this, { credentials, history, coordinator, saveCredentials, saveHistory, usaTransport: transport, fetch: fetchImpl, WebSocket: WebSocketImpl, now, setTimer, clearTimer, sendHolds });
     this.messages = []; this.connected = false; this.error = ''; this.generation = 0; this.validatedAt = null;
     this.sockets = new Set(); this.timers = new Map(); this.chain = Promise.resolve();
     this.channelCache = new Map();
@@ -40,7 +42,7 @@ export class TwitchChat {
   async request(url, options = {}) {
     let response;
     try { response = await this.fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(10_000) }); }
-    catch { throw Object.assign(new Error('Twitch connection failed; no automatic retry was made.'), { retryable: true }); }
+    catch (error) { throw Object.assign(new Error('Twitch connection failed; no automatic retry was made.'), { retryable: true, providerNotSubmitted: error?.notSubmitted === true }); }
     let data; try { data = await response.json(); } catch { data = {}; }
     return { response, data };
   }
@@ -226,6 +228,7 @@ export class TwitchChat {
   disconnect() {
     this.generation++; this.connected = false; this.channel = ''; this.broadcasterId = ''; this.messages = [];
     this.pendingAuth = null;
+    this.usaTransport.invalidate();
     this.clearTimer(this.identityTimer); this.identityTimer = null;
     for (const timer of this.timers.values()) this.clearTimer(timer);
     this.timers.clear();
@@ -496,6 +499,13 @@ export class TwitchChat {
       await this.finishCoordination(reservation?.reservationId, attempt.delivery, attempt);
       return { submitted: attempt.delivery === 'confirmed', ...attempt, sendHold: this.sendHold(account, channel) };
     } catch (e) {
+      if (e.providerNotSubmitted === true) {
+        attempt.delivery = 'cancelled'; attempt.submitted = false;
+        attempt.reason = 'The USA browser relay stopped before Twitch submission.';
+        try { await this.saveHistory(this.history); } catch { /* Proven no-send remains cancelled. */ }
+        finally { await this.finishCoordination(reservation?.reservationId, 'cancelled', attempt); }
+        return { ...attempt, suppressed: true, code: 'usa_transport_held', retryable: false };
+      }
       if (attempt.delivery === 'rejected' && attempt.reason === 'followers_only_mode') {
         await this.finishCoordination(reservation?.reservationId, 'rejected', attempt);
         return { submitted: false, ...attempt, sendHold: this.sendHold(account, channel) };

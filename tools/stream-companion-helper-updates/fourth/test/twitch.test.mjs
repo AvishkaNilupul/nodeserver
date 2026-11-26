@@ -502,3 +502,23 @@ test('transient subscription HTTP503 keeps its existing recoverable classificati
   assert.equal(h.client.status().connected, false); assert.equal(h.client.status().recoverable, true);
   assert.equal(h.client.status().error, 'Twitch chat connection interrupted.');
 });
+
+test('fourth relay proves cancellation only before browser begin; begun loss stays consumed unknown', async t => {
+  for (const notSubmitted of [true, false]) {
+    const h = await exchangeHarness(t, { provider: async url => {
+      if (url.endsWith('/chat/messages')) throw Object.assign(new Error('synthetic relay interruption'), { notSubmitted });
+    } });
+    if (notSubmitted) {
+      const result = await h.client.send(h.input);
+      assert.equal(result.delivery, 'cancelled'); assert.equal(result.submitted, false); assert.equal(result.code, 'usa_transport_held');
+      assert.equal(h.client.history.at(-1).submitted, false);
+      assert.deepEqual(h.finishes.map(row => row.slice(0, 2)), [['exchange-permit', 'cancelled']]);
+    } else {
+      await assert.rejects(h.client.send(h.input), /no automatic retry/);
+      assert.equal(h.client.history.at(-1).delivery, 'unknown');
+      assert.deepEqual(h.finishes.map(row => row.slice(0, 2)), [['exchange-permit', 'unknown']]);
+      await assert.rejects(h.client.send(h.input), /ten minutes|already|recent/);
+    }
+    assert.equal(h.calls.filter(row => row.url.endsWith('/chat/messages')).length, 1);
+  }
+});

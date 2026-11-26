@@ -1,6 +1,7 @@
 import { sendGate } from './core.js';
 import { DROP_ACCESS } from './drops.js';
 import { activitySummary } from './activity.js';
+import { USA_ACCESS } from './usa-transport.js';
 const $ = id => document.getElementById(id);
 let current, initialized = false, pending = false, nextAuthPoll = 0;
 async function call(message) {
@@ -38,7 +39,8 @@ function render() {
   $('send').disabled = !!reason || pending; $('sendState').textContent = pending ? 'Working…' : reason || 'Ready to send through Twitch API.';
   $('messagePreview').textContent = text.trim();
   for (const key of ['summary', 'reply']) $(key).disabled = !c.connected || s.paused || pending;
-  for (const key of ['pickPhrase', 'authorize', 'connect']) $(key).disabled = s.paused || pending;
+  for (const key of ['pickPhrase', 'connect']) $(key).disabled = s.paused || pending;
+  $('authorize').disabled = pending || !!current.usa && !current.usa.ready;
   $('autoReply').disabled = !c.connected || s.paused || pending;
   $('chatMode').disabled = pending;
   $('chatModeHelp').textContent = $('chatMode').value === 'participate'
@@ -49,7 +51,7 @@ function render() {
   $('openTwitch').disabled = !s.allowedChannel || pending;
   $('openTwitch').textContent = s.allowedChannel ? `Watch @${s.allowedChannel} on Twitch` : 'Watch on Twitch';
   $('stopWatching').disabled = !current.watch?.enabled;
-  $('authorization').disabled = !nextAuthPoll || Date.now() < nextAuthPoll || pending || s.paused;
+  $('authorization').disabled = !nextAuthPoll || Date.now() < nextAuthPoll || pending || !!current.usa && !current.usa.ready;
   $('dropsEnable').disabled = pending || s.paused || !s.account || current.drops?.enabled;
   $('dropsDisable').disabled = !current.drops?.enabled;
   $('dropsCheck').disabled = pending || !current.drops?.enabled;
@@ -69,6 +71,9 @@ async function refresh() {
   $('pause').textContent = s.paused ? 'Resume companion' : 'Pause companion';
   const grants = current.permissions;
   $('permissionState').textContent = grants?.permissions?.includes('debugger') ? 'Chrome still retains legacy debugger access.' : grants?.origins?.some(x => x.includes('twitch.tv')) ? 'Twitch access is enabled for the selected stream’s playback checks and the separate Drops inventory.' : 'Watching works on Twitch normally. Playback checks and Drop claims use optional Twitch access.';
+  const usa = current.usa;
+  $('usaState').textContent = usa?.ready && usa.country === 'US' ? `USA connection ready · US${usa.lastCheckAt ? ` · Checked ${new Date(usa.lastCheckAt).toLocaleTimeString()}` : ''}` : `${usa?.heldReason || 'Enable USA & Twitch access to verify the connection.'}${usa?.lastCheckAt ? ` Last checked ${new Date(usa.lastCheckAt).toLocaleTimeString()}.` : ''}`;
+  $('enableUsa').disabled = pending;
   $('connection').textContent = s.paused ? 'Paused' : !c.connected ? 'Draft mode · chat disconnected' : s.autoReply ? `Automatic chat on · ${s.chatMode === 'participate' ? 'joining the conversation' : 'mentions only'}` : 'Chat connected · manual send';
   $('chatState').textContent = current.helperError || c.error || (c.connected ? `Connected as @${c.account} to @${c.channel}.` : c.channel ? 'Connecting to Twitch chat…' : 'Chat is disconnected. Authorize the account, then connect chat.');
   $('stats').textContent = c.connected ? `@${c.channel} · ${c.digest.messages} messages · ${c.digest.people} people` : 'Connect Twitch chat to receive messages.';
@@ -94,6 +99,15 @@ async function run(fn) {
   try { await fn(); } catch (e) { status(e.message, true); }
   finally { pending = false; await refresh().catch(e => status(e.message, true)); }
 }
+$('enableUsa').addEventListener('click', () => {
+  if (pending) return;
+  // Chrome requires this optional permission request within the native click.
+  const grant = chrome.permissions?.request ? chrome.permissions.request(USA_ACCESS) : Promise.resolve(false);
+  void run(async () => {
+    if (!await grant) { status('USA access was not granted. The connection stays held.'); return; }
+    await call({ type: 'usaStatus' }); status('Checking the USA connection. Chat stays stopped.');
+  });
+});
 $('save').addEventListener('click', () => run(async () => { await save(); status('Setup saved.'); }));
 $('pause').addEventListener('click', async () => {
   if (current.settings.paused) return run(async () => { await call({ type: 'saveSettings', settings: { paused: false, autoReply: false, autoResume: false } }); status('Resumed in draft mode.'); });

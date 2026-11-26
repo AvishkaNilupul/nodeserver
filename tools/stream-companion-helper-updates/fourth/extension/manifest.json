@@ -26,6 +26,13 @@
     "scripting"
   ],
   "optional_host_permissions": [
-    "https://www.twitch.tv/*"
-  ]
+    "https://www.twitch.tv/*",
+    "https://id.twitch.tv/*",
+    "https://api.twitch.tv/*",
+    "https://www.cloudflare.com/*",
+    "https://eventsub.wss.twitch.tv/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:8797 https://www.twitch.tv https://id.twitch.tv https://api.twitch.tv https://www.cloudflare.com wss://eventsub.wss.twitch.tv"
+  }
 }

@@ -10,6 +10,7 @@ import { LocalControl } from './lib/local-control.mjs';
 import { ViewerClips } from './lib/clips.mjs';
 import { DirectorAdapter } from './lib/director-adapter.mjs';
 import { validateHostPairing } from './lib/instance.mjs';
+import { createUsTransport, blockedUsTransport } from './lib/usa-transport.mjs';
 
 const equal = (a, b) => { const aa = Buffer.from(a), bb = Buffer.from(b); return aa.length === bb.length && timingSafeEqual(aa, bb); };
 const respond = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(data)); };
@@ -21,7 +22,10 @@ export async function savePrivate(url, value) {
   await rename(temporary, url);
 }
 
-export function createHelper({ config, twitch = new TwitchChat(), generateImpl = generate, now = Date.now, control: suppliedControl, intentFile, clipFile, clips: suppliedClips } = {}) {
+export function createHelper({ config, twitch, usaTransport, generateImpl = generate, now = Date.now, control: suppliedControl, intentFile, clipFile, clips: suppliedClips } = {}) {
+  usaTransport ||= twitch?.usaTransport || (twitch ? blockedUsTransport : createUsTransport({ now }));
+  twitch ||= new TwitchChat({ fetchImpl: usaTransport.fetch, WebSocketImpl: usaTransport.WebSocket, transport: usaTransport, now });
+  twitch.usaTransport ||= usaTransport;
   const expectedOrigin = `chrome-extension://${config.extensionId}`;
   let serial = Promise.resolve(), generation = 0;
   const locked = fn => {
@@ -30,12 +34,14 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
     const result = serial.then(run, run); serial = result.catch(() => {}); return result;
   };
   const control = suppliedControl || new LocalControl({ twitch, now, intentFile, secrets: [config.pairingToken, config.apiKey, config.extensionId],
-    onIntent: () => { generation++; } });
+    onIntent: () => { generation++; usaTransport.invalidate(); } });
+  usaTransport.bind({ getGeneration: () => twitch.generation || 0, getControlGeneration: () => control.generation || 0 });
   const clips = suppliedClips || new ViewerClips({ twitch, control, now, file: clipFile });
   const director = new DirectorAdapter({ twitch, control, config, generateImpl, now });
   const server = http.createServer(async (req, res) => {
     if (req.headers.host !== '127.0.0.1:8797') return respond(res, 403, { error: 'Invalid host.' });
-    if (req.url === '/health' && req.method === 'GET') return respond(res, 200, { ok: true, version: '0.12.0', transport: 'twitch-api', configured: !!config.apiKey, extensionId: config.extensionId });
+    if (req.url === '/health' && req.method === 'GET') return respond(res, 200, { ok: true, version: '0.12.0', transport: 'twitch-api', configured: !!config.apiKey, extensionId: config.extensionId,
+      usaTransport: twitch.usaTransport?.status?.() || { countryRequired: 'US', state: 'unconfigured', country: null, checkedAt: 0 } });
     if (req.headers.origin !== expectedOrigin) return respond(res, 403, { error: 'This origin is not paired.' });
     res.setHeader('Access-Control-Allow-Origin', expectedOrigin); res.setHeader('Vary', 'Origin');
     if (req.method === 'OPTIONS') {
@@ -45,10 +51,17 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
     if (req.method !== 'POST') return respond(res, 404, { error: 'Not found.' });
     if (!String(req.headers['content-type'] || '').startsWith('application/json')) return respond(res, 415, { error: 'JSON required.' });
     try {
-      let body = '';
-      for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 60_000) { const e = new Error('Request too large.'); e.status = 413; throw e; } }
+      const bodyLimit = req.url === '/api/usa-transport/complete' ? 2_000_000 : req.url === '/api/usa-transport/event' ? 500_000 : 60_000;
+      const chunks = []; let size = 0;
+      for await (const chunk of req) { size += chunk.length; if (size > bodyLimit) { const e = new Error('Request too large.'); e.status = 413; throw e; } chunks.push(chunk); }
+      let body; try { body = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)); } catch { const e = new Error('Invalid JSON.'); e.status = 400; throw e; }
       let input; try { input = JSON.parse(body); } catch { const e = new Error('Invalid JSON.'); e.status = 400; throw e; }
       if (!input || typeof input !== 'object' || Array.isArray(input)) return respond(res, 400, { error: 'JSON object required.' });
+      const relayAction = { '/api/usa-transport/poll': 'poll', '/api/usa-transport/begin': 'begin', '/api/usa-transport/complete': 'complete', '/api/usa-transport/event': 'event' }[req.url];
+      if (relayAction) {
+        if (typeof usaTransport[relayAction] !== 'function') return respond(res, 409, { error: 'Fourth USA browser transport is held.' });
+        return respond(res, 200, usaTransport[relayAction](input));
+      }
       if (req.url === '/api/clips/status') {
         if (Object.keys(input).length) return respond(res, 400, { error: 'Clip status takes no settings.' });
         return respond(res, 200, clips.status());
@@ -101,7 +114,7 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
   });
   server.control = control; server.clips = clips;
   server.requestTimeout = 45_000; server.headersTimeout = 10_000;
-  server.on('close', () => { clips.close(); twitch.disconnect(); });
+  server.on('close', () => { clips.close(); twitch.disconnect(); usaTransport.close(); });
   return server;
 }
 
@@ -119,10 +132,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     getConnection: () => ({ channel: twitch?.channel || '', connected: twitch?.connected === true }) });
   coordinator.register(credentials.account); coordinator.seed(history);
   const sendHolds = new ChatSendHolds({ file: new URL('./private/chat-send-holds.json', import.meta.url) });
-  twitch = new TwitchChat({ credentials, history, coordinator, sendHolds, saveCredentials: value => savePrivate(credentialsUrl, value), saveHistory: value => savePrivate(historyUrl, value) });
+  const usaTransport = createUsTransport();
+  twitch = new TwitchChat({ credentials, history, coordinator, sendHolds, fetchImpl: usaTransport.fetch, WebSocketImpl: usaTransport.WebSocket, transport: usaTransport,
+    saveCredentials: value => savePrivate(credentialsUrl, value), saveHistory: value => savePrivate(historyUrl, value) });
+  twitch.usaTransport = usaTransport;
   void coordinator.refresh().catch(() => {});
   const server = createHelper({ config, twitch, intentFile: new URL('./private/control-intent.json', import.meta.url), clipFile: new URL('./private/clip-jobs.json', import.meta.url) });
-  server.once('close', () => coordinator.close());
+  server.once('close', () => { coordinator.close(); void usaTransport.close(); });
   server.listen(8797, '127.0.0.1', () => console.log('Stream Companion 0.12.0 listening on 127.0.0.1:8797 (Twitch API; chat disconnected)'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { twitch.disconnect(); server.close(); });
 }

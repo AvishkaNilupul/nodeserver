@@ -26,8 +26,30 @@ Finish the isolated browser, account, email handoff, explicit app approvals and 
 
 The owner approved the actual NordVPN Web Store permission prompt. Install only the official extension `fjoaledfpmneenckfbpdfhkmimnjocfa` in the fourth profile. Optional analytics remain off. Installing it does not prove a Nord Account is signed in or a VPN tunnel is connected. The Chrome extension covers browser traffic; the Node helper's Helix/EventSub connection is separate. Do not apply a system-wide VPN or change routing for the original three profiles. Report these states accurately.
 
+## Owner update: USA-only routing
+
+After native email verification, the owner required USA IPs only for this fourth account. Browser routing is verified separately: Nord Seattle/United States, preferred country US, auto-connect country explicitly US, kill switch and WebRTC leak protection on, credentialless browser country check US. The native fourth Chrome directory is Profile 6. No Twitch exclusion is configured.
+
+The owner approved private Nord service-credential retrieval, but Nord required a code at the friend's email that the owner cannot access. Do not bypass that verification or create a token. The selected implementation uses the existing signed-in Nord extension: fourth helper HTTPS and EventSub traffic relays through its paired fourth Chrome extension's background network context. No Nord service credential is required or stored. Original three helpers, global/system routes and direct loopback central-host/mail traffic remain unchanged.
+
+The helper has no direct Twitch fetch/WebSocket fallback. A short-lived authenticated, account-bound browser relay session transports only finite Twitch OAuth/Helix/EventSub operations. Browser permission is optional and explicit for fixed Twitch and credentialless Cloudflare country-check origins. Every outbound HTTP/WebSocket open requires fresh strict US attestation in that same browser context followed by a single-use helper begin check against the current control/session generation. Missing permission, absent/stale browser, connection failure or unknown/non-US country blocks work and closes relay sockets. Lost responses remain uncertain and never repeat a mutation. Token-bearing bodies and events stay in bounded memory; no browser storage, logs, URLs or UI may retain them. Preserve single-use permits, Stop and exact-text send checks across the relay boundary.
+
+```mermaid
+flowchart LR
+  Site[Existing controller site] --> Host[Mac central host]
+  Host --> Helper[Fourth loopback helper]
+  Helper <-->|Paired finite jobs and events| Browser[Fourth Chrome extension]
+  Browser --> VPN[Nord USA connection]
+  VPN --> Country[Credentialless country check]
+  VPN --> Twitch[Twitch OAuth, Helix and EventSub]
+```
+
+Trade-off: fourth network access now depends on that Chrome profile being open and its relay lease remaining healthy, including during authorization. The existing launcher can reopen it; it may not substitute another profile or bypass the route while waiting. The extra local and country-check round trips trade latency for explicit USA gating. Keep this transport account-local if more profiles are added; do not turn it into an arbitrary browser proxy.
+
+Keep the fourth helper held while testing the route and completing its explicit Twitch grants. Verify native browser US routing and real paired browser attestation; a successful localhost health check alone proves neither. Only then continue the coordinated eight-import registration cutover. Cold-open testing must confirm the same fourth profile and USA route return without starting automatic chat.
+
 ## Verification and recovery
 
 Test existing-bank upgrade/restart/CAS and selective assignments, eight-source readiness, no old greeting/history/scene replay, fixed route rejection, separate port/manifest/pairing identity, exact roundtrips for all clip subsets, four-account startup/Stop and held unselected accounts, dynamic peer-message exclusion and existing pair bindings. Use disposable public-source stages with no real Twitch sends.
 
-Fingerprint intended installed files before overwriting, back them up and verify new fingerprints. Preserve unrelated dirty work and all private config/history. Push deployed source and refresh Graphify/Studio for the resulting commit. Rollback is coordinated source-only while all profiles/global coordination are held; never restore old SQLite, account allocations, credentials or delivery journals, or silently resume an autonomous planner.
+Fingerprint intended installed files before overwriting, back them up and verify new fingerprints. Preserve unrelated dirty work and all private config/history. Push deployed source and refresh Graphify/Studio for the resulting commit. Rollback is coordinated source-only while all profiles/global coordination are held; never restore old SQLite, account allocations, credentials or delivery journals, or silently resume an autonomous planner. Once the four-profile bank is persisted, the old three-profile host/gateway is not a compatible rollback target. Keep a four-profile-aware host/gateway and stop the fourth helper if the USA transport needs repair; never restore the old direct-network fourth helper under the USA-only rule.
