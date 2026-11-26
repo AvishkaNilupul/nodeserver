@@ -88,7 +88,9 @@ export function validateFetch(raw, { method = 'GET', headers = [], body } = {}) 
   return { url: url.href, method, headers: normalized, ...(body === undefined ? {} : { body }) };
 }
 export function validateSocket(raw) {
-  const url = target(raw, 'wss:', 'eventsub.wss.twitch.tv');
-  if (url.pathname !== '/ws' || url.search.length > 2048 || /[^A-Za-z0-9_.~%+&=:/?-]/.test(url.search)) invalid();
+  if (typeof raw !== 'string' || raw.includes('#')) invalid();
+  const address = raw.replace(/^wss:\/\/eventsub\.wss\.twitch\.tv(?=\?|$)/, 'wss://eventsub.wss.twitch.tv/');
+  const url = target(address, 'wss:', 'eventsub.wss.twitch.tv');
+  if (!['/', '/ws'].includes(url.pathname) || url.search.length > 2048 || /[^A-Za-z0-9_.~%+&=:/?-]/.test(url.search)) invalid();
   return url.href;
 }

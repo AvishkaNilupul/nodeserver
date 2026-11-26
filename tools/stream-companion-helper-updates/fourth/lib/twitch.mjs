@@ -22,8 +22,13 @@ const revocationReasons = new Map([
 const subscriptionForbidden = 'Twitch refused this channel’s chat subscription (HTTP 403). Chat permission or channel access was denied; automatic reconnect is disabled.';
 
 export function reconnectUrl(raw) {
-  const url = new URL(raw);
-  if (url.protocol !== 'wss:' || url.hostname !== 'eventsub.wss.twitch.tv' || url.port || url.username || url.password || url.pathname !== '/ws') throw new Error('Unexpected EventSub reconnect address.');
+  if (typeof raw !== 'string' || raw.length > 4096 || !/^[\x21-\x7e]+$/.test(raw) || raw.includes('#')) throw new Error('Unexpected EventSub reconnect address.');
+  // Twitch documents reconnect URLs without a path; URL adds the equivalent '/'.
+  const address = raw.replace(/^wss:\/\/eventsub\.wss\.twitch\.tv(?=\?|$)/, 'wss://eventsub.wss.twitch.tv/');
+  const url = new URL(address);
+  if (url.protocol !== 'wss:' || url.hostname !== 'eventsub.wss.twitch.tv' || url.port || url.username || url.password
+      || !['/', '/ws'].includes(url.pathname) || url.href !== address || url.search.length > 2048
+      || /[^A-Za-z0-9_.~%+&=:/?-]/.test(url.search)) throw new Error('Unexpected EventSub reconnect address.');
   return url.href;
 }
 

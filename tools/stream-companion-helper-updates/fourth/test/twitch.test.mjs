@@ -335,6 +335,50 @@ test('disconnect during connection setup prevents a late socket from opening', a
   assert.equal(Socket.all.length, 0); assert.equal(h.client.connected, false);
 });
 
+test('official root reconnect URLs preserve opaque queries and reject alternate authority or normalization', () => {
+  for (const raw of ['wss://eventsub.wss.twitch.tv', 'wss://eventsub.wss.twitch.tv?...',
+    'wss://eventsub.wss.twitch.tv?session_id=opaque&token=abc%2Bdef&x=1',
+    'wss://eventsub.wss.twitch.tv/?session_id=opaque', 'wss://eventsub.wss.twitch.tv/ws?reconnect=opaque',
+    'wss://eventsub.wss.twitch.tv/?' + 'x'.repeat(2047)]) {
+    assert.equal(reconnectUrl(raw), new URL(raw).href);
+  }
+  for (const raw of ['ws://eventsub.wss.twitch.tv/', 'https://eventsub.wss.twitch.tv/',
+    'wss://eventsub.wss.twitch.tv.evil.example/', 'wss://other.example/', 'wss://user:pass@eventsub.wss.twitch.tv/',
+    'wss://eventsub.wss.twitch.tv:444/', 'wss://eventsub.wss.twitch.tv/#fragment', 'wss://eventsub.wss.twitch.tv/#',
+    'wss://eventsub.wss.twitch.tv/ws/', 'wss://eventsub.wss.twitch.tv/elsewhere', 'wss://eventsub.wss.twitch.tv/a/../ws',
+    ' wss://eventsub.wss.twitch.tv/', 'wss://eventsub.wss.twitch.tv/\n', 'wss://eventsub.wss.twitch.tv/\\',
+    'wss://eventsub.wss.twitch.tv/?x=[]', 'wss://eventsub.wss.twitch.tv/?' + 'x'.repeat(2048), null, {}]) {
+    assert.throws(() => reconnectUrl(raw));
+  }
+});
+
+test('documented root reconnect transfers once, ignores retired frames and never replays a confirmed send', async t => {
+  const h = harness(t); const old = await h.connect();
+  const input = { account: 'companion_test', channel: 'friend_channel', text: 'a distinct pre-transfer reply' };
+  assert.equal((await h.client.send(input)).delivery, 'confirmed');
+  const generation = h.client.generation;
+  const raw = 'wss://eventsub.wss.twitch.tv?session_id=opaque&token=abc%2Bdef&x=1';
+  const reconnect = { session: { reconnect_url: raw } };
+  await h.emit(old, 'session_reconnect', reconnect); await h.emit(old, 'session_reconnect', reconnect);
+  assert.equal(Socket.all.length, 2);
+  const next = Socket.all.at(-1); assert.equal(next.url, new URL(raw).href);
+  assert.equal(old.closed, false); assert.equal(h.client.connected, true);
+  await h.emit(next, 'session_welcome', { session: { id: 'transferred-root', keepalive_timeout_seconds: 10 } });
+  assert.equal(old.closed, true); assert.equal(h.client.connected, true);
+  old.handlers.close(); // A late native close from the retired connection is inert.
+  await h.emit(old, 'notification', { event: { broadcaster_user_id: '456', message_id: 'retired-message',
+    chatter_user_login: 'viewer', message: { text: 'a retired frame' } } }, { subscription_type: 'channel.chat.message' });
+  await h.emit(old, 'session_reconnect', reconnect);
+  assert.equal(h.client.messages.some(message => message.id === 'retired-message'), false);
+  assert.equal(h.client.generation, generation); assert.equal(h.client.error, '');
+  assert.equal(h.client.connected, true); assert.equal(Socket.all.length, 2);
+  assert.equal(h.calls.filter(call => call.url.endsWith('/eventsub/subscriptions')).length, 1);
+  assert.equal(h.calls.filter(call => call.url.endsWith('/chat/messages')).length, 1);
+  await assert.rejects(h.client.send(input));
+  assert.equal(h.calls.filter(call => call.url.endsWith('/chat/messages')).length, 1);
+  assert.equal(h.client.history.length, 1); assert.equal(h.client.history[0].delivery, 'confirmed');
+});
+
 test('EventSub reconnect transfers the session once, validates its host, and revocation closes it', async t => {
   const h = harness(t); const old = await h.connect();
   await h.emit(old, 'session_reconnect', { session: { reconnect_url: 'wss://eventsub.wss.twitch.tv/ws?reconnect=abc' } });

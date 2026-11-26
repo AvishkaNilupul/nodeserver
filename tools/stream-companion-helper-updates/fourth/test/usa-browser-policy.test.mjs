@@ -35,7 +35,17 @@ test('OAuth form keys, scopes and grants are finite, duplicate-safe and contain 
   assert.throws(()=>validateFetch(token,form({client_id:app,refresh_token:'has newline\n',grant_type:'refresh_token'})));
 });
 
-test('EventSub socket policy accepts only the fixed host/path and bounded reconnect query', () => {
-  for (const url of ['wss://eventsub.wss.twitch.tv/ws','wss://eventsub.wss.twitch.tv/ws?session_id=opaque-session&x=abc%2Bdef']) assert.equal(validateSocket(url),url);
-  for (const url of ['ws://eventsub.wss.twitch.tv/ws','wss://other.example/ws','wss://eventsub.wss.twitch.tv/ws#fragment','wss://eventsub.wss.twitch.tv/ws/','wss://user@eventsub.wss.twitch.tv/ws','wss://eventsub.wss.twitch.tv:444/ws','wss://eventsub.wss.twitch.tv/ws?'+ 'x'.repeat(2050)]) assert.throws(()=>validateSocket(url));
+test('EventSub socket policy accepts official root or ws paths and preserves bounded opaque queries', () => {
+  for (const url of ['wss://eventsub.wss.twitch.tv','wss://eventsub.wss.twitch.tv?...',
+    'wss://eventsub.wss.twitch.tv?session_id=opaque-session&x=abc%2Bdef','wss://eventsub.wss.twitch.tv/?session_id=opaque-session',
+    'wss://eventsub.wss.twitch.tv/ws','wss://eventsub.wss.twitch.tv/ws?session_id=opaque-session&x=abc%2Bdef',
+    'wss://eventsub.wss.twitch.tv/?'+'x'.repeat(2047)]) assert.equal(validateSocket(url),new URL(url).href);
+  for (const url of ['ws://eventsub.wss.twitch.tv/','https://eventsub.wss.twitch.tv/',
+    'wss://other.example/','wss://eventsub.wss.twitch.tv.evil.example/',
+    'wss://eventsub.wss.twitch.tv/#fragment','wss://eventsub.wss.twitch.tv/#',
+    'wss://eventsub.wss.twitch.tv/ws/','wss://eventsub.wss.twitch.tv/a/../ws',
+    'wss://user:pass@eventsub.wss.twitch.tv/','wss://eventsub.wss.twitch.tv:444/',
+    ' wss://eventsub.wss.twitch.tv/','wss://eventsub.wss.twitch.tv/?x=[]',
+    'wss://eventsub.wss.twitch.tv/?'+'x'.repeat(2048),null,{}]) assert.throws(()=>validateSocket(url));
+  for (const ending of ['\n','\\']) assert.throws(()=>validateSocket('wss://eventsub.wss.twitch.tv/'+ending));
 });
