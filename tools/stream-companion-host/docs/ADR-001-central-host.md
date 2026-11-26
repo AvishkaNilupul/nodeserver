@@ -3,7 +3,7 @@
 **Status:** Accepted and implemented
 **Date:** 2026-11-25 (Asia/Tokyo)
 
-**Amendment:** [ADR-002](ADR-002-bounded-exchanges.md) adds the owner's subsequent request for occasional explicitly labelled public exchanges. Ordinary companion messages still do not trigger each other.
+**Amendment:** [ADR-002](ADR-002-bounded-exchanges.md) adds the owner's subsequent request for occasional bounded public exchanges; the [2026-11-26 message format amendment](EXCHANGE-FORMAT-1126.md) removes the inline prefix. Ordinary companion messages still do not trigger each other.
 
 **Account-control amendment:** [LOCAL-PAGES.md](LOCAL-PAGES.md) adds per-account local pages. Their separate adapter reads existing helper pairings in server memory and exposes sanitized public chat/history; the coordination store and internal turn protocol retain their original narrow data boundary.
 

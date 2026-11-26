@@ -425,7 +425,7 @@ async function tracked(h) {
 async function exchangeReady(t) {
   const h = await harness(t); await tracked(h);
   const offer = { id: 'scheduled-turn', key: 'exchange:scheduled-turn', account: 'qumaris_2489', channel: 'test_channel',
-    streamId: '987654321', text: '[companion bot] @other_companion a short chat break.', notBefore: Date.now() - 1, expiresAt: Date.now() + 20_000 };
+    streamId: '987654321', text: '@other_companion a short chat break.', notBefore: Date.now() - 1, expiresAt: Date.now() + 20_000 };
   h.chat.coordination = { available: true, paused: false, accounts: ['qumaris_2489', 'other_companion'], textKeys: [], topicStreams: [], replyIds: [], exchange: offer };
   h.local.data.participationAttempts = ['greeting', 'topic'].map(kind => ({ key: `old-${kind}`, kind,
     account: offer.account, channel: offer.channel, streamId: offer.streamId, at: Date.now() - 600_000, delivery: 'confirmed', submitted: true }));
@@ -438,6 +438,7 @@ test('a due exchange uses exact host text without AI or a fabricated Twitch repl
   await h.send({ type: 'getState' }); await h.flush();
   const sends = h.calls.filter(c => c.url.endsWith('/send'));
   assert.equal(sends.length, 1); assert.equal(sends[0].body.text, offer.text);
+  assert.match(sends[0].body.text, /^@other_companion \S/);
   assert.equal(sends[0].body.kind, 'exchange'); assert.equal(sends[0].body.exchangeId, offer.id);
   assert.equal(sends[0].body.participationKey, offer.key); assert.equal(sends[0].body.streamId, offer.streamId);
   assert.equal(sends[0].body.replyTo, ''); assert.equal(sends[0].body.replyAuthor, '');
@@ -448,10 +449,10 @@ test('a due exchange uses exact host text without AI or a fabricated Twitch repl
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 1);
 });
 
-test('a later companion mention cannot hide an earlier human mention or trigger exchange AI', async t => {
+test('a later plain companion mention cannot hide an earlier human mention or trigger exchange AI', async t => {
   const { h } = await exchangeReady(t);
   h.chat.messages = [{ id: 'human-first', author: 'alice', text: '@qumaris_2489 hello', at: Date.now() - 1000 },
-    { id: 'companion-last', author: 'other_companion', text: '[companion bot] @qumaris_2489 hello', at: Date.now() - 1 }];
+    { id: 'companion-last', author: 'other_companion', text: '@qumaris_2489 hello', at: Date.now() - 1 }];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => url.endsWith('/api/compose')
     ? (h.calls.push({ url, body: JSON.parse(options.body) }), { ok: true, json: async () => ({ text: 'hello there' }) })
@@ -493,7 +494,7 @@ test('exchange text changes during final refresh cancel the prepared line', asyn
   const { h, offer } = await exchangeReady(t); let polls = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    if (url.endsWith('/status') && ++polls === 2) offer.text = '[companion bot] @other_companion a changed line.';
+    if (url.endsWith('/status') && ++polls === 2) offer.text = '@other_companion a changed line.';
     return originalFetch(url, options);
   };
   await h.send({ type: 'getState' }); await h.flush();

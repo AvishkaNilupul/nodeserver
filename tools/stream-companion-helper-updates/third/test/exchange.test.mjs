@@ -7,20 +7,20 @@ import { mergeMessages } from '../extension/core.js';
 const now = 1_800_000_000_000, account = 'companion_test', channel = 'friend_channel', streamId = '123456789';
 const accounts = [account, 'other_companion'];
 const offer = { id: 'turn-1', key: 'exchange:turn-1', account, channel, streamId,
-  text: '[companion bot] @other_companion a short chat break.', notBefore: now - 1, expiresAt: now + 20_000 };
+  text: '@other_companion a short chat break.', notBefore: now - 1, expiresAt: now + 20_000 };
 const streamContext = { channel, streamId, isLive: true, checkedAt: now, gameName: 'Minecraft' };
 const input = { account, channel, streamContext, now, coordination: { available: true, accounts, exchange: offer } };
 const validate = value => exchangeOffer(value, { account, channel, streamId, accounts, now });
 const greeting = { account, channel, streamId, key: 'old-greeting', kind: 'greeting', at: now - 600_000,
   delivery: 'confirmed', submitted: true };
 
-test('an exchange keeps the exact labelled host text and requires its scoped live offer', () => {
+test('an exchange requires an exact partner mention and scoped live host text', () => {
   assert.deepEqual(validate(offer), offer);
   assert.equal(planExchange(input).text, offer.text);
   for (const change of [{ id: '' }, { key: 'exchange:foreign' }, { account: 'someone_else' }, { channel: 'another_channel' },
-    { streamId: 'different-stream' }, { text: 'hello' }, { text: '[companion bot] @companion_test hello' },
-    { text: '[companion bot] @unknown_account hello' }, { text: '[companion bot] @other_companion hello\nthere' },
-    { text: '[companion bot] @other_companion https://example.com' }, { text: ` ${offer.text}` },
+    { streamId: 'different-stream' }, { text: 'hello' }, { text: `[companion bot] ${offer.text}` }, { text: '@companion_test hello' },
+    { text: '@unknown_account hello' }, { text: '@other_companion hello\nthere' },
+    { text: '@other_companion https://example.com' }, { text: ` ${offer.text}` },
     { notBefore: now + 1 }, { expiresAt: now }, { notBefore: now + 100, expiresAt: now + 50 }]) {
     assert.equal(validate({ ...offer, ...change }), null, JSON.stringify(change));
   }
@@ -70,7 +70,7 @@ test('exchange context contains only live metadata and the last genuine human ti
   assert.equal(exchangeContext({ ...input, streamContext: { ...streamContext, isLive: false } }), null);
 });
 
-test('bot flags survive message normalization, and a companion mention cannot hide an earlier human mention', () => {
+test('bot flags survive normalization, and a plain companion mention cannot hide an earlier human mention', () => {
   const messages = mergeMessages([], [{ id: 'human', author: 'alice', text: '@companion_test hello', at: now - 1000 },
     { id: 'companion', author: 'other_companion', text: '@companion_test hello', at: now - 1 },
     { id: 'flagged', author: 'flagged_name', text: '@companion_test hello', at: now - 1, isBot: true }], now);

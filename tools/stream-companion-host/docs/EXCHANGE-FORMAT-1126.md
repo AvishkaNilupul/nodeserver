@@ -1,0 +1,11 @@
+# Exchange message format — 2026-11-26
+
+The owner explicitly requested removing the inline `[companion bot]` prefix from future paired messages. This supersedes the earlier per-line label convention only. Public messages use `@recipient scene text`; the existing profile metadata, account roster, two-line scene catalogue, pairing, timing, restrictions and delivery rules are unchanged.
+
+The host renders the new format. The shared browser/helper/adapter offer validator requires a leading mention of the exact registered partner and rejects the old prefixed format, missing/unknown/self recipients, wrong account/channel/broadcast/turn bindings, expired offers and otherwise invalid text. Do not accept both formats during cutover or strip text after reservation: the exact offered, reserved, journaled and provider-submitted message remains identical.
+
+Preserve the existing single-use exchange IDs, consumed scene ledger, hashes/history, reserve→begin→finish boundaries, Stop/Pause behavior, human priority, peer-message loop suppression, restrictions and no retries for unknown/rejected delivery. Never clear old delivery or scene records to demonstrate a new message. Existing posted messages are historical and are not edited or deleted. No forced live exchange or timing shortcut is added.
+
+Disable exchanges during the coordinated host/helper/extension update so no cached old-format line can be sent. Restore the prior feature setting only after all three validators have been updated and verified. Keep private configuration, credentials, profile identities, message histories, outboxes, control journals and SQLite intact. Preserve the observed session intentions; this format request does not authorize reconnecting through a ban or overriding an explicit Stop.
+
+Verification uses existing rendered-line, recipient/binding, provider roundtrip, unknown-delivery and peer-loop cases updated to the new format, plus explicit rejection of old-format offers. Run the appropriate host and helper regression suites with fixtures. The source backup is isolated from live SQLite and private data. Activation is a targeted, fingerprinted copy with per-project backups and verified extension reloads, followed by truthful status verification.

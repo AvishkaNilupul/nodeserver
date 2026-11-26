@@ -29,11 +29,13 @@ function fixture(t, { random = () => 0, clients: roster = clients } = {}) {
   return { store, sync, both, advance, scheduled, due, offer, prepare, reserve, begin, finish, now: () => time };
 }
 
-test('all curated lines identify bots, mention the partner, fit longest handles and share production hashing', () => {
+test('all curated lines start with the exact partner mention, fit longest handles and share production hashing', () => {
   assert.equal(new Set(SCENES.map(x => x.id)).size, SCENES.length);
   for (const scene of SCENES) for (const turn of [1, 2]) {
     const text = renderLine(scene.id, turn, 'a'.repeat(25));
-    assert.match(text, /^\[companion bot\] @a{25} \S/);
+    assert.equal(text, `@${'a'.repeat(25)} ${scene.lines[turn - 1]}`);
+    assert.match(text, /^@a{25} \S/);
+    assert.doesNotMatch(text, /\[companion bot\]/i);
     assert.ok(text.length <= 300);
     assert.doesNotMatch(text, /[\r\n]|https?:|www\./i);
     assert.equal(messageKey(text), helperMessageKey(text));
@@ -97,7 +99,8 @@ test('unknown, rejected and unused cancelled first turns never unlock a second l
 test('exact account, broadcast, text and exchange ID are bound at reserve and immutable under request replay', t => {
   const f = fixture(t); f.store.setExchangesEnabled(true); const x = f.due();
   const own = clients.find(c => c.account === x.account).id, other = clients.find(c => c.account !== x.account).id;
-  for (const [id, change] of [[other, {}], [own, { streamId: '999' }], [own, { textKey: messageKey('different line') }]]) {
+  for (const [id, change] of [[other, {}], [own, { streamId: '999' }], [own, { textKey: messageKey('different line') }],
+    [own, { textKey: messageKey(`[companion bot] ${x.text}`) }]]) {
     assert.equal(f.store.reserve(id, { ...f.prepare(x), ...change }).ok, false);
   }
   const body = f.prepare(x), permit = f.store.reserve(own, body); assert.equal(permit.ok, true);

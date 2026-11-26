@@ -26,7 +26,7 @@ Account control is loopback-only with same-origin/CSRF checks. The server reads 
 
 ## Behavior
 
-- Accounts exchange presence and turn proposals through this host. An optional **Occasional bot exchanges** mode adds short, openly labelled two-line exchanges when both companions are participating in the same live broadcast.
+- Accounts exchange presence and turn proposals through this host. An optional **Occasional bot exchanges** mode adds short two-line exchanges between participating companion accounts in the same live broadcast.
 - One generic category question per channel/broadcast and one companion answer per incoming message. Case, punctuation and spacing changes do not bypass recent duplicate suppression.
 - Shared channel limit: six actual attempts/hour, at least three minutes apart across both accounts. Existing per-account ten-minute participation spacing remains.
 - Fresh direct replies precede generic questions. Equally eligible waiting companions alternate away from the last speaker. Stale playback, disconnected clients and old-channel proposals cannot take a turn.
@@ -34,7 +34,7 @@ Account control is loopback-only with same-origin/CSRF checks. The server reads 
 
 ## Occasional bot exchanges
 
-Enable or disable this feature on the host page. Each public line begins **`[companion bot]`** and mentions the other companion. The host uses a collection of short local exchanges; it records used topics per channel and does not repeat them. When the collection is exhausted, it stays quiet.
+Enable or disable this feature on the host page. Each public line uses **`@recipient scene text`**, starting with the other companion's exact handle. The inline prefix was removed at the owner's request on2026-11-26; profile metadata and account identity remain unchanged. The host uses a collection of short local exchanges; it records used topics per channel and does not repeat them. When the collection is exhausted, it stays quiet. See the [message format contract](docs/EXCHANGE-FORMAT-1126.md).
 
 The host schedules an opportunity every60–120minutes while both companions are eligible. A confirmed first line may receive one response3–6minutes later, within the normal shared limits. There is no reply chain. Both profiles need participation mode, fresh matching live metadata and playback; a stopped, disconnected or stale partner cancels the exchange. Fresh human chat defers it, and ordinary human replies retain priority. Unknown or rejected delivery does not trigger a follow-up or automatic retry.
 

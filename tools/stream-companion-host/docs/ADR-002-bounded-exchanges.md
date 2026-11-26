@@ -1,11 +1,13 @@
-# ADR-002: Bounded, explicitly labelled companion exchanges
+# ADR-002: Bounded companion exchanges
 
 **Status:** Accepted and implemented
 **Date:** 2026-11-25 (Asia/Tokyo)
 
+**Message format amended:** 2026-11-26 at the owner's request; see [EXCHANGE-FORMAT-1126.md](EXCHANGE-FORMAT-1126.md).
+
 ## Context and decision
 
-The owner requested occasional exchanges among up to three personal companions, with varied wording and pauses. Keep the existing ban on unbounded companion-triggered reply chains. Instead the host schedules a single scene with exactly two possible lines, and every public line identifies itself as `[companion bot]`.
+The owner requested occasional exchanges among up to three personal companions, with varied wording and pauses. Keep the existing ban on unbounded companion-triggered reply chains. The host schedules a single scene with exactly two possible lines. Each public line uses `@recipient scene text`, with the selected partner's exact handle; profile metadata and account identity remain unchanged.
 
 Both selected clients must independently report current playback and participation metadata for the same live broadcast. The host persists one schedule per channel, rotates eligible pairs by least-recent use, alternates speakers, draws from unused local scenes, and grants the existing single-use send permits. Each active pair is bound to its persisted two exchange lines; an unrelated third does not replace either participant. Human conversation keeps priority. A confirmed first line can unlock only its predetermined second line; uncertainty, rejection, stale identity or leaving the stream ends the scene.
 

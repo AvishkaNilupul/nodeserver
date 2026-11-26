@@ -44,7 +44,7 @@ export function planExchange({ account, channel, streamContext, attempts = [], c
     accounts: coordination.accounts || [], now });
   if (!exchange || ledger.some(attempt => attempt.key === exchange.key)) return null;
   return { kind: 'exchange', key: exchange.key, exchangeId: exchange.id, streamId: context.streamId, text: exchange.text,
-    category: 'participation-exchange', reason: 'A scheduled, labelled companion exchange is due.' };
+    category: 'participation-exchange', reason: 'A scheduled companion exchange is due.' };
 }
 
 // Stable across worker reloads. The caller durably records the returned key

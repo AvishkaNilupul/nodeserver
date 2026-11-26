@@ -53,7 +53,7 @@ export function messageKey(text) {
 export function renderLine(sceneId, turn, other) {
   const scene = SCENES.find(x => x.id === sceneId);
   if (!scene || ![1, 2].includes(turn) || !/^[a-z0-9_]{3,25}$/.test(other)) throw new Error('Invalid curated exchange line.');
-  const text = `[companion bot] @${other} ${scene.lines[turn - 1]}`;
+  const text = `@${other} ${scene.lines[turn - 1]}`;
   if (text.length > 300 || /[\r\n]|https?:|www\./i.test(text)) throw new Error('Invalid curated exchange text.');
   return text;
 }
@@ -198,7 +198,7 @@ export class ExchangeEngine {
         if (run) {
           const line = this.db.prepare("SELECT * FROM host_exchange_lines WHERE exchange_id=? AND state NOT IN ('confirmed','cancelled') ORDER BY turn LIMIT 1").get(run.id);
           const g = line ? this.gate(channel, pair, line.account) : { ok: false, code: 'exchange_wait', reason: 'Waiting for delivery confirmation.' };
-          this.schedule(channel, line?.not_before || 0, !g.ok && ['exchange_quiet', 'exchange_spacing', 'exchange_priority', 'exchange_wait'].includes(g.code) ? g.code === 'exchange_quiet' ? 'quiet_wait' : 'spacing_wait' : `turn_${line?.turn || 1}`, g.ok ? 'A tagged companion line is scheduled.' : g.reason);
+          this.schedule(channel, line?.not_before || 0, !g.ok && ['exchange_quiet', 'exchange_spacing', 'exchange_priority', 'exchange_wait'].includes(g.code) ? g.code === 'exchange_quiet' ? 'quiet_wait' : 'spacing_wait' : `turn_${line?.turn || 1}`, g.ok ? 'A companion line is scheduled.' : g.reason);
           continue;
         }
         const current = this.db.prepare('SELECT * FROM host_exchange_schedules WHERE channel=?').get(channel);
@@ -223,7 +223,7 @@ export class ExchangeEngine {
           this.db.prepare("INSERT INTO host_exchange_lines(id,exchange_id,turn,account,other_account,text_key,not_before,expires_at,state) VALUES (?,?,?,?,?,?,?,?,?)")
             .run(randomUUID(), id, turn, c.account, other.account, messageKey(renderLine(scene.id, turn, other.account)), i ? 0 : this.s.now(), deadline, i ? 'waiting' : 'offered');
         }
-        this.db.prepare("UPDATE host_exchange_schedules SET last_initiator=?,next_at=?,state='turn_1',reason='First tagged companion line is due.' WHERE channel=?").run(first.account, this.s.now(), channel);
+        this.db.prepare("UPDATE host_exchange_schedules SET last_initiator=?,next_at=?,state='turn_1',reason='First companion line is due.' WHERE channel=?").run(first.account, this.s.now(), channel);
         this.s.event('', channel, 'exchange', 'A new two-line companion exchange was scheduled.');
       }
     } finally { this.ticking = false; }
@@ -271,14 +271,14 @@ export class ExchangeEngine {
     if (line.turn === 1) {
       this.db.prepare("UPDATE host_exchange_lines SET state='offered',not_before=? WHERE exchange_id=? AND turn=2 AND state='waiting'").run(this.s.now() + this.delay('reply'), run.id);
     } else {
-      this.db.prepare("UPDATE host_exchanges SET state='completed',reason='Both tagged lines were confirmed.' WHERE id=? AND state='active'").run(run.id);
-      this.schedule(run.channel, this.s.now() + this.delay('interval'), 'scheduled', 'Both tagged lines were confirmed; waiting for the next interval.');
+      this.db.prepare("UPDATE host_exchanges SET state='completed',reason='Both companion lines were confirmed.' WHERE id=? AND state='active'").run(run.id);
+      this.schedule(run.channel, this.s.now() + this.delay('interval'), 'scheduled', 'Both companion lines were confirmed; waiting for the next interval.');
     }
   }
   setEnabled(enabled) {
     this.db.prepare("UPDATE host_controls SET value=? WHERE key='exchangesEnabled'").run(String(enabled));
     if (!enabled) for (const run of this.db.prepare("SELECT * FROM host_exchanges WHERE state='active'").all()) this.cancel(run, 'Companion exchanges are disabled.');
-    this.tick(); this.s.event('', '', 'control', enabled ? 'Occasional tagged companion exchanges enabled.' : 'Companion exchanges disabled.');
+    this.tick(); this.s.event('', '', 'control', enabled ? 'Occasional companion exchanges enabled.' : 'Companion exchanges disabled.');
     return { ok: true, exchangesEnabled: enabled };
   }
   status() {

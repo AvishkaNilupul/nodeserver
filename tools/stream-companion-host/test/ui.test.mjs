@@ -126,7 +126,7 @@ test('time labels are bounded and malformed times remain unverified', () => {
   assert.equal(remaining('not-a-date', now), '');
 });
 
-test('exchange settings and waiting reasons render literally without hiding their bot identity or limits', async () => {
+test('exchange settings and waiting reasons render literally with the current message format and limits', async () => {
   const v = view(), data = snapshot(), hostile = '<script>steal()</script>';
   data.exchanges.enabled = true; data.exchanges.channels = [{ channel: hostile, state: 'waiting_for_partners', nextAt: null,
     reason: hostile, usedScenes: 2, totalScenes: 10 }];
@@ -139,7 +139,9 @@ test('exchange settings and waiting reasons render literally without hiding thei
   assert.equal(v.nodes['exchange-policy'].textContent, 'At most 2 lines · 60–120 minutes between exchanges · 3–6 minutes between lines');
   const { readFile } = await import('node:fs/promises');
   const markup = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
-  assert.ok(markup.includes('Every public line starts with <code>[companion bot]</code>'));
+  assert.ok(markup.includes('Every public line uses <code>@recipient scene text</code>'));
+  assert.ok(markup.includes('active companion accounts'));
+  assert.ok(!markup.includes('[companion bot]'));
   assert.ok(markup.includes('two companions are running on the same live broadcast'));
 });
 

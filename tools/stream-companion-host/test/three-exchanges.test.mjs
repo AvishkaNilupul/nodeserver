@@ -9,7 +9,7 @@ import { messageKey, EXCHANGE_POLICY as P, SCENES } from '../lib/exchanges.mjs';
 
 const START = 1800000000000, channel = 'three_channel', streamId = '123456789';
 const clients = ['primary', 'test', 'third'].map(id => ({ id, account: `${id}_companion` }));
-const pairKey = offer => [offer.account, /^\[companion bot\] @([a-z0-9_]+) /.exec(offer.text)?.[1]].sort().join(':');
+const pairKey = offer => [offer.account, /^@([a-z0-9_]+) /.exec(offer.text)?.[1]].sort().join(':');
 function fixture(t, { persistent = false } = {}) {
   let time = START;
   const dir = persistent ? mkdtempSync(join(tmpdir(), 'three-exchanges-')) : null, file = dir ? join(dir, 'state.sqlite') : ':memory:';
@@ -34,14 +34,14 @@ function fixture(t, { persistent = false } = {}) {
     reopen() { store.close(); store = new HostStore({ file, clients, now: () => time, random: () => 0 }); syncAll(); } };
 }
 
-test('three personal companions rotate all pairs fairly while keeping exactly two tagged lines per scene', t => {
+test('three personal companions rotate all pairs fairly while keeping exactly two partner-mentioned lines per scene', t => {
   const f = fixture(t); f.enable();
   const pairs = new Map(), initiators = new Set(), previousInitiator = new Map(), lines = new Set();
   for (let i = 0; i < 6; i++) {
     const { first, second } = f.complete(), key = pairKey(first); pairs.set(key, (pairs.get(key) || 0) + 1); initiators.add(first.account);
     if (previousInitiator.has(key)) assert.notEqual(first.account, previousInitiator.get(key), 'a revisited pair alternates its own initiator');
     previousInitiator.set(key, first.account);
-    for (const offer of [first, second]) { assert.match(offer.text, /^\[companion bot\] @/); assert.equal(lines.has(offer.text), false); lines.add(offer.text); }
+    for (const offer of [first, second]) { assert.match(offer.text, /^@[a-z0-9_]+ \S/); assert.doesNotMatch(offer.text, /\[companion bot\]/i); assert.equal(lines.has(offer.text), false); lines.add(offer.text); }
     assert.equal(f.offers().length, 0); assert.equal(f.schedule().usedScenes, i + 1);
     assert.equal(Date.parse(f.schedule().nextAt) - f.now(), P.intervalMinMs);
   }

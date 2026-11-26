@@ -20,10 +20,10 @@ async function harness(t, fetchImpl, extra = {}) {
   return { client, outboxFile };
 }
 
-test('host offers are cached only for their own route, label, recipient and current due window', async t => {
+test('host offers are cached only for their own route, leading recipient and current due window', async t => {
   let time = now;
   const offer = { id: 'exchange-turn', key: 'exchange:exchange-turn', account: config.account, channel: 'friend_channel',
-    streamId: '123456789', text: '[companion bot] @other_companion a short chat break.', notBefore: now + 1000, expiresAt: now + 2000 };
+    streamId: '123456789', text: '@other_companion a short chat break.', notBefore: now + 1000, expiresAt: now + 2000 };
   let returned = offer;
   const h = await harness(t, async () => json({ ok: true, snapshot: { ...snapshot, exchange: returned } }), { now: () => time });
   const refresh = () => h.client.refresh({ channel: 'friend_channel', connected: true, observation: observation() });
@@ -32,7 +32,7 @@ test('host offers are cached only for their own route, label, recipient and curr
   time += 1000; assert.equal(h.client.snapshot('friend_channel').exchange, undefined);
   time = now + 1000;
   for (const change of [{ account: 'other_companion' }, { channel: 'another_channel' }, { key: 'exchange:wrong' },
-    { text: 'untagged offer' }, { text: '[companion bot] @unregistered hello' }]) {
+    { text: 'unmentioned offer' }, { text: `[companion bot] ${offer.text}` }, { text: '@unregistered hello' }]) {
     returned = { ...offer, ...change }; await refresh();
     assert.equal(h.client.snapshot('friend_channel').exchange, undefined);
     assert.equal(h.client.snapshot('friend_channel').available, true);
@@ -59,12 +59,12 @@ test('an exchange reserve binds its opaque turn ID while forwarding only a text 
   const calls = [];
   const h = await harness(t, async (url, options) => { calls.push({ url, body: JSON.parse(options.body) });
     return json(url.endsWith('/sync') ? { ok: true, snapshot } : { ok: true, reservationId: 'exchange-permit', expiresAt: now + 20000 }); });
-  await h.client.reserve({ account: config.account, channel: 'friend_channel', text: '[companion bot] @other_companion hello',
+  await h.client.reserve({ account: config.account, channel: 'friend_channel', text: '@other_companion hello',
     streamId: '123456789', kind: 'exchange', exchangeId: 'opaque-turn-id' });
   const body = calls.find(x => x.url.endsWith('/reserve')).body;
   assert.equal(body.exchangeId, 'opaque-turn-id'); assert.equal(body.kind, 'exchange'); assert.equal(body.replyId, '');
   assert.equal('replyAt' in body, false); assert.equal('text' in body, false);
-  assert.equal(body.textKey, messageKey('[companion bot] @other_companion hello'));
+  assert.equal(body.textKey, messageKey('@other_companion hello'));
   for (const code of ['exchange_wait', 'exchange_quiet', 'exchange_spacing', 'exchange_priority']) assert.equal(h.client.hold(code, 'wait').retryable, true);
 });
 

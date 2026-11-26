@@ -39,7 +39,7 @@ function harness(t, customFetch) {
 async function exchangeHarness(t, { begin, provider } = {}) {
   const h = harness(t, provider); await h.connect();
   const offer = { id: 'exchange-turn', key: 'exchange:exchange-turn', account: 'companion_test', channel: 'friend_channel',
-    streamId: '123456789', text: '[companion bot] @other_companion a short chat break.', notBefore: now - 1, expiresAt: now + 20_000 };
+    streamId: '123456789', text: '@other_companion a short chat break.', notBefore: now - 1, expiresAt: now + 20_000 };
   const finishes = [], reserves = [];
   h.client.inspectChannel = async () => ({ streamContext: { isLive: true, streamId: offer.streamId }, sharedChat: false, chatSettings: {} });
   h.client.coordinator = { snapshot: () => ({ available: true, paused: false, accounts: ['companion_test', 'other_companion'], exchange: offer }),
@@ -50,13 +50,14 @@ async function exchangeHarness(t, { begin, provider } = {}) {
   return { ...h, offer, input, finishes, reserves };
 }
 
-test('a helper exchange binds the exact offer and posts plain tagged text without a fake reply parent', async t => {
+test('a helper exchange binds the exact offer and posts the plain partner mention without a fake reply parent', async t => {
   const h = await exchangeHarness(t);
   const result = await h.client.send(h.input);
   assert.equal(result.delivery, 'confirmed'); assert.equal(result.exchangeId, h.offer.id);
   assert.equal(h.reserves[0].exchangeId, h.offer.id); assert.equal(h.reserves[0].replyTo, '');
   const body = JSON.parse(h.calls.find(x => x.url.endsWith('/chat/messages')).options.body);
-  assert.equal(body.message, h.offer.text); assert.equal('reply_parent_message_id' in body, false);
+  assert.equal(body.message, h.offer.text); assert.match(body.message, /^@other_companion \S/);
+  assert.equal(h.client.history.at(-1).text, body.message); assert.equal('reply_parent_message_id' in body, false);
   assert.deepEqual(h.finishes, [['exchange-permit', 'confirmed']]);
 });
 
@@ -64,10 +65,14 @@ test('unsolicited, malformed, altered and reply-targeted exchange inputs never r
   const h = await exchangeHarness(t);
   for (const change of [{ exchangeId: undefined }, { exchangeId: 'different-turn' }, { participationKey: '' },
     { participationKey: 'exchange:different-turn' }, { kind: 'greeting' }, { replyTo: 'fabricated-parent' },
-    { replyAuthor: 'other_companion' }, { text: '[companion bot] @other_companion different words' },
-    { text: 'untagged public text' }, { streamId: '987654321' }]) {
+    { replyAuthor: 'other_companion' }, { text: '@other_companion different words' },
+    { text: 'unmentioned public text' }, { streamId: '987654321' }]) {
     await assert.rejects(h.client.send({ ...h.input, ...change }), /exchange|participation/i, JSON.stringify(change));
   }
+  const currentText = h.offer.text;
+  h.offer.text = `[companion bot] ${currentText}`;
+  await assert.rejects(h.client.send({ ...h.input, text: h.offer.text }), /no longer current/);
+  h.offer.text = currentText;
   h.offer.notBefore = now + 1;
   await assert.rejects(h.client.send(h.input), /no longer current/);
   h.offer.notBefore = now - 1; h.offer.expiresAt = now;

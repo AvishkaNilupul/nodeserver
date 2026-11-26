@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HostCoordinator } from '../lib/host-coordinator.mjs';
 import { TwitchChat } from '../lib/twitch.mjs';
+import { messageKey } from '../extension/message-policy.js';
 import { HostStore } from '../../stream-companion-host/lib/store.mjs';
 import { createHostServer } from '../../stream-companion-host/server.mjs';
 
@@ -38,7 +39,10 @@ async function harness(t, hooks = {}) {
       if (path.startsWith('shared_chat/')) return { data: [] };
       assert.equal(path, 'chat/messages');
       assert.equal(store.db.prepare('SELECT state FROM host_permits WHERE client_id=? ORDER BY at DESC').get(client.id).state, 'submitting');
-      assert.match(body.message, /^\[companion bot\] @/); assert.equal('reply_parent_message_id' in body, false);
+      assert.match(body.message, /^@[a-z0-9_]{3,25} \S/);
+      assert.equal(saved[i].at(-1).at(-1).text, body.message);
+      assert.equal(store.db.prepare('SELECT text_key FROM host_permits WHERE client_id=? ORDER BY at DESC').get(client.id).text_key, messageKey(body.message));
+      assert.equal('reply_parent_message_id' in body, false);
       provider.push({ account: client.account, body });
       return hooks.unknown ? { data: [] } : { data: [{ is_sent: true, message_id: `provider-${provider.length}` }] };
     };
@@ -62,7 +66,7 @@ async function harness(t, hooks = {}) {
   return { store, helpers, provider, requests, offers, send, refresh, tick };
 }
 
-test('two real adapters complete only the exact scheduled tagged two-line exchange', async t => {
+test('two real adapters complete only the exact scheduled plain two-line exchange', async t => {
   const h = await harness(t), first = h.offers()[0];
   assert.equal((await h.send(first)).delivery, 'confirmed');
   const request = h.requests.find(x => x.path === '/internal/reserve');

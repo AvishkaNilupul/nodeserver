@@ -65,13 +65,13 @@ function rejects(fn) {
   assert.equal(result.ok, false, 'an invalid exchange must not grant a turn');
 }
 
-test('review: feature starts disabled, waits its warmup, and exposes one stable explicitly bot-labelled offer', t => {
+test('review: feature starts disabled, waits its warmup, and exposes one stable partner-mentioned offer', t => {
   const f = fixture(t); f.syncBoth();
   assert.equal(f.store.status().exchanges.enabled, false); assert.equal(f.offers().length, 0);
   f.enable(); const nextAt = Date.parse(f.channel().nextAt);
   assert.ok(nextAt >= START + 3600000 && nextAt <= START + 7200000);
   assert.equal(f.offers().length, 0);
-  const first = f.due(); assert.ok(first.text.startsWith('[companion bot]'));
+  const first = f.due(); assert.match(first.text, /^@second_account \S/); assert.doesNotMatch(first.text, /\[companion bot\]/i);
   const again = f.offers()[0];
   assert.equal(again.id, first.id); assert.equal(again.text, first.text); assert.equal(again.key, `exchange:${first.id}`);
 });
@@ -84,7 +84,7 @@ test('review: replaying confirmed first delivery cannot shift its reply schedule
   f.store.finish(first.clientId, { reservationId: published.reservationId, delivery: 'confirmed', submitted: true });
   assert.equal(Date.parse(f.channel().nextAt), replyAt);
   const second = f.due();
-  assert.notEqual(second.id, first.id); assert.notEqual(second.account, first.account); assert.ok(second.text.startsWith('[companion bot]'));
+  assert.notEqual(second.id, first.id); assert.notEqual(second.account, first.account); assert.match(second.text, /^@first_account \S/); assert.doesNotMatch(second.text, /\[companion bot\]/i);
   publish(f, second); const after = f.channel().nextAt;
   f.store.finish(first.clientId, { reservationId: published.reservationId, delivery: 'confirmed', submitted: true });
   assert.equal(f.channel().nextAt, after); assert.equal(f.offers().length, 0); assert.equal(f.channel().usedScenes, 1);

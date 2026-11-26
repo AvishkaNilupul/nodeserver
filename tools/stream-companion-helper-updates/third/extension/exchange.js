@@ -13,7 +13,7 @@ export function exchangeOffer(value, { account, channel, streamId, accounts = []
     || (streamId !== undefined && value.streamId !== streamId)
     || !Number.isFinite(value.notBefore) || value.notBefore < 0 || !Number.isFinite(value.expiresAt)
     || value.expiresAt <= value.notBefore || value.expiresAt <= now || (due && value.notBefore > now)) return null;
-  const recipient = typeof value.text === 'string' && /^\[companion bot\] @([a-z0-9_]{3,25}) \S/.exec(value.text)?.[1];
+  const recipient = typeof value.text === 'string' && /^@([a-z0-9_]{3,25}) \S/.exec(value.text)?.[1];
   if (!recipient || recipient === account || !accounts.includes(recipient)) return null;
   try { if (validateReply(value.text) !== value.text) return null; } catch { return null; }
   return { id: value.id, account, channel, streamId: value.streamId, key: value.key, text: value.text,
