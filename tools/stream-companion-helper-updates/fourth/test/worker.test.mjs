@@ -560,8 +560,9 @@ test('paused player suppresses automatic sends until playback advances again', a
   const h = await harness(t); await tracked(h);
   await h.send({ type: 'saveSettings', settings: { autoReply: true } });
   h.local.data.watchSession.status = 'paused'; h.local.data.watchSession.checkedAt = Date.now();
-  h.offer({ text: 'central reply', replyId: 'paused-mention', replyAuthor: 'alice', replyAt: Date.now() });
-  h.chat.messages = [{ id: 'paused-mention', author: 'alice', text: '@qumaris_2489 hello', at: Date.now() }];
+  const replyAt = Date.now();
+  h.offer({ text: 'central reply', replyId: 'paused-mention', replyAuthor: 'alice', replyAt });
+  h.chat.messages = [{ id: 'paused-mention', author: 'alice', text: '@qumaris_2489 hello', at: replyAt }];
   await h.send({ type: 'getState' }); await h.flush();
   assert.equal(h.calls.filter(c => c.url.endsWith('/send')).length, 0);
   assert.match((await h.send({ type: 'getState' })).activity.reason, /playback: paused/);
@@ -571,7 +572,7 @@ test('paused player suppresses automatic sends until playback advances again', a
 });
 
 const channelResponse = channel => ({ ok: true, json: async () => ({ channel, checkedAt: Date.now(), canReply: true,
-  streamContext: { channel, gameName: 'Minecraft', title: 'A stream', isLive: true, checkedAt: Date.now() } }) });
+  streamContext: { channel, streamId: '987654321', gameName: 'Minecraft', title: 'A stream', isLive: true, checkedAt: Date.now() } }) });
 
 test('Pause remains final when an alignment settings write is already in flight', async t => {
   const h = await harness(t), w = await tracked(h);

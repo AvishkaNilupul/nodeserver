@@ -36,7 +36,7 @@ function updateSettings(fields, { expectedRevision, epoch } = {}) {
 let chat = { connected: false, messages: [], channel: '', account: '' };
 const drops = new DropClaims(chrome, settings);
 let activity = { state: 'waiting', reason: 'Waiting for a direct mention.', at: Date.now() };
-let channelInfo = null, metadataFlight = null, watchTransition = false;
+let channelInfo = null, channelInfoBinding = null, metadataFlight = null, watchTransition = false, chatRefreshSequence = 0;
 const navigationTasks = new Map();
 const setActivity = (state, reason) => { activity = { state, reason, at: Date.now() }; };
 const watch = new WatchSession(chrome, settings, {
@@ -71,7 +71,7 @@ const watch = new WatchSession(chrome, settings, {
       const current = await settings();
       if (epoch !== operationEpoch || current.revision !== s.revision || current.paused || !await watch.current(token)) return { ok: false, error: 'Channel alignment was cancelled.' };
       const next = await updateSettings({ allowedChannel: token.channel, chatMode: 'mentions', autoReply: info.canReply && current.autoReply, autoResume: info.canReply && current.autoResume }, { expectedRevision: current.revision, epoch });
-      channelInfo = info;
+      channelInfo = info; channelInfoBinding = metadataBinding(next, epoch);
       if (!info.canReply) { setActivity('error', info.reason || 'The destination chat could not be verified.'); return { ok: false, error: activity.reason }; }
       if (epoch !== operationEpoch || !await watch.current(token)) return { ok: false, error: 'Channel alignment was cancelled.' };
       await helper('/api/twitch/connect', { account: next.account, channel: next.allowedChannel }, next, binding);
@@ -89,17 +89,41 @@ const watch = new WatchSession(chrome, settings, {
   }
 });
 
+function metadataBinding(s, epoch = operationEpoch) {
+  return { account: s.account, channel: s.allowedChannel, revision: s.revision, epoch };
+}
+function sameMetadataBinding(binding, s, epoch = operationEpoch) {
+  return epoch === operationEpoch && binding?.epoch === epoch && binding.account === s.account
+    && binding.channel === s.allowedChannel && binding.revision === s.revision;
+}
+function metadataContext(s, epoch = operationEpoch) {
+  if (!sameMetadataBinding(channelInfoBinding, s, epoch) || channelInfo?.channel !== s.allowedChannel) return null;
+  const context = normalizeStreamContext(channelInfo.streamContext, s.allowedChannel, Date.now());
+  return typeof context?.isLive === 'boolean' && (!context.isLive || context.streamId) ? context : null;
+}
+function chatStreamContext(s) {
+  return chat.connected === true && chat.account === s.account && chat.channel === s.allowedChannel
+    ? metadataContext(s) : null;
+}
 async function refreshChannelInfo(s) {
-  if (channelInfo?.channel === s.allowedChannel && Date.now() - channelInfo.checkedAt < 30_000) return channelInfo;
-  if (metadataFlight) { await metadataFlight; return channelInfo?.channel === s.allowedChannel ? channelInfo : null; }
-  const epoch = operationEpoch;
-  metadataFlight = (async () => {
+  const epoch = operationEpoch, context = metadataContext(s, epoch);
+  if (context && Date.now() - context.checkedAt < 30_000) return channelInfo;
+  if (metadataFlight && sameMetadataBinding(metadataFlight.binding, s, epoch)) {
+    await metadataFlight.promise; return metadataContext(s, epoch) ? channelInfo : null;
+  }
+  const flight = { binding: metadataBinding(s, epoch), promise: null };
+  flight.promise = (async () => {
     const info = await helper('/api/twitch/channel', { account: s.account, channel: s.allowedChannel }, s);
     const latest = await settings();
-    if (epoch === operationEpoch && latest.account === s.account && latest.allowedChannel === s.allowedChannel && info.channel === s.allowedChannel) channelInfo = info;
-    return channelInfo;
+    const context = normalizeStreamContext(info?.streamContext, s.allowedChannel, Date.now());
+    if (sameMetadataBinding(flight.binding, latest, epoch) && !latest.paused && info?.channel === s.allowedChannel
+      && typeof context?.isLive === 'boolean' && (!context.isLive || context.streamId)) {
+      channelInfo = info; channelInfoBinding = flight.binding;
+    }
+    return metadataContext(s, epoch) ? channelInfo : null;
   })();
-  try { return await metadataFlight; } finally { metadataFlight = null; }
+  metadataFlight = flight;
+  try { return await flight.promise; } finally { if (metadataFlight === flight) metadataFlight = null; }
 }
 
 function sendHoldReason(s) {
@@ -182,9 +206,13 @@ chrome.runtime.onInstalled.addListener(migrate);
 chrome.runtime.onStartup.addListener(migrate);
 
 async function refreshChat({ automatic = true } = {}) {
-  const epoch = operationEpoch;
+  const epoch = operationEpoch, refresh = ++chatRefreshSequence;
   const before = await settings();
+  const current = s => refresh === chatRefreshSequence && epoch === operationEpoch && !s.paused
+    && s.revision === before.revision && s.account === before.account && s.allowedChannel === before.allowedChannel;
+  if (!current(before)) return chat;
   const playback = await watch.state();
+  if (!current(before)) return chat;
   const context = !sendHoldReason(before) && before.chatMode === 'participate' && before.autoReply && !before.paused
     && playback.enabled && playback.account === before.account && playback.channel === before.allowedChannel
     && ['playing', 'ad'].includes(playback.status) && chat.channel === before.allowedChannel
@@ -194,15 +222,19 @@ async function refreshChat({ automatic = true } = {}) {
     autoReply: before.autoReply, chatMode: before.chatMode, exchangeContext: context,
     playback: { enabled: playback.enabled, channel: playback.channel, status: playback.status, checkedAt: playback.checkedAt } } });
   const after = await settings();
-  if (epoch !== operationEpoch || after.paused || before.revision !== after.revision) return chat;
+  if (!current(after)) return chat;
+  // Publish helper connection truth immediately, with only still-valid metadata
+  // owned by this exact setup. A slow metadata read must not erase that evidence.
   chat = { ...snapshot, messages: mergeMessages([], snapshot.messages || []) };
+  chat.streamContext = chatStreamContext(after);
   if (chat.connected) {
     await refreshChannelInfo(after).catch(() => {});
     const latest = await settings();
-    if (epoch !== operationEpoch || latest.paused || latest.revision !== after.revision) return chat;
-    chat.streamContext = channelInfo?.channel === chat.channel ? channelInfo.streamContext : null;
+    if (!current(latest)) return chat;
+    chat.streamContext = chatStreamContext(latest);
     if (!sendHoldReason(latest)) await syncDirector(latest);
     else messageDirector = null;
+    if (!current(await settings())) return chat;
     if (automatic) requestAutoReply(); await chrome.storage.session.set({ recovery: {} });
   }
   else requestRecovery();
@@ -521,7 +553,8 @@ async function controlBrowserState() {
   if (!s.paused) void watch.poll().catch(e => setActivity('error', e.message));
   const [tracked, claims, stored, access] = await Promise.all([watch.state(), drops.state(), chrome.storage.local.get('sent'),
     chrome.permissions?.contains?.({ permissions: ['scripting'], origins: ['https://www.twitch.tv/*'] }) || false]);
-  return { settings: s, chat: { ...chat, digest: digest(chat.messages) }, watch: tracked, activity, drops: claims,
+  const latest = await settings();
+  return { settings: latest, chat: { ...chat, streamContext: chatStreamContext(latest), digest: digest(chat.messages) }, watch: tracked, activity, drops: claims,
     sent: stored.sent || [], permissions: { playbackAccess: access === true } };
 }
 
@@ -574,7 +607,7 @@ async function executeControl(command, check) {
       const info = await helper('/api/twitch/channel', { account: s.account, channel: s.allowedChannel }, s); await verify();
       const offline = info.channel === s.allowedChannel && info.streamContext?.isLive === false;
       if (!info.canReply && !offline) throw new Error(info.reason || 'The selected live channel does not permit chat.');
-      channelInfo = info;
+      channelInfo = info; channelInfoBinding = metadataBinding(s, epoch);
       await helper('/api/twitch/connect', { account: s.account, channel: s.allowedChannel }, s, binding); await verify();
       for (let i = 0; i < 30; i++) {
         await refreshChat(); await verify();
