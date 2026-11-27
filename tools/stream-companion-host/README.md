@@ -41,6 +41,7 @@ Account control is loopback-only with same-origin/CSRF checks. The server reads 
 - Direct addressing includes an explicit `@account` mention or Twitch's Reply action on that account's confirmed message in the same channel. A confirmed parent from an earlier broadcast or a reviewed manual send still belongs to that account; unknown, rejected and foreign parents do not establish ownership. Already-consumed or shared-answered incoming messages are excluded before choosing the newest target.
 - Incoming reply targets remain eligible for 45 seconds and still obey the shared limits. A follow-up received during the three-minute cooldown can expire without a reply. Local mode answers supported message patterns from the enabled account catalog; unsupported text and a quiet room can produce no reply. Quiet does not by itself mean the browser or incoming feed failed.
 - Unused leases expire. Known confirmed/rejected outcomes survive restart and completion replay; uncertain provider delivery holds its opportunity without retry. A host outage holds new sends without consuming a send allowance.
+- Waiting activity explains current offline/playback state, cooldowns, unsupported local replies and the next occasional exchange check. These explanations read current state; they do not create a message opportunity or promise a send.
 
 ## Occasional bot exchanges
 
@@ -49,6 +50,8 @@ Enable or disable this feature on the host page. Each public line uses **`@recip
 The host schedules an opportunity every60–120minutes while both companions are eligible. A confirmed first line may receive one response3–6minutes later, within the normal shared limits. There is no reply chain. Both profiles need participation mode, fresh matching live metadata and playback; a stopped, disconnected or stale partner cancels the exchange. Fresh human chat defers it, and ordinary human replies retain priority. Unknown or rejected delivery does not trigger a follow-up or automatic retry.
 
 The schedule, scene usage and outcomes survive restarts. There is no public test-send or fast-forward button. Enabling this feature does not start either profile. Start each intended profile through its account page when wanted; a stopped profile stays stopped.
+
+Before the first line, the host requires two free hourly slots and enough time for the existing maximum reply delay. It rechecks at offer, reservation and begin. The return line needs one slot. This does not reserve future capacity: an ordinary human reply still has priority and may prevent the return. Unsent work consumes no allowance, and used scene identities remain durable.
 
 ## Setup and service
 

@@ -140,7 +140,7 @@ export class ExchangeEngine {
     // eligible pair. While globally held, retain one pair for waiting status.
     return pairs.find(x => this.gate(channel, x.pair).ok)?.pair || pairs[0]?.pair || null;
   }
-  gate(channel, pair, account) {
+  gate(channel, pair, account, line = null) {
     if (!this.enabled) return hold('exchange_cancelled', 'Companion exchanges are disabled.');
     if (this.s.paused) return hold('paused', 'Central coordination is paused.');
     if (!pair) return hold('exchange_cancelled', 'Both companions need fresh participation and the same live broadcast.');
@@ -156,6 +156,13 @@ export class ExchangeEngine {
     }
     const b = this.s.budget(channel);
     if (b.count >= this.s.policy.maxAttemptsPerHour || b.rows.length && b.next > this.s.now()) return hold('exchange_spacing', 'Waiting for the shared channel allowance.');
+    // Admission is not a reservation: useful human replies may still consume
+    // capacity later. Never knowingly start a pair with only its opener's slot.
+    if (line?.turn !== 2) {
+      if (b.count + 2 > this.s.policy.maxAttemptsPerHour) return hold('exchange_spacing', 'Waiting for shared channel capacity for both companion lines.');
+      const deadline = line?.expires_at ?? this.s.now() + EXCHANGE_POLICY.deadlineMs;
+      if (this.s.now() + Math.max(EXCHANGE_POLICY.replyMaxMs, this.s.policy.channelGapMs) >= deadline) return hold('exchange_spacing', 'Waiting for enough time to finish both companion lines.');
+    }
     if (this.db.prepare("SELECT 1 FROM host_permits WHERE channel=? AND state='leased'").get(channel)) return hold('exchange_wait', 'Another companion is completing a turn.');
     return { ok: true };
   }
@@ -201,7 +208,7 @@ export class ExchangeEngine {
         if (!pair) { this.schedule(channel, this.db.prepare('SELECT next_at FROM host_exchange_schedules WHERE channel=?').get(channel).next_at, 'waiting_for_partners', 'Waiting for both companions on the same fresh live broadcast.'); continue; }
         if (run) {
           const line = this.db.prepare("SELECT * FROM host_exchange_lines WHERE exchange_id=? AND state NOT IN ('confirmed','cancelled') ORDER BY turn LIMIT 1").get(run.id);
-          const g = line ? this.gate(channel, pair, line.account) : { ok: false, code: 'exchange_wait', reason: 'Waiting for delivery confirmation.' };
+          const g = line ? this.gate(channel, pair, line.account, line) : { ok: false, code: 'exchange_wait', reason: 'Waiting for delivery confirmation.' };
           this.schedule(channel, line?.not_before || 0, !g.ok && ['exchange_quiet', 'exchange_spacing', 'exchange_priority', 'exchange_wait'].includes(g.code) ? g.code === 'exchange_quiet' ? 'quiet_wait' : 'spacing_wait' : `turn_${line?.turn || 1}`, g.ok ? 'A companion line is scheduled.' : g.reason);
           continue;
         }
@@ -239,7 +246,7 @@ export class ExchangeEngine {
     if (!run || c.channel !== channel) return undefined;
     const line = this.db.prepare("SELECT * FROM host_exchange_lines WHERE exchange_id=? AND account=? AND state IN ('offered','leased')").get(run.id, c.account);
     if (!line || line.not_before > this.s.now() || line.expires_at <= this.s.now()) return undefined;
-    const g = this.gate(channel, this.partners(channel, run), line.account);
+    const g = this.gate(channel, this.partners(channel, run), line.account, line);
     // An already-owned unused lease is still the same exact offer; its own
     // presence must not invalidate the helper's final local validation.
     if (!g.ok && !(g.code === 'exchange_wait' && line.state === 'leased')) return undefined;
@@ -257,7 +264,7 @@ export class ExchangeEngine {
     if (!line.not_before || line.not_before > this.s.now()) return hold('exchange_wait', 'The next exchange line is not due yet.');
     const pair = this.partners(p.channel, run);
     if (!pair || pair[0].exchange_stream_id !== run.stream_id) return hold('exchange_cancelled', 'A partner or live broadcast changed.');
-    const g = this.gate(p.channel, pair, line.account);
+    const g = this.gate(p.channel, pair, line.account, line);
     if (!g.ok && !(begin && g.code === 'exchange_wait')) return g;
     return { ok: true, line };
   }

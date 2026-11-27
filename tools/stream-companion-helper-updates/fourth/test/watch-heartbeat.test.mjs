@@ -19,7 +19,7 @@ async function fixture(t, { paused = false, enabled = true } = {}) {
   const account = 'fixture_companion';
   const local = storage({ settings: { schemaVersion: 8, revision: 1, account, allowedChannel: 'live_channel', paused, pairingToken: 'fixture-token', autoReply: false, autoResume: !paused, chatMode: 'mentions', replySource: 'local' },
     watchSession: { enabled, tabId: 42, account, channel: 'live_channel', url, status: 'playing', checkedAt: epoch - 24000, lastProgressAt: epoch - 24000,
-      currentTime: 50, hasVideo: true, paused: false, ad: false, documentId: 'fixture-doc', sessionId: 'fixture-watch', generation: 1, waitingSince: epoch - 24000 } });
+      currentTime: 50, videoId: 'v1', hasVideo: true, paused: false, ad: false, documentId: 'fixture-doc', sessionId: 'fixture-watch', generation: 1, waitingSince: epoch - 24000 } });
   const session = storage();
   const chrome = { storage: { local, session }, runtime: { id: 'fixture-extension', onInstalled: event(), onStartup: event(), onMessage: event() },
     sidePanel: { async setPanelBehavior() {} }, alarms: { onAlarm: event(), async create() {}, async clearAll() {} },
@@ -30,7 +30,7 @@ async function fixture(t, { paused = false, enabled = true } = {}) {
     scripting: { async executeScript(request) {
       executions.push({ time, request });
       assert.deepEqual(request.target, { tabId: 42, frameIds: [0] }); assert.equal(request.world, 'ISOLATED');
-      const result = [{ frameId: 0, documentId: 'fixture-doc', result: { url, hasVideo: true, currentTime: 100 + (time - epoch) / 1000, readyState: 4, paused: videoPaused, ended: false, ad: false, offline: false, error: false } }];
+      const result = [{ frameId: 0, documentId: 'fixture-doc', result: { url, videoId: 'v1', hasVideo: true, currentTime: 100 + (time - epoch) / 1000, readyState: 4, paused: videoPaused, ended: false, ad: false, offline: false, error: false } }];
       return scriptOverride ? scriptOverride(result) : result;
     } }
   };

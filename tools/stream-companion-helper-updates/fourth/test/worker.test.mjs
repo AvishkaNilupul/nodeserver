@@ -81,7 +81,7 @@ async function hostedHarness(t, { access = true, offline = false, windowId = 1 }
   Object.assign(h.chrome.tabs, { create: async options => { opened.push(options); tab = { ...tab, url: options.url }; return { ...tab }; },
     get: async () => ({ ...tab }), update: async (id, options) => { focused.push({ id, options }); return { ...tab }; } });
   h.chrome.windows = { update: async (id, options) => { focused.push({ windowId: id, options }); } };
-  h.chrome.scripting = { executeScript: async () => [{ frameId: 0, documentId: 'control-doc', result: { url: tab.url, hasVideo: true, currentTime: clock++, readyState: 4, paused: false } }] };
+  h.chrome.scripting = { executeScript: async () => [{ frameId: 0, documentId: 'control-doc', result: { url: tab.url, videoId: 'v1', hasVideo: true, currentTime: clock++, readyState: 4, paused: false } }] };
   const twitch = { status: () => ({ ...h.chat, authorized: true, sent: h.local.data.sent || [] }), disconnect() { h.chat.connected = false; h.chat.channel = ''; h.chat.messages = []; } };
   const control = h.control; control.twitch = twitch;
   h.override(async (url, options) => {
@@ -389,7 +389,7 @@ async function tracked(h) {
   let clock = 10;
   h.chrome.permissions = { contains: async () => true, getAll: async () => ({ permissions: ['scripting'], origins: ['https://www.twitch.tv/*'] }) };
   Object.assign(h.chrome.tabs, { create: async () => tab, get: async () => ({ ...tab }) });
-  h.chrome.scripting = { executeScript: async () => [{ frameId: 0, documentId: 'doc', result: { url: tab.url, hasVideo: true, currentTime: clock++, readyState: 4, paused: false } }] };
+  h.chrome.scripting = { executeScript: async () => [{ frameId: 0, documentId: 'doc', result: { url: tab.url, videoId: 'v1', hasVideo: true, currentTime: clock++, readyState: 4, paused: false } }] };
   h.chat.messages = [];
   h.override((url, options) => {
     const b = JSON.parse(options.body);

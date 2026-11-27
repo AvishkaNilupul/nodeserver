@@ -61,11 +61,11 @@ async function backgroundFixture(t, { failedFrom = Infinity } = {}) {
   helper.validatedAt = time; helper.connected = true; helper.channel = CHANNEL;
   const local = storage({ settings: { schemaVersion: 8, revision: 1, account: ACCOUNT, allowedChannel: CHANNEL, paused: false, pairingToken: 'fixture-token', autoReply: false, autoResume: true, chatMode: 'mentions', replySource: 'local' },
     watchSession: { enabled: true, tabId: 42, account: ACCOUNT, channel: CHANNEL, url: `https://www.twitch.tv/${CHANNEL}`, status: 'playing', checkedAt: EPOCH - 1000, lastProgressAt: EPOCH - 1000,
-      currentTime: 5, hasVideo: true, paused: false, ad: false, documentId: 'fixture-doc', sessionId: 'fixture-watch', generation: 1, waitingSince: EPOCH - 1000 } });
+      currentTime: 5, videoId: 'v1', hasVideo: true, paused: false, ad: false, documentId: 'fixture-doc', sessionId: 'fixture-watch', generation: 1, waitingSince: EPOCH - 1000 } });
   const chrome = { storage: { local, session: storage() }, runtime: { id: 'fixture-extension', onInstalled: event(), onStartup: event(), onMessage: event() }, sidePanel: { async setPanelBehavior() {} },
     alarms: { onAlarm: event(), async create() {}, async clearAll() {} }, permissions: { async contains() { return true; } },
     tabs: { onUpdated: event(), onRemoved: event(), async get(id) { return { id, url: `https://www.twitch.tv/${CHANNEL}`, status: 'complete' }; } },
-    scripting: { async executeScript(request) { nativeReads.push({ at: time, request }); return [{ frameId: 0, documentId: 'fixture-doc', result: { url: `https://www.twitch.tv/${CHANNEL}`, hasVideo: true, currentTime: 10 + (time - EPOCH) / 1000, readyState: 4, paused: false, ended: false, ad: false, offline: false, error: false } }]; } } };
+    scripting: { async executeScript(request) { nativeReads.push({ at: time, request }); return [{ frameId: 0, documentId: 'fixture-doc', result: { url: `https://www.twitch.tv/${CHANNEL}`, hasVideo: true, videoId: 'v1', currentTime: 10 + (time - EPOCH) / 1000, readyState: 4, paused: false, ended: false, ad: false, offline: false, error: false } }]; } } };
   const control = new LocalControl({ twitch: helper, now: () => time });
   globalThis.chrome = chrome; Date.now = () => time;
   globalThis.setInterval = (fn, delay) => { const id = intervals.size + 1; intervals.set(id, { fn, delay }); return id; }; globalThis.clearInterval = id => intervals.delete(id);

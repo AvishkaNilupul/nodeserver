@@ -388,10 +388,78 @@ export class Director {
     return { generationId: row.generation_id, requestId: row.request_id || row.id, mode: row.mode, account: p.account, channel: p.channel,
       target: target ? { id: target.id, author: target.author, text: target.text, at: target.at } : null, binding: p.binding };
   }
+  waitingReason(clientId, current = this.current(clientId)) {
+    // _snapshot embeds internal(), so diagnostics must never request a snapshot
+    // or tick the exchange engine. These reads cannot create/consume a target.
+    const c = this.s.client(clientId), now = this.s.now();
+    if (this.s.paused) return 'Central coordination is paused.';
+    if (!this.s.online(c)) return 'Waiting for a fresh companion heartbeat.';
+    if (!c.connected || !c.channel) return 'Chat is disconnected; automatic replies are waiting.';
+    const obs = this.observation(clientId);
+    if (!obs) return 'Waiting for a fresh browser check-in.';
+    const context = normalizeStreamContext(obs.context, c.channel, now);
+    if (context?.isLive === false) return 'The channel is offline; automatic chat is waiting.';
+    if (!context?.isLive || !context.streamId) return 'Waiting for current live channel information.';
+    if (obs.restrictions.sendHeld) return 'Sending is held for this account and channel.';
+    if (obs.restrictions.sharedChat) return 'Automatic chat is held while the channel uses shared chat.';
+    if (obs.restrictions.emoteOnly || obs.restrictions.subscribersOnly) return 'Channel chat restrictions are holding automatic replies.';
+    if (!obs.armed) return 'Automatic replies are off or paused for this companion.';
+    if (c.playback_at > now + 5000 || c.playback_at < now - this.s.policy.presenceMs) return 'Waiting for a recent video check.';
+    if (c.playback === 'paused') return 'Native playback is paused; automatic replies are held.';
+    if (!['playing', 'ad'].includes(c.playback)) return 'Native playback is not confirmed as playing; automatic replies are held.';
+    if (!c.ready) return 'Waiting for the companion to confirm readiness.';
+    const budget = this.s.budget(c.channel);
+    if (budget.count >= this.s.policy.maxAttemptsPerHour) return 'The channel hourly message allowance is full; waiting for capacity.';
+    if (budget.next > now) return 'Waiting for the channel message cooldown.';
+    const ownAttempts = this.db.prepare("SELECT at FROM contributions WHERE account=? AND at>? AND delivery IN ('pending','confirmed','unknown','rejected') ORDER BY at").all(c.account, now - 3600000);
+    if (ownAttempts.length >= this.s.policy.maxAttemptsPerHour) return 'This account’s hourly message allowance is full; waiting for capacity.';
+    if (ownAttempts.at(-1)?.at + this.s.policy.channelGapMs > now) return 'Waiting for this account’s message cooldown.';
+    const turn = this.db.prepare("SELECT client_id FROM host_permits WHERE channel=? AND (state='submitting' OR state='leased' AND expires_at>?) LIMIT 1").get(c.channel, now);
+    if (turn) return turn.client_id === clientId ? 'Waiting for the current message turn to finish.' : 'Waiting for another companion to finish the current channel turn.';
+    if (current) {
+      const p = JSON.parse(current.payload_json);
+      if (p.expiresAt <= now) return 'The previous message expired; waiting for a fresh opportunity.';
+      const target = p.replyId && obs.messages.find(m => m.id === p.replyId && m.author === p.replyAuthor && m.at === p.replyAt);
+      if (p.replyId && (!target || current.target_key && current.target_key !== digest(JSON.stringify([target.id, target.author, target.text, target.at])))) return 'The reply target is no longer current; waiting for a fresh message.';
+      if (current.state === 'generating') return 'Preparing a reply with the configured model.';
+      return p.notBefore > now ? 'Waiting for the current message to become due.' : 'A message is ready for a check before sending.';
+    }
+    const profile = this.profile(clientId), humans = this.humanMessages(obs, c.account).filter(m => m.at >= now - 45000 && m.at <= now);
+    const noMatches = new Set(this.db.prepare("SELECT key FROM director_opportunities WHERE account=? AND channel=? AND state='no_match' AND at>=?").all(c.account, c.channel, now - 45000).map(row => row.key));
+    const unsupported = humans.findLast(m => noMatches.has(`${c.account}:${c.channel}:${m.id}`)
+      || noMatches.has(`participation:${c.account}:${c.channel}:${context.streamId}:conversation:${m.id}`));
+    if (unsupported) {
+      if (profile.replySource === 'ai') return 'The configured reply source returned no supported reply; staying quiet.';
+      const phrases = Object.fromEntries(REPLY_CATEGORIES.map(cat => [cat, this.choices(clientId, 'reply', cat, context)]));
+      const result = localReply({ messages: humans, target: unsupported, account: c.account, channel: c.channel,
+        recent: this.recent(c.account), streamContext: context, now, bank: phrases, random: () => 0 });
+      if (!result.category) return 'The fresh message has no supported local reply; staying quiet.';
+      if (!phrases[result.category]?.length) return 'Local reply wording for this message category is disabled or unavailable.';
+      if (result.reason === 'Already answered this part of the conversation.') return 'This part of the conversation was already answered; waiting for something new.';
+      return 'The previous incoming message was handled without a new local reply; waiting for a fresh message.';
+    }
+    if (profile.chatMode === 'participate') {
+      const lastOpportunity = this.db.prepare("SELECT MAX(at) AS at FROM director_opportunities WHERE account=? AND kind<>'' AND state IN ('pending','submitting','confirmed','rejected','unknown')").get(c.account).at;
+      const lastContribution = this.db.prepare("SELECT MAX(at) AS at FROM contributions WHERE account=? AND kind<>'' AND delivery<>'cancelled'").get(c.account).at;
+      if (Math.max(lastOpportunity || 0, lastContribution || 0) + 600000 > now) return 'Waiting between this account’s occasional participation messages.';
+    }
+    const quiet = humans.length ? 'Waiting for a fresh message this companion can answer.' : 'No fresh human message to answer.';
+    if (profile.chatMode !== 'participate' || !this.s.exchanges?.enabled) return quiet;
+    const schedule = this.db.prepare('SELECT state,next_at FROM host_exchange_schedules WHERE channel=?').get(c.channel);
+    if (schedule?.state === 'scheduled' && schedule.next_at > now && Number.isFinite(new Date(schedule.next_at).getTime())) {
+      const minutes = Math.ceil((schedule.next_at - now) / 60000);
+      return `${quiet} Next occasional exchange check in ${minutes} minute${minutes === 1 ? '' : 's'}.`;
+    }
+    if (schedule?.state === 'waiting_for_partners') return `${quiet} Occasional exchanges are waiting for ready partners.`;
+    if (schedule?.state === 'quiet_wait') return `${quiet} Recent human chat takes priority over an occasional exchange.`;
+    if (schedule?.state === 'spacing_wait') return `${quiet} An occasional exchange is waiting for existing spacing or shared capacity.`;
+    if (schedule?.state === 'exhausted') return `${quiet} The approved exchange scenes are already used.`;
+    return quiet;
+  }
   internal(clientId) {
     const current = this.current(clientId), imports = this.imports(clientId), ready = this.ready && Object.values(imports).every(Boolean);
     const result = { protocol: 1, authorityEpoch: this.epoch, ready, profile: this.profile(clientId), bankRevision: this.bank().revision,
-      reason: ready ? this.s.paused ? 'Central coordination is paused.' : '' : 'Waiting for every companion history migration.' };
+      reason: ready ? this.waitingReason(clientId, current) : 'Waiting for every companion history migration.' };
     if (current && current.state === 'generating') result.generation = this.generation(current);
     else if (current) result.plan = JSON.parse(current.payload_json);
     return result;

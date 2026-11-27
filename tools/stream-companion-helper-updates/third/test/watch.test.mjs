@@ -10,7 +10,7 @@ test('watch targets are exact HTTPS channel pages, never inventory, popouts or V
 });
 
 test('health requires advancing native time and distinguishes pause, buffering, stall and stale evidence', () => {
-  const snapshot = { documentId: 'doc', hasVideo: true, currentTime: 10, readyState: 4, paused: false, ended: false, ad: false, offline: false, error: false };
+  const snapshot = { documentId: 'doc', videoId: 'v1', hasVideo: true, currentTime: 10, readyState: 4, paused: false, ended: false, ad: false, offline: false, error: false };
   let s = playbackState(snapshot, {}, 100000);
   assert.equal(s.status, 'checking');
   s = playbackState({ ...snapshot, currentTime: 15 }, s, 105000);
@@ -27,8 +27,8 @@ test('health requires advancing native time and distinguishes pause, buffering, 
 });
 
 test('ad transitions reset the playback clock; progressing ads count as expected playback', () => {
-  const ad = { documentId: 'doc', hasVideo: true, currentTime: 0, readyState: 4, paused: false, ad: true };
-  const initial = playbackState(ad, { documentId: 'doc', hasVideo: true, currentTime: 900, ad: false, lastProgressAt: 99000 }, 100000);
+  const ad = { documentId: 'doc', videoId: 'v1', hasVideo: true, currentTime: 0, readyState: 4, paused: false, ad: true };
+  const initial = playbackState(ad, { documentId: 'doc', videoId: 'v1', hasVideo: true, currentTime: 900, ad: false, lastProgressAt: 99000 }, 100000);
   assert.equal(initial.status, 'checking');
   assert.equal(playbackState({ ...ad, currentTime: 5 }, initial, 105000).status, 'ad');
   assert.equal(playbackState({ ...ad, paused: true }, initial, 105000).status, 'paused');
@@ -68,7 +68,7 @@ function controller(hooks = {}) {
     storage: { local: { async get() { return structuredClone(data); }, async set(value) { Object.assign(data, structuredClone(value)); } } },
     permissions: { async contains() { return grant; } },
     tabs: { async get(id) { calls.push(['get', id]); if (!tabExists) throw Error('No tab'); return { id, url, status }; }, async remove() { throw Error('Must not close tabs'); }, async update() { throw Error('Must not control tabs'); } },
-    scripting: { async executeScript(request) { calls.push(['execute', request.target]); if (override) return override(request); return [{ frameId: 0, documentId, result: { url, hasVideo: true, currentTime: time, readyState: 4, paused: false, ended: false, ad: false, offline: false, error: false } }]; } }
+    scripting: { async executeScript(request) { calls.push(['execute', request.target]); if (override) return override(request); return [{ frameId: 0, documentId, result: { url, videoId: 'v1', hasVideo: true, currentTime: time, readyState: 4, paused: false, ended: false, ad: false, offline: false, error: false } }]; } }
   };
   const instance = new WatchSession(api, async () => structuredClone(settings), hooks);
   return { instance, data, api, calls, settings, attach: () => instance.attach({ tabId: 42, account: settings.account, channel: 'first_channel' }), time: value => { time = value; }, navigate: (value, state = 'complete') => { url = value; status = state; }, document: value => { documentId = value; }, override: fn => { override = fn; }, revoke: () => { grant = false; }, close: () => { tabExists = false; } };

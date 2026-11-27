@@ -3,7 +3,7 @@ import { watchPage } from './watch-page.js';
 export const WATCH_ACCESS = { permissions: ['scripting'], origins: ['https://www.twitch.tv/*'] };
 const STORAGE_KEY = 'watchSession';
 const RESERVED = new Set(['directory', 'settings', 'downloads', 'videos', 'subscriptions', 'inventory', 'drops', 'wallet', 'search', 'popout', 'clip', 'clips', 'collections', 'dashboard', 'login', 'signup', 'logout', 'activate', 'turbo', 'jobs', 'p', 'friends', 'messages', 'store', 'products', 'prime', 'team', 'teams', 'bits', 'checkout', 'payments', 'moderator']);
-const OFF = { enabled: false, tabId: null, account: '', channel: '', url: '', status: 'off', detail: 'Playback checks are off.', checkedAt: 0, lastProgressAt: 0, error: '', syncStatus: 'idle', syncError: '', generation: 0, sessionId: '', documentId: '' };
+const OFF = { enabled: false, tabId: null, account: '', channel: '', url: '', status: 'off', detail: 'Playback checks are off.', checkedAt: 0, lastProgressAt: 0, error: '', syncStatus: 'idle', syncError: '', generation: 0, sessionId: '', documentId: '', videoId: '' };
 
 export function watchChannel(raw) {
   try {
@@ -17,7 +17,8 @@ export function watchChannel(raw) {
 
 export function playbackState(snapshot, previous = {}, now = Date.now()) {
   const sameDocument = !!previous.documentId && snapshot.documentId === previous.documentId;
-  const sameClock = sameDocument && previous.hasVideo && previous.ad === snapshot.ad;
+  const sameMedia = typeof snapshot.videoId === 'string' && /^v[1-9]\d{0,8}$/.test(snapshot.videoId) && snapshot.videoId === previous.videoId;
+  const sameClock = sameDocument && sameMedia && previous.hasVideo && previous.ad === snapshot.ad;
   const delta = snapshot.currentTime - (previous.currentTime || 0);
   const advanced = sameClock && delta > 0.1 && snapshot.currentTime >= 0;
   const reset = !sameClock || delta < -0.1;
@@ -92,7 +93,7 @@ export class WatchSession {
       // event after a raid must not cancel the still-valid channel validation.
       this.epoch++; this.lastPollAt = 0;
       if (changed) this.hooks.onNavigation?.(token);
-      return { ...token, status: channel ? 'checking' : 'unavailable', detail: channel ? 'Checking the new stream page.' : 'The tracked tab is no longer on a stream channel.', checkedAt: 0, lastProgressAt: 0, documentId: '', currentTime: 0, hasVideo: false, waitingSince: 0, loading, error: '', syncStatus: changed ? 'checking' : old.syncStatus, syncError: changed ? '' : old.syncError };
+      return { ...token, status: channel ? 'checking' : 'unavailable', detail: channel ? 'Checking the new stream page.' : 'The tracked tab is no longer on a stream channel.', checkedAt: 0, lastProgressAt: 0, documentId: '', videoId: '', currentTime: 0, hasVideo: false, waitingSince: 0, loading, error: '', syncStatus: changed ? 'checking' : old.syncStatus, syncError: changed ? '' : old.syncError };
     });
     if (!token || !changed || !await this.current(token)) return this.state();
     try {
@@ -127,7 +128,7 @@ export class WatchSession {
       if (!await this.api.permissions.contains(WATCH_ACCESS)) {
         // Preserve the tracked session so callers continue to hold automatic
         // replies on unknown playback rather than silently becoming chat-only.
-        await this.patch({ status: 'unavailable', detail: 'Twitch playback-check access was removed.', error: 'Allow Twitch access to resume playback checks, or stop the checks explicitly.', checkedAt: Date.now(), lastProgressAt: 0, documentId: '', hasVideo: false }, operationToken);
+        await this.patch({ status: 'unavailable', detail: 'Twitch playback-check access was removed.', error: 'Allow Twitch access to resume playback checks, or stop the checks explicitly.', checkedAt: Date.now(), lastProgressAt: 0, documentId: '', videoId: '', hasVideo: false }, operationToken);
         return this.state();
       }
       if (pollEpoch !== this.epoch) return this.state();
@@ -147,7 +148,7 @@ export class WatchSession {
       tab = await this.api.tabs.get(s.tabId);
       if ((tab.pendingUrl || tab.url) !== s.url || tab.status === 'loading') { await this.navigate(tab.pendingUrl || tab.url, { loading: tab.status === 'loading' }); return this.state(); }
       const raw = snapshot.result;
-      const bounded = { documentId: snapshot.documentId, url: raw.url, hasVideo: !!raw.hasVideo, currentTime: Number.isFinite(raw.currentTime) && raw.currentTime >= 0 ? raw.currentTime : 0, readyState: Math.max(0, Math.min(4, Number(raw.readyState) || 0)), paused: !!raw.paused, ended: !!raw.ended, ad: !!raw.ad, offline: !!raw.offline, error: !!raw.error };
+      const bounded = { documentId: snapshot.documentId, videoId: typeof raw.videoId === 'string' && /^v[1-9]\d{0,8}$/.test(raw.videoId) ? raw.videoId : '', url: raw.url, hasVideo: !!raw.hasVideo, currentTime: Number.isFinite(raw.currentTime) && raw.currentTime >= 0 ? raw.currentTime : 0, readyState: Math.max(0, Math.min(4, Number(raw.readyState) || 0)), paused: !!raw.paused, ended: !!raw.ended, ad: !!raw.ad, offline: !!raw.offline, error: !!raw.error };
       await this.patch(playbackState(bounded, s), token);
       return this.state();
     } catch (e) {

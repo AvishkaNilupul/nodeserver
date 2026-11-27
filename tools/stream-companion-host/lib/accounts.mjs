@@ -63,7 +63,10 @@ function privateValues(config) {
   const found = [];
   const visit = (v, key = '', depth = 0) => {
     if (depth > 5) return;
-    if (typeof v === 'string' && /token|secret|password|key|extensionid|clientid/i.test(key) && v.length >= 4) found.push(v);
+    // The relay's fixed profile selector is public routing data. Redacting it
+    // inside command request IDs breaks confirmation without hiding a secret.
+    const publicClient = key.toLowerCase() === 'clientid' && SOURCES.some(source => source.id === v);
+    if (typeof v === 'string' && /token|secret|password|key|extensionid|clientid/i.test(key) && v.length >= 4 && !publicClient) found.push(v);
     else if (record(v)) for (const [k, x] of Object.entries(v)) visit(x, k, depth + 1);
   };
   visit(config); return found;
