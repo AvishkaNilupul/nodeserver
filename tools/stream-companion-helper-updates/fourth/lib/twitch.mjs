@@ -41,6 +41,7 @@ export class TwitchChat {
     this.messages = []; this.connected = false; this.error = ''; this.generation = 0; this.validatedAt = null;
     this.sockets = new Set(); this.timers = new Map(); this.chain = Promise.resolve();
     this.channelCache = new Map();
+    this.credentialWrites = Promise.resolve(); this.readAuthFlight = null;
     this.sendHolds.recover(history);
   }
 
@@ -78,6 +79,7 @@ export class TwitchChat {
     if (this.now() < p.nextPoll) return { pending: true, pollAfterMs: p.nextPoll - this.now() };
     p.nextPoll = this.now() + p.interval;
     const { response, data } = await this.form('token', { client_id: p.clientId, scopes: p.scopes.join(' '), device_code: p.deviceCode, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' });
+    if (this.pendingAuth !== p) throw new Error('Authorization cancelled.');
     if (data.message === 'authorization_pending' || data.error === 'authorization_pending') return { pending: true, pollAfterMs: p.interval };
     if (data.message === 'slow_down' || data.error === 'slow_down') { p.interval += 5000; p.nextPoll = this.now() + p.interval; return { pending: true, pollAfterMs: p.interval }; }
     if (!response.ok || !data.access_token || !data.refresh_token) { this.pendingAuth = null; throw new Error('Twitch authorization was denied or expired. Connect again.'); }
@@ -87,9 +89,12 @@ export class TwitchChat {
     if (this.pendingAuth !== p) throw new Error('Authorization cancelled.');
     beforeSave();
     const replacement = { ...candidate, ...identity };
-    await this.saveCredentials(replacement);
-    this.credentials = replacement;
-    this.pendingAuth = null; this.validatedAt = this.now();
+    await this.saveIdentityCredentials(replacement, () => {
+      if (this.pendingAuth !== p) throw new Error('Authorization cancelled.');
+      beforeSave();
+    });
+    if (this.pendingAuth === p) this.pendingAuth = null;
+    this.validatedAt = this.now();
     return { authorized: true, account: identity.account };
   }
 
@@ -100,42 +105,140 @@ export class TwitchChat {
     return { account: data.login, userId: data.user_id, scopes: [...chatScopes, ...(credentials.clipPermissionInvalid !== true && data.scopes.includes(clipScope) ? [clipScope] : [])] };
   }
 
-  async ensureIdentity(expected) {
+  async saveIdentityCredentials(replacement, beforeSave = () => {}, { adoptBeforeSave = false } = {}) {
+    const write = this.credentialWrites.then(async () => {
+      beforeSave();
+      const value = typeof replacement === 'function' ? replacement() : replacement;
+      // A dispatched refresh can rotate a one-use grant. Retain its replacement
+      // in memory even if durable storage fails, as the existing refresh did.
+      if (adoptBeforeSave) this.credentials = value;
+      await this.saveCredentials(value);
+      if (!adoptBeforeSave) this.credentials = value;
+      return value;
+    });
+    this.credentialWrites = write.catch(() => {});
+    return write;
+  }
+
+  async ensureIdentity(expected, { beforeRequest } = {}) {
+    const generation = this.generation;
+    beforeRequest ||= () => {
+      if (generation !== this.generation) throw Object.assign(new Error('Twitch validation cancelled by Stop.'), { cancelled: true });
+    };
+    beforeRequest();
     if (this.identityFlight) {
-      await this.identityFlight;
+      const pending = this.identityFlight;
+      try { await pending; }
+      catch (error) {
+        beforeRequest();
+        if (!error.cancelled) throw error;
+        if (this.identityFlight === pending) this.identityFlight = null;
+        return this.ensureIdentity(expected, { beforeRequest });
+      }
+      beforeRequest();
       if (this.credentials.account !== expected) throw new Error('The authorized Twitch account does not match.');
       return;
     }
-    this.identityFlight = this.checkIdentity(expected);
-    try { await this.identityFlight; } finally { this.identityFlight = null; }
+    const flight = this.checkIdentity(expected, { beforeRequest });
+    this.identityFlight = flight;
+    try { await flight; } finally { if (this.identityFlight === flight) this.identityFlight = null; }
   }
 
-  async checkIdentity(expected) {
-    if (!this.credentials.accessToken) throw new Error('Connect the companion account to Twitch first.');
-    if (this.credentials.account !== expected) throw new Error('The authorized Twitch account does not match.');
+  async checkIdentity(expected, { beforeRequest = () => {} } = {}) {
+    let owner = this.credentials;
+    const ownsCredentials = () => {
+      if (['account', 'clientId', 'accessToken', 'refreshToken'].some(key => this.credentials[key] !== owner[key])) {
+        throw Object.assign(new Error('Twitch authorization changed during validation.'), { cancelled: true });
+      }
+    };
+    const current = () => { beforeRequest(); ownsCredentials(); };
+    const holdRefresh = async (status, uncertain) => {
+      try {
+        await this.saveIdentityCredentials(() => ({ ...this.credentials, refreshHeld: true }), ownsCredentials, { adoptBeforeSave: true });
+      } catch (error) {
+        if (error.cancelled) throw error;
+        throw Object.assign(new Error('Twitch authorization refresh is held; its safety state could not be saved. Authorize Twitch again.'), { retryable: false, uncertain: true });
+      }
+      throw Object.assign(new Error(uncertain ? 'Twitch authorization refresh outcome is unconfirmed. Authorize Twitch again.'
+        : 'Twitch authorization refresh was refused. Authorize Twitch again.'), { status, retryable: false, uncertain });
+    };
+    current();
+    if (owner.refreshHeld === true) throw Object.assign(new Error('Twitch authorization refresh is held. Authorize Twitch again.'), { retryable: false });
+    if (!owner.accessToken) throw new Error('Connect the companion account to Twitch first.');
+    if (owner.account !== expected) throw new Error('The authorized Twitch account does not match.');
     if (this.validatedAt !== null && this.now() - this.validatedAt < 3_600_000) return;
     let identity;
-    try { identity = await this.validate(this.credentials, expected); }
+    try { identity = await this.validate(owner, expected); current(); }
     catch (e) {
-      if (e.status !== 401 || !this.credentials.refreshToken) throw e;
-      const { response, data } = await this.form('token', { client_id: this.credentials.clientId, grant_type: 'refresh_token', refresh_token: this.credentials.refreshToken });
-      if (!response.ok || !data.access_token || !data.refresh_token) throw Object.assign(new Error('Twitch authorization expired. Connect Twitch again.'), { status: response.status, retryable: response.status === 429 || response.status >= 500 });
-      // Persist rotated one-use refresh tokens before any further network call.
-      this.credentials = { ...this.credentials, accessToken: data.access_token, refreshToken: data.refresh_token };
-      await this.saveCredentials(this.credentials);
-      identity = await this.validate(this.credentials, expected);
+      current();
+      if (e.status !== 401 || !owner.refreshToken) throw e;
+      let refresh;
+      try { refresh = await this.form('token', { client_id: owner.clientId, grant_type: 'refresh_token', refresh_token: owner.refreshToken }); }
+      catch (error) {
+        if (error.providerNotSubmitted === true) throw error;
+        return holdRefresh(undefined, true);
+      }
+      ownsCredentials();
+      const { response, data } = refresh;
+      if (!response.ok || typeof data?.access_token !== 'string' || !data.access_token
+        || typeof data?.refresh_token !== 'string' || !data.refresh_token) return holdRefresh(response.status, response.ok || response.status >= 500);
+      // Save an already-dispatched rotation for this grant even after Stop, but
+      // never overwrite a newer grant or issue further network work after Stop.
+      owner = await this.saveIdentityCredentials(() => ({ ...this.credentials, accessToken: data.access_token, refreshToken: data.refresh_token }), ownsCredentials, { adoptBeforeSave: true });
+      current();
+      identity = await this.validate(owner, expected);
     }
+    current();
     this.credentials = { ...this.credentials, ...identity };
     this.validatedAt = this.now();
   }
 
+  async recoverReadIdentity(account, clientId, failedToken, generation) {
+    const current = () => {
+      if (generation !== this.generation || this.credentials.account !== account || this.credentials.clientId !== clientId) {
+        throw Object.assign(new Error('Twitch read cancelled by changed setup or Stop.'), { cancelled: true });
+      }
+    };
+    current();
+    const existing = this.readAuthFlight;
+    if (existing && existing.generation === generation && existing.account === account && existing.clientId === clientId) {
+      const recovered = await existing.promise; current(); return recovered;
+    }
+    const flight = { generation, account, clientId, promise: null };
+    flight.promise = (async () => {
+      // Finish any older identity operation before invalidating its cache. This
+      // avoids a concurrent validation restoring a stale cached success.
+      if (this.identityFlight) {
+        try { await this.identityFlight; } catch (error) { if (!error.cancelled) throw error; }
+      }
+      current();
+      if (this.credentials.accessToken === failedToken) this.validatedAt = null;
+      await this.ensureIdentity(account, { beforeRequest: current });
+      current();
+      return Object.freeze(Object.fromEntries(['account', 'clientId', 'accessToken', 'refreshToken'].map(key => [key, this.credentials[key]])));
+    })();
+    this.readAuthFlight = flight;
+    try { return await flight.promise; } finally { if (this.readAuthFlight === flight) this.readAuthFlight = null; }
+  }
+
   async api(path, body) {
-    const { response, data } = await this.request(`${helix}/${path}`, {
+    const generation = this.generation, { account, clientId, accessToken } = this.credentials;
+    const request = () => this.request(`${helix}/${path}`, {
       method: body ? 'POST' : 'GET',
       headers: { Authorization: `Bearer ${this.credentials.accessToken}`, 'Client-Id': this.credentials.clientId, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {})
     });
-    if (!response.ok) throw Object.assign(new Error(`Twitch API returned HTTP ${response.status}; no automatic retry was made.`), { status: response.status, retryable: response.status === 429 || response.status >= 500 });
+    let { response, data } = await request(), recovered = false;
+    if (!body && response.status === 401) {
+      const recoveredCredentials = await this.recoverReadIdentity(account, clientId, accessToken, generation);
+      if (generation !== this.generation || this.credentials.account !== account || this.credentials.clientId !== clientId
+        || ['accessToken', 'refreshToken'].some(key => this.credentials[key] !== recoveredCredentials[key])) {
+        throw Object.assign(new Error('Twitch read cancelled by changed setup or Stop.'), { cancelled: true });
+      }
+      recovered = true;
+      ({ response, data } = await request());
+    }
+    if (!response.ok) throw Object.assign(new Error(`Twitch API returned HTTP ${response.status}; ${recovered ? 'one authorization recovery was attempted; no further retry was made.' : 'no automatic retry was made.'}`), { status: response.status, retryable: response.status === 429 || response.status >= 500 });
     return data;
   }
 
@@ -147,7 +250,9 @@ export class TwitchChat {
     this.credentials = replacement;
     // Keep clipping disabled in memory even if the credential disk is unavailable.
     // Chat credentials remain usable; only an explicit successful new grant clears this marker.
-    try { await this.saveCredentials(replacement); } catch {}
+    try { await this.saveIdentityCredentials(() => this.credentials, () => {
+      if (this.credentials.accessToken !== failedAccessToken) throw new Error('Twitch authorization changed during permission invalidation.');
+    }); } catch {}
   }
 
   async prepareViewerClip(account, channel, streamId) {
