@@ -282,6 +282,31 @@ export class Director {
     return '';
   }
   current(clientId) { return this.db.prepare("SELECT * FROM director_plans WHERE client_id=? AND state IN ('offered','leased','generating') ORDER BY created_at DESC LIMIT 1").get(clientId); }
+  addressedTarget(clientId, obs, snapshot, ownerPlanId = '') {
+    const c = this.s.client(clientId), now = this.s.now();
+    const covered = new Set(snapshot.replyIds);
+    const ownLease = ownerPlanId && this.db.prepare("SELECT p.reservation_id,p.reply_id FROM host_permits p JOIN director_plans d ON d.reservation_id=p.reservation_id WHERE d.id=? AND d.client_id=? AND d.state='leased' AND p.state='leased' AND p.channel=? AND p.expires_at>?")
+      .get(ownerPlanId, clientId, c.channel, now);
+    if (ownLease?.reply_id) {
+      const otherCoverage = this.db.prepare("SELECT 1 FROM contributions WHERE channel=? AND reply_id=? AND at>? AND delivery IN ('pending','confirmed','unknown') UNION ALL SELECT 1 FROM host_permits WHERE channel=? AND reply_id=? AND state='leased' AND expires_at>? AND reservation_id<>? LIMIT 1")
+        .get(c.channel, ownLease.reply_id, now - 3600000, c.channel, ownLease.reply_id, now, ownLease.reservation_id);
+      if (!otherCoverage) covered.delete(ownLease.reply_id);
+    }
+    const candidates = this.humanMessages(obs, c.account).filter(m => {
+      if (m.at < now - 45000 || m.at > now || covered.has(m.id)) return false;
+      const opportunity = this.db.prepare('SELECT state,owner_plan FROM director_opportunities WHERE key=?').get(`${c.account}:${c.channel}:${m.id}`);
+      // A generation owns its existing opportunity; it must not preempt itself
+      // with an older target while waiting for the selected source to finish.
+      return !opportunity || opportunity.state === 'cancelled'
+        || !!ownerPlanId && opportunity.state === 'generating' && opportunity.owner_plan === ownerPlanId;
+    });
+    const parentIds = [...new Set(candidates.map(m => m.replyParentId).filter(Boolean))];
+    // Provider message ownership survives broadcast changes and manual sends.
+    // Only canonical confirmed output in this account's room is evidence.
+    const ownedParents = new Set(parentIds.length ? this.db.prepare(`SELECT message_id FROM director_history WHERE account=? AND channel=? AND delivery='confirmed' AND message_id IN (${parentIds.map(() => '?').join(',')})`)
+      .all(c.account, c.channel, ...parentIds).map(row => row.message_id) : []);
+    return candidates.findLast(m => replyOpportunity([m], c.account, now) || ownedParents.has(m.replyParentId)) || null;
+  }
   conversationalTarget(clientId, obs, snapshot) {
     const c = this.s.client(clientId), context = obs.context, now = this.s.now(), recent = this.recent(c.account);
     return [...this.humanMessages(obs, c.account)].reverse().find(m => m.at >= now - 45000 && m.at <= now && !/@[a-z0-9_]+|https?:\/\/|www\./i.test(m.text)
@@ -309,20 +334,19 @@ export class Director {
     const existing = this.current(clientId);
     if (existing) {
       const p = JSON.parse(existing.payload_json), obs = this.observation(clientId);
-      const c = this.s.client(clientId), humans = this.humanMessages(obs, c.account), mention = replyOpportunity(humans, c.account, this.s.now());
-      const freshMention = mention && mention.id !== p.replyId && !this.consumed(`${c.account}:${c.channel}:${mention.id}`);
+      const c = this.s.client(clientId), target = this.addressedTarget(clientId, obs, this.s._snapshot(clientId, c.channel), existing.id);
+      const freshMention = target && target.id !== p.replyId;
       const conversation = this.profile(clientId).chatMode === 'participate' && ['greeting', 'topic', 'exchange'].includes(p.kind)
         && this.conversationalTarget(clientId, obs, this.s._snapshot(clientId, c.channel));
       if (p.source === 'manual' || !freshMention && !conversation) return;
-      this.cancelRow(existing, freshMention ? 'A fresh direct mention takes priority.' : 'Fresh supported human conversation takes priority.');
+      this.cancelRow(existing, freshMention ? 'A fresh directly addressed message takes priority.' : 'Fresh supported human conversation takes priority.');
     }
     const c = this.s.client(clientId), obs = this.observation(clientId), profile = this.profile(clientId), context = obs.context;
     const humans = this.humanMessages(obs, c.account), now = this.s.now(), snapshot = this.s._snapshot(clientId, c.channel), recent = this.recent(c.account);
     const excluded = [...snapshot.textKeys, ...obs.messages.filter(x => x.at > now - 3600000).map(x => messageKey(x.text))];
     const allRecent = this.db.prepare("SELECT MAX(at) AS at FROM director_opportunities WHERE account=? AND kind<>'' AND state IN ('pending','submitting','confirmed','rejected','unknown')").get(c.account).at;
     const contribution = this.db.prepare("SELECT MAX(at) AS at FROM contributions WHERE account=? AND kind<>'' AND delivery<>'cancelled'").get(c.account).at;
-    let target = replyOpportunity(humans, c.account, now);
-    if (target && (this.consumed(`${c.account}:${c.channel}:${target.id}`) || snapshot.replyIds.includes(target.id))) target = null;
+    let target = this.addressedTarget(clientId, obs, snapshot);
     let kind = '', key = target ? `${c.account}:${c.channel}:${target.id}` : '', category = '', text = '';
     if (!target && profile.chatMode === 'participate') {
       if (Math.max(allRecent || 0, contribution || 0) + 600000 > now) return;
@@ -332,9 +356,16 @@ export class Director {
     if (target) {
       if (profile.replySource === 'ai') { this.makePlan(clientId, { kind, target, streamId: context.streamId, opportunityKey: key, participationKey: kind ? key : '' }, { generation: true, mode: 'reply' }); return; }
       const phrases = Object.fromEntries(REPLY_CATEGORIES.map(cat => [cat, this.choices(clientId, 'reply', cat, context)]));
-      const result = localReply({ messages: humans, target, account: c.account, channel: c.channel, recent, excludedKeys: excluded, streamContext: context, now, bank: phrases, random: () => Number(BigInt(`0x${messageKey(key)}`) % 1000000n) / 1000000 });
-      text = result.text; category = result.category || '';
-      if (!text) { this.opportunity(key, c.account, c.channel, context.streamId, kind, now, 'no_match'); return; }
+      for (let attempts = 0; target && attempts < humans.length; attempts++) {
+        const result = localReply({ messages: humans, target, account: c.account, channel: c.channel, recent, excludedKeys: excluded, streamContext: context, now, bank: phrases, random: () => Number(BigInt(`0x${messageKey(key)}`) % 1000000n) / 1000000 });
+        text = result.text; category = result.category || '';
+        if (text) break;
+        this.opportunity(key, c.account, c.channel, context.streamId, kind, now, 'no_match');
+        if (kind) return;
+        target = this.addressedTarget(clientId, obs, snapshot);
+        key = target ? `${c.account}:${c.channel}:${target.id}` : '';
+      }
+      if (!text) return;
     } else if (profile.chatMode === 'participate') {
       const exchange = snapshot.exchange;
       if (exchange && !this.consumed(exchange.key)) { this.makePlan(clientId, { kind: 'exchange', streamId: context.streamId, text: exchange.text, category: 'participation-exchange', opportunityKey: exchange.key, participationKey: exchange.key, exchangeId: exchange.id, notBefore: exchange.notBefore, expiresAt: exchange.expiresAt }); return; }

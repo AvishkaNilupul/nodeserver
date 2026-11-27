@@ -83,7 +83,7 @@ export function normalizeStreamContext(raw, channel, now = Date.now()) {
 
 function messageBody(text, account) {
   if (typeof text !== 'string' || !/^[a-z0-9_]{3,25}$/i.test(account || '')) return '';
-  return text.replace(new RegExp(`(?:^|\\s)@${account}(?![a-z0-9_])`, 'gi'), ' ')
+  return text.replace(new RegExp(`(?:^|\\s)@${account}(?![a-z0-9_])[,:]?`, 'gi'), ' ')
     .replace(/[’]/g, "'").toLowerCase().replace(/\s+/g, ' ').trim();
 }
 

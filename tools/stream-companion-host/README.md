@@ -38,6 +38,8 @@ Account control is loopback-only with same-origin/CSRF checks. The server reads 
 - One generic category question per channel/broadcast and one companion answer per incoming message. Case, punctuation and spacing changes do not bypass recent duplicate suppression.
 - Shared channel limit: six actual attempts/hour, at least three minutes apart across all companions. Existing per-account ten-minute participation spacing remains.
 - Fresh direct replies precede generic questions. Equally eligible waiting companions alternate away from the last speaker. Stale playback, disconnected clients and old-channel proposals cannot take a turn.
+- Direct addressing includes an explicit `@account` mention or Twitch's Reply action on that account's confirmed message in the same channel. A confirmed parent from an earlier broadcast or a reviewed manual send still belongs to that account; unknown, rejected and foreign parents do not establish ownership. Already-consumed or shared-answered incoming messages are excluded before choosing the newest target.
+- Incoming reply targets remain eligible for 45 seconds and still obey the shared limits. A follow-up received during the three-minute cooldown can expire without a reply. Local mode answers supported message patterns from the enabled account catalog; unsupported text and a quiet room can produce no reply. Quiet does not by itself mean the browser or incoming feed failed.
 - Unused leases expire. Known confirmed/rejected outcomes survive restart and completion replay; uncertain provider delivery holds its opportunity without retry. A host outage holds new sends without consuming a send allowance.
 
 ## Occasional bot exchanges
