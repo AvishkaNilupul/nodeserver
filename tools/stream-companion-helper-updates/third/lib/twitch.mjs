@@ -4,6 +4,7 @@ import { exchangeOffer } from '../extension/exchange.js';
 import { humanMessages } from '../extension/chat-context.js';
 import { createHash } from 'node:crypto';
 import { messageKey } from '../extension/message-policy.js';
+import { normalizeNativeEvent, mergeNativeEvents, currentNativeEvent, sameNativeEvent } from '../extension/native-events.js';
 
 export const chatScopes = ['user:read:chat', 'user:write:chat'];
 export const clipScope = 'clips:edit';
@@ -36,7 +37,8 @@ export function reconnectUrl(raw) {
 export class TwitchChat {
   constructor({ credentials = {}, history = [], coordinator = null, saveCredentials = async () => {}, saveHistory = async () => {}, fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sendHolds = new ChatSendHolds({ now }) } = {}) {
     Object.assign(this, { credentials, history, coordinator, saveCredentials, saveHistory, fetch: fetchImpl, WebSocket: WebSocketImpl, now, setTimer, clearTimer, sendHolds });
-    this.messages = []; this.connected = false; this.error = ''; this.generation = 0; this.validatedAt = null;
+    this.messages = []; this.events = []; this.eventFeed = { status: 'unavailable' }; this.eventFeedTask = null; this.eventFeedPending = false;
+    this.connected = false; this.error = ''; this.generation = 0; this.validatedAt = null;
     this.sockets = new Set(); this.timers = new Map(); this.chain = Promise.resolve();
     this.channelCache = new Map();
     this.credentialWrites = Promise.resolve(); this.readAuthFlight = null;
@@ -335,6 +337,7 @@ export class TwitchChat {
 
   disconnect() {
     this.generation++; this.connected = false; this.channel = ''; this.broadcasterId = ''; this.messages = [];
+    this.events = []; this.eventFeed = { status: 'unavailable' }; this.eventFeedTask = null; this.eventFeedPending = false;
     this.pendingAuth = null;
     this.clearTimer(this.identityTimer); this.identityTimer = null;
     for (const timer of this.timers.values()) this.clearTimer(timer);
@@ -386,10 +389,22 @@ export class TwitchChat {
 
   fail(message, recoverable = false) { this.disconnect(); this.error = message; this.recoverable = recoverable; }
 
+  async subscribeEvents(sessionId, generation) {
+    if (generation !== this.generation || !this.connected) return;
+    const feed = { status: 'unavailable' }; this.eventFeed = feed; this.eventFeedPending = true;
+    try {
+      const result = await this.api('eventsub/subscriptions', { type: 'channel.chat.notification', version: '1',
+        condition: { broadcaster_user_id: this.broadcasterId, user_id: this.credentials.userId },
+        transport: { method: 'websocket', session_id: sessionId } });
+      if (generation === this.generation && this.eventFeed === feed && result.data?.[0]?.status === 'enabled') feed.status = 'enabled';
+    } catch { /* The optional feed never interrupts ordinary chat or retries an uncertain subscription. */ }
+    finally { if (this.eventFeed === feed) this.eventFeedPending = false; }
+  }
+
   openSocket(url, generation, previous = null) {
     const socket = new this.WebSocket(reconnectUrl(url));
     this.sockets.add(socket); this.armTimeout(socket, 15_000, generation);
-    let timeout = 15_000, transferring = false;
+    let timeout = 15_000, transferring = false, welcomed = false;
     socket.addEventListener('message', event => {
       this.chain = this.chain.then(async () => {
         if (generation !== this.generation || !this.sockets.has(socket)) return;
@@ -398,6 +413,7 @@ export class TwitchChat {
         if (type === 'session_welcome') {
           const session = data.payload?.session;
           if (!session?.id) throw new Error('Invalid EventSub welcome.');
+          if (welcomed) return; welcomed = true;
           timeout = (Number(session.keepalive_timeout_seconds) || 10) * 1000 + 5000;
           if (!previous) {
             let subscription;
@@ -416,10 +432,15 @@ export class TwitchChat {
           if (generation !== this.generation) return;
           if (previous) { this.sockets.delete(previous); this.clearTimer(this.timers.get(previous)); this.timers.delete(previous); previous.close(); }
           this.connected = true; this.error = '';
-        } else if (type === 'notification' && data.metadata?.subscription_type === 'channel.chat.message') {
-          const e = data.payload?.event;
-          if (e?.broadcaster_user_id === this.broadcasterId && !e.source_broadcaster_user_id) {
+          if (!previous) this.eventFeedTask = this.subscribeEvents(session.id, generation);
+        } else if (type === 'notification') {
+          const e = data.payload?.event, subscriptionType = data.metadata?.subscription_type;
+          if (subscriptionType === 'channel.chat.message' && e?.broadcaster_user_id === this.broadcasterId && !e.source_broadcaster_user_id) {
             this.messages = mergeMessages(this.messages, [{ id: e.message_id, author: e.chatter_user_login, text: e.message?.text, at: Date.parse(data.metadata.message_timestamp), replyParentId: e.reply?.parent_message_id }], this.now());
+          }
+          if (subscriptionType !== 'channel.chat.notification' || this.eventFeed.status === 'enabled' || this.eventFeedPending) {
+            const event = normalizeNativeEvent(e, { subscriptionType, broadcasterId: this.broadcasterId, channel: this.channel, at: Date.parse(data.metadata.message_timestamp) });
+            if (event) this.events = mergeNativeEvents(this.events, [event], this.now());
           }
         } else if (type === 'session_reconnect') {
           if (!transferring) {
@@ -427,9 +448,13 @@ export class TwitchChat {
             transferring = true;
           }
         } else if (type === 'revocation') {
-          this.fail(revocationReasons.get(data.payload?.subscription?.status)
-            || 'Twitch revoked the chat subscription (unknown_reason). Automatic reconnect is disabled.');
-          return;
+          if ((data.payload?.subscription?.type || data.metadata?.subscription_type) === 'channel.chat.notification') {
+            this.eventFeed = { status: 'unavailable' }; this.eventFeedPending = false; this.events = this.events.filter(event => event.type === 'bits');
+          } else {
+            this.fail(revocationReasons.get(data.payload?.subscription?.status)
+              || 'Twitch revoked the chat subscription (unknown_reason). Automatic reconnect is disabled.');
+            return;
+          }
         }
         if (generation === this.generation) this.armTimeout(socket, timeout, generation);
       }).catch(e => {
@@ -469,7 +494,7 @@ export class TwitchChat {
 
   status() {
     return { authorized: !!this.credentials.accessToken, account: this.credentials.account || '', channel: this.channel || '', connected: this.connected, error: this.error, recoverable: this.recoverable !== false,
-      sendHold: this.sendHold(), messages: mergeMessages(this.messages, [], this.now()), sent: this.history.filter(x => x.at > this.now() - 3_600_000),
+      sendHold: this.sendHold(), messages: mergeMessages(this.messages, [], this.now()), events: mergeNativeEvents(this.events, [], this.now()), eventFeed: { ...this.eventFeed }, sent: this.history.filter(x => x.at > this.now() - 3_600_000),
       ...(this.coordinator ? { coordination: this.coordinator.snapshot(this.channel || '') } : {}) };
   }
 
@@ -486,6 +511,9 @@ export class TwitchChat {
       || plan.kind !== kind || plan.streamId !== streamId || plan.participationKey !== participationKey
       || plan.replyId !== replyTo || plan.replyAuthor !== replyAuthor || plan.category !== category
       || plan.exactKey !== createHash('sha256').update(message).digest('hex') || plan.textKey !== messageKey(message)) throw new Error('An exact current central message command is required.');
+    if (kind === 'event' && (replyTo || replyAuthor || category !== plan.event?.type || participationKey !== `event:${channel}:${plan.event?.id}`
+      || plan.opportunityKey !== participationKey || !currentNativeEvent(this.events, plan.event, channel, this.now()))) throw new Error('The verified native event is no longer current.');
+    const nativeEvent = kind === 'event' ? { ...plan.event } : null;
     await this.ensureIdentity(account);
     if (generation !== this.generation || !this.connected) throw new Error('Chat disconnected before submission.');
     const currentHold = this.sendHold(account, channel);
@@ -512,7 +540,7 @@ export class TwitchChat {
       }
     }
     if (participationKey) {
-      if (!['greeting', 'topic', 'conversation', 'exchange'].includes(kind) || !id(streamId) || typeof participationKey !== 'string' || participationKey.length > 400) throw new Error('Invalid participation intent.');
+      if (!['greeting', 'topic', 'conversation', 'exchange', 'event'].includes(kind) || !id(streamId) || typeof participationKey !== 'string' || participationKey.length > 400) throw new Error('Invalid participation intent.');
       if (this.history.some(x => x.participationKey === participationKey && x.delivery !== 'cancelled')) throw new Error('This contribution was already submitted.');
       const info = await this.inspectChannel(account, channel);
       if (!info.streamContext.isLive || info.streamContext.streamId !== streamId || info.sharedChat || info.chatSettings.emoteOnly || info.chatSettings.subscribersOnly) throw new Error('The live channel no longer permits this contribution.');
@@ -567,20 +595,22 @@ export class TwitchChat {
     }
     const exchangeHuman = exchange && humanMessages(this.messages, account, this.coordinator.snapshot(channel).accounts)
       .some(m => Number.isFinite(m.at) && m.at > this.now() - 90_000 && m.at <= this.now());
-    if ((exchange && (exchange.expiresAt <= this.now() || exchangeHuman))
+    const eventChanged = kind === 'event' && !currentNativeEvent(this.events, nativeEvent, channel, this.now());
+    if (eventChanged || (exchange && (exchange.expiresAt <= this.now() || exchangeHuman))
       || (replyTo && !this.messages.some(m => m.id === replyTo && m.at >= this.now() - 45_000 && m.at <= this.now()))) {
       attempt.delivery = 'cancelled'; attempt.submitted = false;
-      attempt.reason = exchangeHuman ? 'Fresh human chat takes priority over the scheduled exchange.'
+      attempt.reason = eventChanged ? 'The verified native event expired or changed before submission.' : exchangeHuman ? 'Fresh human chat takes priority over the scheduled exchange.'
         : exchange ? 'The scheduled exchange expired before submission.' : 'The reply target expired before submission.';
       try { await this.saveHistory(this.history); }
       finally { await this.finishCoordination(reservation?.reservationId, 'cancelled'); }
       return { ...attempt, suppressed: true, submitted: false,
-        code: exchangeHuman ? 'exchange_quiet' : exchange ? 'exchange_expired' : 'target_expired', retryable: false };
+        code: eventChanged ? 'event_expired' : exchangeHuman ? 'exchange_quiet' : exchange ? 'exchange_expired' : 'target_expired', retryable: false };
     }
     try {
       await beforeSubmit?.();
       const currentPlan = this.coordinator?.currentPlan?.(planId, binding);
       if (!currentPlan || currentPlan.text !== message || currentPlan.exactKey !== plan.exactKey) throw new Error('The central message command expired or changed before submission.');
+      if (kind === 'event' && (!sameNativeEvent(currentPlan.event, nativeEvent) || !currentNativeEvent(this.events, nativeEvent, channel, this.now()))) throw new Error('The verified native event expired or changed before submission.');
       const finalHold = this.sendHold(account, channel);
       if (finalHold.held) throw new Error(finalHold.reason);
     }

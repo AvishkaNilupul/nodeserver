@@ -192,7 +192,7 @@ export class HostStore {
       if (body.account !== undefined && body.account !== c.account) throw error('Account does not match this client.', 403);
       if (this.director) this.director.validatePlan(clientId, body);
       if (!identifier(body.requestId) || !login(body.channel) || !fingerprint(body.textKey)
-        || !['', 'greeting', 'topic', 'conversation', 'exchange'].includes(body.kind || '')
+        || !['', 'greeting', 'topic', 'conversation', 'exchange', 'event'].includes(body.kind || '')
         || typeof (body.streamId || '') !== 'string' || (body.streamId || '').length > 128
         || (body.kind && !identifier(body.streamId)) || body.replyId && !identifier(body.replyId)
         || body.replyAt !== undefined && (!Number.isFinite(body.replyAt) || body.replyAt <= 0 || body.replyAt > this.now() + 5000)) throw error('Invalid turn proposal.');
@@ -230,7 +230,7 @@ export class HostStore {
           // Only this exact validated offered line can be an exchange candidate.
           // A held stale/foreign line must not become an idle fairness blocker.
           && (x.kind !== 'exchange' || p.kind === 'exchange' && x.client_id === clientId));
-      const priority = x => x.reply_id && x.kind !== 'conversation' || !x.kind ? 0 : x.kind === 'conversation' ? 1 : x.kind === 'greeting' ? 2 : x.kind === 'topic' ? 3 : 4;
+      const priority = x => x.reply_id && x.kind !== 'conversation' || !x.kind ? 0 : x.kind === 'conversation' ? 1 : x.kind === 'event' ? 2 : x.kind === 'greeting' ? 3 : x.kind === 'topic' ? 4 : 5;
       candidates.sort((a, b) => priority(a) - priority(b) || Number(a.account === budget.last?.account) - Number(b.account === budget.last?.account) || a.first_at - b.first_at || a.client_id.localeCompare(b.client_id));
       if (candidates[0]?.client_id !== clientId) return this.hold(c, p, 'turn_wait', 'Another ready companion has the next turn.');
       const reservationId = randomUUID(), expiresAt = this.now() + this.policy.leaseMs;

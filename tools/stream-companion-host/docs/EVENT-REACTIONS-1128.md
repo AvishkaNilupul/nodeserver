@@ -1,0 +1,25 @@
+# Native chat event reactions
+
+The central bank supports `kind: event` with categories `bits`, `sub`, `resub`, `gift`, and `gift_batch`. Each account has five authored groups with its own wording. The entry limit is160; existing60KB bank,260-character line,16-option, assignment, CAS and idempotency rules remain. Event wording has no actor/amount/month/recipient substitutions. It speaks as another viewer, never as the broadcaster or payment recipient. This is an authored local catalog; no model was trained and existing freeform/AI configuration is unchanged.
+
+Prepare an offline proposal from a saved `{revision,bank}` wrapper:
+
+```sh
+node scripts/prepare-event-bank.mjs --bank SAVED_BANK.json --output NEW_PRIVATE_DIRECTORY
+```
+
+This pure tool appends20 groups (124→144 for the existing style bank), preserving all existing entries, assignments, enabled flags, profiles and exchange IDs. Repeat preparation preserves edited event groups. It rejects collisions/limits rather than deleting data to fit. Private output includes the candidate and exact `{requestId,expectedRevision,bank}` save payload. It never reads the controller, applies a bank, changes settings or sends a message. Activation is a separate guarded bank save. Startup never silently adds or enables event groups.
+
+The optional protocol1 observation field `events` is an array of at most32 exact `{id,channel,type,at}` records from the helper's native EventSub buffer. It is separate from ordinary text, so anonymous and empty-text notices survive. `at` is the original native timestamp, not the ingest time. Canonical IDs use `bits:`, `notice:` or `gift:` prefixes. The helper filters unsupported notices and foreign shared-chat events. Chat cheer metadata supplies Bits events; the optional `channel.chat.notification/v1` feed supplies subscription notices under the existing viewer chat grant. If that add-on feed is unavailable, regular chat and Bits events can still work. No new broadcaster grant or USA bypass is introduced.
+
+Group gifts share the native community gift ID: child `gift` records with `gift:` IDs await their `gift_batch` parent. Parent facts win independent of arrival order. The host does not infer batches from names, text, counts or timing. Missing parent means no batch reaction, rather than one acknowledgement for every recipient. Anonymous gifts use the same generic viewer wording and never acquire invented actor information.
+
+Fresh addressed human replies take priority; a direct question attached to a cheer does not get an extra event acknowledgement. Events precede opportunistic exchanges/greetings. Only a participating, armed, connected, live/current-stream companion with fresh playback can react. Exact event tuple, text, browser binding and source freshness are checked again at reserve/begin and by the helper before provider dispatch. Event plans have no fabricated Twitch reply parent. Event selection is account-assignment-aware and rotates deterministically among eligible voices.
+
+The shared event key `event:<channel>:<canonical-native-id>` is claimed durably when offered. Only one account owns it. Existing6attempts/hour/channel,180-second spacing, per-account10-minute participation gap, duplicate text and moderation gates all remain. Events expire45seconds after original source time. Busy bursts are mostly quiet; no delayed backlog is flushed and no timing limit is bypassed. A never-submitted cancellation/expired lease can release its claim; confirmed/rejected/unknown provider outcomes consume it. Restart or Stop cannot replay an uncertain attempt.
+
+Outgoing/history keep `kind:event` and the subtype category, plus only the source event's `{id,channel,type,at}`. Source facts come from the stored plan joined by the original reservation; private bindings and complete plan payloads are not exposed. Event reaction categories and assignments are edited in the existing Messages screen. Normal pending/confirmed/rejected/unknown meanings, safe cancel and no uncertain mutation retries are unchanged.
+
+Synthetic tests cover four-account dedup, all five types, grouped/anonymous source normalization, old protocol compatibility, malformed/stale/wrong-room facts, exact offers/begin, pause/restrictions/playback, existing limits, cancellation/restart/unknown replay, native cheer human priority, provenance projection, proposal preservation/idempotency and the existing bank editor. Live Bits/subscriptions are never purchased or forced for validation. Existing overnight recorder bytes remain frozen; pre-activation evidence is not relabeled. Its older kind whitelist may show new events as unknown while retaining canonical ID/category/text/outcome; a later canonical read supplements source facts.
+
+Official references: [chat EventSub notification schema](https://dev.twitch.tv/docs/eventsub/reference/chat/#channel-chat-notification), [native cheer metadata](https://dev.twitch.tv/docs/chat/irc-migration/#cheer--bits). Subscription/resubscription terms are not payment amounts; this implementation uses neither names nor numeric financial claims.

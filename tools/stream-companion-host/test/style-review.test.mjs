@@ -102,7 +102,7 @@ test('custom and exchange negative-key matches are preserved and warned rather t
 });
 
 test('candidate limits reject rather than deleting custom entries and input stays unchanged', () => {
-  const source = defaultBank(); for (let i = 0; i < 5; i++) source.entries.push(entry(`custom_${i}`));
+  const source = defaultBank(); for (let i = 0; i < 37; i++) source.entries.push(entry(`custom_${i}`));
   const before = copy(source); assert.throws(() => prepareStyleBank(source), /invalid or too large/); assert.deepEqual(source, before);
 });
 

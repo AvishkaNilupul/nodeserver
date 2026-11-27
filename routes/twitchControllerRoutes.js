@@ -81,7 +81,7 @@ function validDirectorAction(path, body) {
         && ["mentions", "participate"].includes(p.chatMode) && ["local", "ai"].includes(p.replySource))) return false;
   const replies = ["greeting", "checkin", "goodday", "roughday", "quietday", "thanks", "farewell", "goodnight", "welcome",
     "dayfollowup", "reciprocal", "quietfollowup", "dayplans", "capabilities", "automation", "game", "streamtitle", "livestatus"];
-  return Array.isArray(bank.entries) && bank.entries.length >= 1 && bank.entries.length <= 128
+  return Array.isArray(bank.entries) && bank.entries.length >= 1 && bank.entries.length <= 160
     && new Set(bank.entries.map(e => e?.id)).size === bank.entries.length && bank.entries.every(entry => {
       if (!exact(entry, ["id", "kind", "category", "lines", "accountIds", "enabled"])
           || typeof entry.id !== "string" || !/^[a-z0-9_:-]{1,80}$/.test(entry.id) || typeof entry.enabled !== "boolean"
@@ -90,6 +90,7 @@ function validDirectorAction(path, body) {
           || !Array.isArray(entry.lines) || entry.lines.length < 1 || entry.lines.length > 16) return false;
       const categoryValid = entry.kind === "topic" ? ["general", "just chatting", "music", "art"].includes(entry.category)
         : entry.kind === "reply" ? replies.includes(entry.category)
+        : entry.kind === "event" ? ["bits", "sub", "resub", "gift", "gift_batch"].includes(entry.category)
         : ["greeting", "exchange"].includes(entry.kind) && entry.category === entry.kind;
       if (!categoryValid || entry.kind === "exchange" && entry.lines.length !== 2) return false;
       const placeholders = entry.kind === "topic" || entry.kind === "reply" && entry.category === "game" ? ["{game}"]

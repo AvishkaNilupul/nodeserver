@@ -27,7 +27,7 @@ function project(instance, now) {
   const playbackObservedAt = available ? sourceTime(instance.watch?.checkedAt, now) : null;
   const browserFresh = available && instance.browser?.online === true && fresh(browserObservedAt, now);
   return { state: { helperAvailable: available, chatTokenPresent: available && instance.authorized === true,
-    chatConnected: available && instance.connected === true, controlPaused: instance.settings?.paused !== false,
+    chatConnected: available && instance.connected === true, subscriptionEvents: available && instance.connected === true && instance.eventFeed?.status === 'enabled' ? 'enabled' : 'unavailable', controlPaused: instance.settings?.paused !== false,
     automaticReplies: available && instance.settings?.autoReply === true, recoveryEnabled: available && instance.settings?.autoResume === true,
     browserFresh, watchEnabled: available && instance.watch?.enabled === true,
     playbackStatus: available && WATCH.has(instance.watch?.status) ? instance.watch.status : 'unknown',

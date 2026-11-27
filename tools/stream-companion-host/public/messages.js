@@ -1,11 +1,13 @@
 import { controllerBasePath, basePathFromModule, controllerPath, responseError, requestNetwork, networkTitle, connectionMessage, configureControllerMount, bindControllerLifecycle } from './controller-path.js';
 
 export const ACCOUNT_IDS = Object.freeze(['primary', 'test', 'third', 'fourth']);
-export const MESSAGE_KINDS = Object.freeze(['greeting', 'topic', 'reply', 'exchange']);
+export const MESSAGE_KINDS = Object.freeze(['greeting', 'topic', 'reply', 'exchange', 'event']);
+export const EVENT_CATEGORIES = Object.freeze(['bits', 'sub', 'resub', 'gift', 'gift_batch']);
 export const REPLY_CATEGORIES = Object.freeze(['greeting', 'checkin', 'goodday', 'roughday', 'quietday', 'thanks', 'farewell', 'goodnight', 'welcome', 'dayfollowup', 'reciprocal', 'quietfollowup', 'dayplans', 'capabilities', 'automation', 'game', 'streamtitle', 'livestatus']);
 export const TOPIC_CATEGORIES = Object.freeze(['general', 'just chatting', 'music', 'art']);
 const NAMES = { primary: 'Main account', test: 'Second account', third: 'Third account', fourth: 'Fourth account' };
-const KINDS = { greeting: 'Greeting', topic: 'Category question', reply: 'Reply', conversation: 'Conversation reply', manual: 'Reviewed message', exchange: 'Paired exchange' };
+const KINDS = { greeting: 'Greeting', topic: 'Category question', reply: 'Reply', conversation: 'Conversation reply', manual: 'Reviewed message', exchange: 'Paired exchange', event: 'Event reaction' };
+const EVENT_NAMES = { bits: 'Bits cheer', sub: 'Subscription', resub: 'Resubscription', gift: 'Gift subscription', gift_batch: 'Gift subscriptions together' };
 const POLL_MS = 2500, FRESH_MS = 10000;
 const rows = value => Array.isArray(value) ? value : [];
 const stamp = value => typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN;
@@ -26,7 +28,7 @@ export function bankPayload(bank) {
   profiles: rows(bank?.profiles).map(profile => ({ id: profile.id, chatMode: profile.chatMode, replySource: profile.replySource })) };
 }
 export function bankValidation(bank) {
-  if (!bank || !Array.isArray(bank.entries) || !bank.entries.length || bank.entries.length > 128) return 'Use between 1 and 128 message groups.';
+  if (!bank || !Array.isArray(bank.entries) || !bank.entries.length || bank.entries.length > 160) return 'Use between 1 and 160 message groups.';
   if (new Set(bank.entries.map(entry => entry.id)).size !== bank.entries.length) return 'Each message group needs its own identity.';
   for (let i = 0; i < bank.entries.length; i++) {
     const entry = bank.entries[i], prefix = `Message group ${i + 1}: `;
@@ -40,7 +42,7 @@ export function bankValidation(bank) {
       if (/\{[^{}]*\}|[{}]/.test(line.replace(/\{(game|title)\}/g, (match, key) => allowed.includes(key) ? '' : match))) return prefix + 'use only the supported category or title substitution.';
       if (entry.kind === 'exchange' && /@|\[companion bot\]/i.test(line)) return prefix + 'write only the scene text; the host adds the partner mention.';
     }
-    if (entry.kind === 'reply' ? !REPLY_CATEGORIES.includes(entry.category) : entry.kind === 'topic' ? !TOPIC_CATEGORIES.includes(entry.category) : entry.category !== entry.kind) return prefix + 'choose a supported category.';
+    if (entry.kind === 'reply' ? !REPLY_CATEGORIES.includes(entry.category) : entry.kind === 'topic' ? !TOPIC_CATEGORIES.includes(entry.category) : entry.kind === 'event' ? !EVENT_CATEGORIES.includes(entry.category) : entry.category !== entry.kind) return prefix + 'choose a supported category.';
   }
   if (rows(bank.profiles).length !== ACCOUNT_IDS.length || new Set(bank.profiles.map(profile => profile.id)).size !== ACCOUNT_IDS.length || bank.profiles.some(profile => !ACCOUNT_IDS.includes(profile.id) || !['mentions', 'participate'].includes(profile.chatMode) || !['local', 'ai'].includes(profile.replySource))) return 'Choose a conversation mode and reply source for each account.';
   if (new TextEncoder().encode(JSON.stringify(bankPayload(bank))).length > 60000) return 'The message bank is too large. Remove some options before saving.';
@@ -112,7 +114,7 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
     if (!entry || !['kind', 'category', 'lines', 'accountIds', 'enabled'].includes(field)) return;
     if (field === 'kind') {
       if (!MESSAGE_KINDS.includes(value)) return;
-      entry.kind = value; entry.category = value === 'reply' ? 'greeting' : value === 'topic' ? TOPIC_CATEGORIES[0] : value;
+      entry.kind = value; entry.category = value === 'reply' ? 'greeting' : value === 'topic' ? TOPIC_CATEGORIES[0] : value === 'event' ? EVENT_CATEGORIES[0] : value;
     } else if (field === 'lines') entry.lines = typeof value === 'string' ? value.split('\n') : rows(value).map(line => line);
     else if (field === 'accountIds') entry.accountIds = ACCOUNT_IDS.filter(id => rows(value).includes(id));
     else if (field === 'enabled') entry.enabled = value === true;
@@ -126,7 +128,7 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
     profile[field] = value; edited();
   }
   function addEntry() {
-    if (!state.bank || state.bank.entries.length >= 128) return false;
+    if (!state.bank || state.bank.entries.length >= 160) return false;
     const id = `message:${requestId().toLowerCase().replace(/[^a-z0-9_:-]/g, '').slice(0, 65)}`;
     if (state.bank.entries.some(entry => entry.id === id)) return false;
     state.bank.entries.push({ id, kind: 'greeting', category: 'greeting', lines: [''], accountIds: [...ACCOUNT_IDS], enabled: true }); edited(); return true;
@@ -214,6 +216,7 @@ export function timelineRow(document, row, { plan = false, canCancel = false, ca
   const top = element(document, 'div', undefined, 'timeline-top');
   top.append(element(document, 'strong', row.account ? `@${safe(row.account)}` : known(NAMES, row.accountId, 'Account unavailable')), pill(document, known(STATUS, state, 'Delivery unverified'), state === 'confirmed' ? 'good' : ['unknown', 'rejected'].includes(state) ? 'warn' : 'muted'));
   node.append(top, element(document, 'p', `${row.channel ? '#' + safe(row.channel) : 'Channel unavailable'} · ${known(KINDS, row.kind, 'Message')}`, 'timeline-route'));
+  if (row.kind === 'event') node.append(element(document, 'p', `${known(EVENT_NAMES, row.event?.type || row.category, 'Chat event')}${row.event?.at ? ' · observed ' + clock(row.event.at) : ''}`, 'message-detail'));
   const available = row.textAvailable !== false && typeof row.text === 'string' && row.text.length > 0;
   node.append(element(document, 'p', available ? row.text : plan ? 'Message wording is being prepared.' : 'Text unavailable in this historical record.', 'message-body'));
   if (row.reason) node.append(element(document, 'p', safe(row.reason), 'message-detail'));
@@ -293,15 +296,15 @@ function renderEditor(view, state, controller, now) {
     item.heading.textContent = `${known(KINDS, entry.kind, 'Message')} · ${entry.lines.length} ${entry.kind === 'exchange' ? 'lines' : 'options'}`;
     value(item.kind, entry.kind); value(item.lines, entry.lines.join('\n')); item.enabled.checked = entry.enabled === true;
     for (const id of ACCOUNT_IDS) item.accounts[id].checked = rows(entry.accountIds).includes(id);
-    item.categoryField.hidden = !['reply', 'topic'].includes(entry.kind);
+    item.categoryField.hidden = !['reply', 'topic', 'event'].includes(entry.kind);
     if (item.categoryKind !== entry.kind) {
-      const categories = entry.kind === 'reply' ? REPLY_CATEGORIES : entry.kind === 'topic' ? TOPIC_CATEGORIES : [''];
-      options(document, item.category, categories.map(id => [id, id || 'General'])); item.categoryKind = entry.kind;
+      const categories = entry.kind === 'reply' ? REPLY_CATEGORIES : entry.kind === 'topic' ? TOPIC_CATEGORIES : entry.kind === 'event' ? EVENT_CATEGORIES : [''];
+      options(document, item.category, categories.map(id => [id, entry.kind === 'event' ? EVENT_NAMES[id] : id || 'General'])); item.categoryKind = entry.kind;
     }
     // A saved category remains visible even when an older client does not know it.
     if (entry.category && !Array.from(item.category.options || []).some(option => option.value === entry.category) && ![...REPLY_CATEGORIES, ...TOPIC_CATEGORIES].includes(entry.category)) { const option = element(document, 'option', entry.category); option.value = entry.category; item.category.append(option); }
     value(item.category, entry.category);
-    item.help.textContent = entry.kind === 'exchange' ? 'Exactly two lines. Write the scene text; the partner mention is added when a pair is chosen. Editing does not clear consumed scenes.' : entry.kind === 'topic' ? '1–16 options. Use {game} for the current category. Each option is at most 260 characters.' : entry.kind === 'reply' ? '1–16 options. Metadata replies may use {game} or {title}. Each option is at most 260 characters.' : '1–16 options, at most 260 characters each. A saved change does not reset an attempted greeting.';
+    item.help.textContent = entry.kind === 'exchange' ? 'Exactly two lines. Write the scene text; the partner mention is added when a pair is chosen. Editing does not clear consumed scenes.' : entry.kind === 'event' ? 'Short reactions to verified chat events. One eligible companion reacts, within normal limits. Write as a viewer; no names, amounts or substitutions are added.' : entry.kind === 'topic' ? '1–16 options. Use {game} for the current category. Each option is at most 260 characters.' : entry.kind === 'reply' ? '1–16 options. Metadata replies may use {game} or {title}. Each option is at most 260 characters.' : '1–16 options, at most 260 characters each. A saved change does not reset an attempted greeting.';
     item.card.hidden = state.kindFilter !== 'all' && state.kindFilter !== entry.kind || state.bankAccount !== 'all' && !entry.accountIds.includes(state.bankAccount);
   }
   const ids = rows(state.bank?.entries).map(entry => entry.id), order = JSON.stringify(ids);
@@ -312,7 +315,7 @@ function renderEditor(view, state, controller, now) {
   nodes['bank-validation'].textContent = state.conflict ? 'A newer saved bank is available. Your edits are preserved.' : state.bank ? bankValidation(state.bank) : '';
   nodes['bank-save'].disabled = !controller.canSave(); nodes['bank-save'].textContent = state.mutation?.kind === 'bank' ? 'Checking save outcome…' : 'Save message bank';
   nodes['bank-reload'].disabled = !directorFresh(state, now) || state.mutation?.transport === true || state.mutation && state.mutation.kind !== 'bank' || !(state.dirty || state.conflict || state.mutation);
-  nodes['bank-add'].disabled = !state.bank || state.bank.entries.length >= 128;
+  nodes['bank-add'].disabled = !state.bank || state.bank.entries.length >= 160;
 }
 export function renderMessages(view, state, controller, now = Date.now()) {
   const { document, nodes } = view, current = directorFresh(state, now);

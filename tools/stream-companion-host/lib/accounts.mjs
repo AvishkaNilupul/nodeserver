@@ -101,7 +101,7 @@ function empty(source, time, error) {
     settings: { allowedChannel: '', paused: true, autoReply: false, autoResume: false, chatMode: 'mentions', replySource: 'local' },
     browser: { online: false, lastSeenAt: null }, watch: { enabled: false, status: 'unknown', channel: '', checkedAt: 0, error: '' },
     activity: { state: 'waiting', reason: error, at: 0 }, streamContext: null, chat: { messages: [], digest: { messages: 0, people: 0, topics: [] } },
-    sent: [], drops: { enabled: false }, coordination: { available: false, paused: false, reason: '' }, permissions: { playbackAccess: false }, controls: { pending: null, recent: [] } };
+    sent: [], eventFeed: { status: 'unavailable' }, drops: { enabled: false }, coordination: { available: false, paused: false, reason: '' }, permissions: { playbackAccess: false }, controls: { pending: null, recent: [] } };
 }
 
 function project(source, raw, time, clean) {
@@ -114,7 +114,7 @@ function project(source, raw, time, clean) {
   const sent = (Array.isArray(raw.sent) ? raw.sent : []).filter(m => record(m) && login(m.account) && login(m.channel) && Number.isFinite(m.at) && m.at <= time + 5000 && m.at >= time - 14 * 86400000 && typeof m.text === 'string')
     .sort((a, b) => b.at - a.at).slice(0, 50).map(m => ({ at: m.at, account: m.account, channel: m.channel, text: clean(m.text),
       delivery: ['confirmed', 'rejected', 'pending', 'cancelled'].includes(m.delivery) ? m.delivery : 'unknown',
-      kind: ['greeting', 'topic', 'conversation', 'exchange'].includes(m.kind) ? m.kind : m.replyTo ? 'reply' : 'message',
+      kind: ['greeting', 'topic', 'conversation', 'exchange', 'event'].includes(m.kind) ? m.kind : m.replyTo ? 'reply' : 'message',
       reason: /verified_phone_number/.test(m.reason || '') ? 'Twitch requires a verified phone number to chat here.' : clean(m.reason), replyTo: login(m.replyTo), messageId: clean(m.messageId, 160) }));
   let streamContext = null;
   const c = raw.streamContext;
@@ -139,6 +139,7 @@ function project(source, raw, time, clean) {
     watch: { enabled: w.enabled === true, status: ['playing', 'paused', 'buffering', 'stalled', 'ad', 'advertisement', 'offline', 'ended', 'checking', 'commercial', 'error'].includes(w.status) ? w.status : 'unknown', channel: login(w.channel), checkedAt: number(w.checkedAt), error: clean(w.error) },
     activity: { state: clean(activity.state, 40), reason: clean(activity.reason), at: number(activity.at) }, streamContext,
     chat: { messages, digest: { messages: messages.length, people: new Set(messages.map(m => m.author)).size, topics: [] } }, sent, drops,
+    eventFeed: { status: raw.connected && raw.eventFeed?.status === 'enabled' ? 'enabled' : 'unavailable' },
     coordination: { available: coordination.available === true, paused: coordination.paused === true, reason: clean(coordination.reason) },
     permissions: { playbackAccess: raw.permissions?.playbackAccess === true }, controls: { pending: pending[0] || null, recent } };
 }

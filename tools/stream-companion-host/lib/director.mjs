@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { defaultBank, validateBank, upgradeBankForFourth, renderBankLine, digest, opaque, exact, record, failure, PROFILE_IDS, REPLY_CATEGORIES } from './bank.mjs';
+import { defaultBank, validateBank, upgradeBankForFourth, renderBankLine, digest, opaque, exact, record, failure, PROFILE_IDS, REPLY_CATEGORIES, EVENT_CATEGORIES } from './bank.mjs';
 import { messageKey, SCENES } from './exchanges.mjs';
 import { localReply, normalizeStreamContext } from './reply-policy.mjs';
 import { validateReply, replyOpportunity } from './text-policy.mjs';
@@ -15,6 +15,17 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const validBinding = value => exact(value, ['generation', 'sessionId', 'settingsRevision']) && opaque(value.generation) && opaque(value.sessionId)
   && Number.isSafeInteger(value.settingsRevision) && value.settingsRevision >= 0;
 const timestamp = value => Number.isFinite(value) && value >= 0;
+const eventKey = event => `event:${event.channel}:${event.id}`;
+const sameEvent = (a, b) => !!a && !!b && a.id === b.id && a.channel === b.channel && a.type === b.type && a.at === b.at;
+const validNativeEvent = event => {
+  if (!exact(event, ['id', 'channel', 'type', 'at']) || !ID.test(event.id || '') || !LOGIN.test(event.channel || '')
+    || !EVENT_CATEGORIES.includes(event.type) || !Number.isSafeInteger(event.at) || event.at < 0) return false;
+  const prefix = event.id.split(':', 1)[0];
+  return event.id.length > prefix.length + 1 && (event.type === 'bits' ? prefix === 'bits'
+    : event.type === 'gift_batch' ? prefix === 'gift' : event.type === 'gift' ? ['notice', 'gift'].includes(prefix) : prefix === 'notice');
+};
+const publicEvent = (event, channel) => validNativeEvent(event) && event.channel === channel
+  ? { id: event.id, channel: event.channel, type: event.type, at: event.at } : null;
 
 export class Director {
   constructor(store, { random = Math.random } = {}) {
@@ -44,6 +55,7 @@ export class Director {
       for (const scene of SCENES) this.db.prepare('INSERT OR IGNORE INTO director_scenes VALUES (?,?,?)').run(digest(JSON.stringify(scene.lines)), scene.id, JSON.stringify(scene.lines));
       this.registerScenes(this.bank().bank);
       this.db.prepare("UPDATE director_plans SET state='cancelled',reason='Unused work cancelled after host restart.',updated_at=? WHERE state IN ('offered','leased','generating')").run(this.s.now());
+      this.db.prepare("UPDATE director_opportunities SET state='cancelled' WHERE key LIKE 'event:%' AND state='offered' AND owner_plan IN (SELECT id FROM director_plans WHERE state='cancelled')").run();
       // Existing leases were never provider requests; preserve submitting permits.
       for (const p of this.db.prepare("SELECT p.* FROM host_permits p JOIN director_plans d ON d.reservation_id=p.reservation_id WHERE p.state='leased' AND d.state='cancelled'").all()) this.s._finish(p.client_id, { reservationId: p.reservation_id, delivery: 'cancelled', submitted: false });
       for (const row of this.db.prepare('SELECT * FROM contributions').all()) this.legacyContribution(row);
@@ -230,14 +242,22 @@ export class Director {
   }
   observe(clientId, input) {
     const c = this.s.client(clientId);
-    if (!exact(input, ['protocol', 'binding', 'armed', 'streamContext', 'messages', 'restrictions']) || input.protocol !== 1 || !validBinding(input.binding) || typeof input.armed !== 'boolean'
+    if (!(exact(input, ['protocol', 'binding', 'armed', 'streamContext', 'messages', 'restrictions']) || exact(input, ['protocol', 'binding', 'armed', 'streamContext', 'messages', 'restrictions', 'events'])) || input.protocol !== 1 || !validBinding(input.binding) || typeof input.armed !== 'boolean'
       || !Array.isArray(input.messages) || input.messages.length > 120 || !exact(input.restrictions, ['sharedChat', 'emoteOnly', 'subscribersOnly', 'sendHeld']) || Object.values(input.restrictions).some(x => typeof x !== 'boolean')) throw failure('Invalid director observation.');
+    if (input.events !== undefined && (!Array.isArray(input.events) || input.events.length > 32 || input.events.some(e => !validNativeEvent(e)))) throw failure('Invalid native event observation.');
+    const eventMap = new Map();
+    for (const e of input.events || []) {
+      if (e.channel !== c.channel || e.at < this.s.now() - 45000 || e.at > this.s.now()) continue;
+      const previous = eventMap.get(e.id);
+      if (!previous || previous.type === 'gift' && e.type === 'gift_batch') eventMap.set(e.id, { ...e });
+    }
+    const events = [...eventMap.values()];
     const messages = input.messages.filter(m => record(m) && ID.test(m.id || '') && LOGIN.test(m.author || '') && typeof m.text === 'string'
       && m.text.length <= 600 && timestamp(m.at) && m.at >= this.s.now() - 900000 && m.at <= this.s.now() && (!m.channel || m.channel === c.channel))
       .slice(-100).map(m => ({ id: m.id, author: m.author, text: m.text, at: m.at, ...(m.replyParentId ? { replyParentId: safe(m.replyParentId, 160) } : {}), ...(m.isBot || m.bot ? { isBot: true } : {}) }));
     const context = normalizeStreamContext(input.streamContext, c.channel, this.s.now());
     const old = this.observations.get(clientId);
-    const obs = { at: this.s.now(), binding: { ...input.binding }, armed: input.armed, channel: c.channel, context, messages, restrictions: { ...input.restrictions } };
+    const obs = { at: this.s.now(), binding: { ...input.binding }, armed: input.armed, channel: c.channel, context, messages, events, restrictions: { ...input.restrictions } };
     this.observations.set(clientId, obs);
     try {
       return this.s.transaction(() => {
@@ -282,6 +302,53 @@ export class Director {
     return '';
   }
   current(clientId) { return this.db.prepare("SELECT * FROM director_plans WHERE client_id=? AND state IN ('offered','leased','generating') ORDER BY created_at DESC LIMIT 1").get(clientId); }
+  eventClaim(key) {
+    return this.db.prepare("SELECT o.*,json_extract(p.payload_json,'$.kind') AS plan_kind,p.state AS plan_state FROM director_opportunities o LEFT JOIN director_plans p ON p.id=o.owner_plan WHERE o.key=?").get(key);
+  }
+  eventCoversMessage(channel, id, ownerPlanId = '') {
+    const claim = this.eventClaim(eventKey({ channel, id: `bits:${id}` }));
+    return claim && claim.state !== 'cancelled' && claim.owner_plan !== ownerPlanId
+      && !(claim.state === 'offered' && claim.plan_kind === 'event' && ['offered', 'leased'].includes(claim.plan_state));
+  }
+  claimEvent(plan, event) {
+    const key = eventKey(event), previous = this.eventClaim(key);
+    if (previous && previous.state !== 'cancelled' && previous.owner_plan !== plan.planId) {
+      if (plan.kind !== 'event' && previous.state === 'offered' && previous.plan_kind === 'event' && ['offered', 'leased'].includes(previous.plan_state)) {
+        this.cancelRow(this.db.prepare('SELECT * FROM director_plans WHERE id=?').get(previous.owner_plan), 'A directly addressed human reply takes priority over this event.');
+      } else throw failure('This native event already has an owner.', 409);
+    }
+    this.db.prepare("INSERT INTO director_opportunities(key,account,channel,stream_id,kind,at,state,owner_plan) VALUES (?,?,?,?,?,?,'offered',?) ON CONFLICT(key) DO UPDATE SET account=excluded.account,channel=excluded.channel,stream_id=excluded.stream_id,kind=excluded.kind,at=excluded.at,state='offered',owner_plan=excluded.owner_plan WHERE director_opportunities.state='cancelled'")
+      .run(key, plan.account, plan.channel, plan.streamId, plan.kind === 'event' ? 'event' : '', this.s.now(), plan.planId);
+  }
+  eventCandidate(clientId, obs, snapshot) {
+    const c = this.s.client(clientId), now = this.s.now();
+    if (this.profile(clientId).chatMode !== 'participate' || !this.canPlan(clientId)) return null;
+    const budget = this.s.budget(c.channel);
+    if (budget.count >= this.s.policy.maxAttemptsPerHour || budget.rows.length && budget.next > now) return null;
+    for (const event of [...(obs.events || [])].reverse()) {
+      if (event.at <= now - 45000 || event.at > now || event.type === 'gift' && event.id.startsWith('gift:') || this.consumed(eventKey(event))) continue;
+      if (event.type === 'bits') {
+        const id = event.id.slice(5), message = obs.messages.find(m => m.id === id);
+        // A genuine request attached to a cheer has human-reply priority. It
+        // must not also create a separate acknowledgement from another profile.
+        if (message && ([...this.s.clients.values()].some(x => replyOpportunity([message], x.account, now))
+          || message.replyParentId && this.db.prepare("SELECT 1 FROM director_history WHERE channel=? AND message_id=? AND delivery='confirmed' LIMIT 1").get(c.channel, message.replyParentId))) continue;
+        if (this.db.prepare("SELECT 1 FROM contributions WHERE channel=? AND reply_id=? AND delivery<>'cancelled' LIMIT 1").get(c.channel, id)) continue;
+      }
+      const available = [...this.s.clients.values()].filter(client => {
+        const other = this.s.client(client.id), observation = this.observation(client.id), current = this.current(client.id);
+        if (other.channel !== c.channel || !this.canPlan(client.id) || this.profile(client.id).chatMode !== 'participate' || observation.context.streamId !== obs.context.streamId
+          || !observation.events?.some(source => source.id === event.id && source.channel === event.channel && source.type === event.type && source.at > now - 45000 && source.at <= now)
+          || current && !['greeting', 'topic', 'exchange'].includes(JSON.parse(current.payload_json).kind)) return false;
+        const last = this.db.prepare("SELECT MAX(at) AS at FROM director_opportunities WHERE account=? AND kind<>'' AND state IN ('pending','submitting','confirmed','rejected','unknown')").get(other.account).at;
+        const contribution = this.db.prepare("SELECT MAX(at) AS at FROM contributions WHERE account=? AND kind<>'' AND delivery<>'cancelled'").get(other.account).at;
+        return Math.max(last || 0, contribution || 0) + 600000 <= now
+          && !!this.distinct(this.choices(client.id, 'event', event.type, observation.context), eventKey(event), [...snapshot.textKeys, ...observation.messages.map(m => messageKey(m.text))]);
+      }).sort((a, b) => a.id.localeCompare(b.id));
+      if (available.length && available[Number(BigInt(`0x${messageKey(eventKey(event))}`) % BigInt(available.length))].id === clientId) return event;
+    }
+    return null;
+  }
   addressedTarget(clientId, obs, snapshot, ownerPlanId = '') {
     const c = this.s.client(clientId), now = this.s.now();
     const covered = new Set(snapshot.replyIds);
@@ -293,7 +360,7 @@ export class Director {
       if (!otherCoverage) covered.delete(ownLease.reply_id);
     }
     const candidates = this.humanMessages(obs, c.account).filter(m => {
-      if (m.at < now - 45000 || m.at > now || covered.has(m.id)) return false;
+      if (m.at < now - 45000 || m.at > now || covered.has(m.id) || this.eventCoversMessage(c.channel, m.id, ownerPlanId)) return false;
       const opportunity = this.db.prepare('SELECT state,owner_plan FROM director_opportunities WHERE key=?').get(`${c.account}:${c.channel}:${m.id}`);
       // A generation owns its existing opportunity; it must not preempt itself
       // with an older target while waiting for the selected source to finish.
@@ -311,7 +378,7 @@ export class Director {
     const c = this.s.client(clientId), context = obs.context, now = this.s.now(), recent = this.recent(c.account);
     return [...this.humanMessages(obs, c.account)].reverse().find(m => m.at >= now - 45000 && m.at <= now && !/@[a-z0-9_]+|https?:\/\/|www\./i.test(m.text)
       && !/^[\s]*[!/.]|[\u0000-\u001f\u007f]/.test(m.text) && !m.replyParentId
-      && !this.consumed(`participation:${c.account}:${c.channel}:${context.streamId}:conversation:${m.id}`) && !snapshot.replyIds.includes(m.id)
+      && !this.consumed(`participation:${c.account}:${c.channel}:${context.streamId}:conversation:${m.id}`) && !snapshot.replyIds.includes(m.id) && !this.eventCoversMessage(c.channel, m.id)
       && localReply({ messages: obs.messages, target: m, account: c.account, channel: c.channel, recent, streamContext: context, now }).category);
   }
   makePlan(clientId, data, { requestId = '', mode = '', generation = false } = {}) {
@@ -321,11 +388,13 @@ export class Director {
       text: data.text || '', textKey: messageKey(data.text || ''), exactKey: digest(data.text || ''), category: data.category || '', source: data.source || 'automatic',
       replyId: data.target?.id || '', replyAuthor: data.target?.author || '', replyAt: data.target?.at || 0,
       bankRevision: this.bank().revision, profileRevision: profile.revision, notBefore: data.notBefore ?? now, expiresAt: data.expiresAt ?? (data.target ? Math.min(now + 45000, data.target.at + 45000) : now + 45000), binding: { ...obs.binding },
-      ...(data.exchangeId ? { exchangeId: data.exchangeId } : {}) };
+      ...(data.exchangeId ? { exchangeId: data.exchangeId } : {}), ...(data.event ? { event: { ...data.event } } : {}) };
     const generationId = generation ? randomUUID() : '';
     this.db.prepare('INSERT INTO director_plans(id,client_id,account,channel,opportunity,state,payload_json,created_at,updated_at,request_id,generation_id,mode,target_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
       .run(plan.planId, clientId, c.account, c.channel, plan.opportunityKey, generation ? 'generating' : 'offered', JSON.stringify(plan), now, now, requestId, generationId, mode, data.target ? digest(JSON.stringify([data.target.id, data.target.author, data.target.text, data.target.at])) : '');
     if (generation && plan.source === 'automatic') this.opportunity(plan.opportunityKey, plan.account, plan.channel, plan.streamId, plan.kind, now, 'generating', plan.planId);
+    const coveredEvent = data.event || data.target && obs.events?.find(e => e.type === 'bits' && e.id === `bits:${data.target.id}`);
+    if (coveredEvent) this.claimEvent(plan, coveredEvent);
     return this.db.prepare('SELECT * FROM director_plans WHERE id=?').get(plan.planId);
   }
   plan(clientId) {
@@ -336,10 +405,11 @@ export class Director {
       const p = JSON.parse(existing.payload_json), obs = this.observation(clientId);
       const c = this.s.client(clientId), target = this.addressedTarget(clientId, obs, this.s._snapshot(clientId, c.channel), existing.id);
       const freshMention = target && target.id !== p.replyId;
-      const conversation = this.profile(clientId).chatMode === 'participate' && ['greeting', 'topic', 'exchange'].includes(p.kind)
+      const conversation = this.profile(clientId).chatMode === 'participate' && ['greeting', 'topic', 'exchange', 'event'].includes(p.kind)
         && this.conversationalTarget(clientId, obs, this.s._snapshot(clientId, c.channel));
-      if (p.source === 'manual' || !freshMention && !conversation) return;
-      this.cancelRow(existing, freshMention ? 'A fresh directly addressed message takes priority.' : 'Fresh supported human conversation takes priority.');
+      const nativeEvent = ['greeting', 'topic', 'exchange'].includes(p.kind) && this.eventCandidate(clientId, obs, this.s._snapshot(clientId, c.channel));
+      if (p.source === 'manual' || !freshMention && !conversation && !nativeEvent) return;
+      this.cancelRow(existing, freshMention ? 'A fresh directly addressed message takes priority.' : conversation ? 'Fresh supported human conversation takes priority.' : 'A fresh native event takes priority.');
     }
     const c = this.s.client(clientId), obs = this.observation(clientId), profile = this.profile(clientId), context = obs.context;
     const humans = this.humanMessages(obs, c.account), now = this.s.now(), snapshot = this.s._snapshot(clientId, c.channel), recent = this.recent(c.account);
@@ -367,6 +437,12 @@ export class Director {
       }
       if (!text) return;
     } else if (profile.chatMode === 'participate') {
+      const event = this.eventCandidate(clientId, obs, snapshot);
+      if (event) {
+        const key = eventKey(event), text = this.distinct(this.choices(clientId, 'event', event.type, context), key, excluded);
+        this.makePlan(clientId, { kind: 'event', streamId: context.streamId, text, category: event.type, event, opportunityKey: key, participationKey: key, expiresAt: event.at + 45000 });
+        return;
+      }
       const exchange = snapshot.exchange;
       if (exchange && !this.consumed(exchange.key)) { this.makePlan(clientId, { kind: 'exchange', streamId: context.streamId, text: exchange.text, category: 'participation-exchange', opportunityKey: exchange.key, participationKey: exchange.key, exchangeId: exchange.id, notBefore: exchange.notBefore, expiresAt: exchange.expiresAt }); return; }
       const base = `participation:${c.account}:${c.channel}:${context.streamId}`;
@@ -543,12 +619,14 @@ export class Director {
       const target = this.observation(clientId)?.messages.find(m => m.id === p.replyId && m.author === p.replyAuthor && m.at === p.replyAt);
       if (!target || target.at < this.s.now() - 45000) throw failure('The reply target is no longer current.', 409);
     }
+    if (p.kind === 'event' && (!p.event || this.profile(clientId).chatMode !== 'participate'
+      || !this.observation(clientId)?.events?.some(e => sameEvent(e, p.event)) || p.event.at < this.s.now() - 45000 || p.event.at > this.s.now())) throw failure('This native event is no longer current.', 409);
     if (p.kind) {
       const last = this.db.prepare("SELECT MAX(at) AS at FROM director_opportunities WHERE account=? AND kind<>'' AND state IN ('pending','submitting','confirmed','rejected','unknown')").get(p.account).at;
       if (last && last + 600000 > this.s.now()) throw failure('Waiting between this account’s participation messages.', 409);
     }
     const opportunity = this.db.prepare('SELECT * FROM director_opportunities WHERE key=?').get(p.opportunityKey);
-    if (opportunity && opportunity.state !== 'cancelled' && !(opportunity.state === 'generating' && opportunity.owner_plan === p.planId)) throw failure('This conversation opportunity was already consumed.', 409);
+    if (opportunity && opportunity.state !== 'cancelled' && !(['generating', ...(p.kind === 'event' ? ['offered'] : [])].includes(opportunity.state) && opportunity.owner_plan === p.planId)) throw failure('This conversation opportunity was already consumed.', 409);
     return { row, plan: p };
   }
   leased(planId, reservationId) { this.db.prepare("UPDATE director_plans SET state='leased',reservation_id=?,updated_at=? WHERE id=? AND state='offered'").run(reservationId, this.s.now(), planId); }
@@ -557,6 +635,7 @@ export class Director {
     const p = JSON.parse(row.payload_json);
     this.db.prepare("UPDATE director_plans SET state='submitting',updated_at=? WHERE id=?").run(this.s.now(), row.id);
     this.opportunity(p.opportunityKey, p.account, p.channel, p.streamId, p.kind, this.s.now(), 'submitting', p.planId);
+    this.db.prepare("UPDATE director_opportunities SET state='submitting',at=? WHERE key LIKE 'event:%' AND owner_plan=? AND state='offered'").run(this.s.now(), p.planId);
     this.writeHistory({ attemptId: permit.reservation_id, clientId: p.clientId, account: p.account, channel: p.channel, streamId: p.streamId, kind: p.kind,
       text: p.text, textKey: p.textKey, delivery: 'pending', source: 'central', at: this.s.now(), submitted: true, category: p.category, replyId: p.replyId, replyTo: p.replyAuthor });
   }
@@ -569,7 +648,9 @@ export class Director {
     }
     const p = JSON.parse(row.payload_json);
     this.db.prepare('UPDATE director_plans SET state=?,updated_at=? WHERE id=?').run(delivery, this.s.now(), row.id);
-    this.db.prepare('UPDATE director_opportunities SET state=? WHERE key=?').run(delivery, p.opportunityKey);
+    if (p.kind === 'event') this.db.prepare('UPDATE director_opportunities SET state=? WHERE key=? AND owner_plan=?').run(delivery, p.opportunityKey, p.planId);
+    else this.db.prepare('UPDATE director_opportunities SET state=? WHERE key=?').run(delivery, p.opportunityKey);
+    this.db.prepare("UPDATE director_opportunities SET state=? WHERE key LIKE 'event:%' AND owner_plan=?").run(delivery, p.planId);
     this.writeHistory({ attemptId: permit.reservation_id, clientId: p.clientId, account: p.account, channel: p.channel, streamId: p.streamId, kind: p.kind,
       text: p.text, textKey: p.textKey, delivery, source: 'central', at: permit.started_at || this.s.now(), submitted: delivery !== 'cancelled', category: p.category,
       replyId: p.replyId, replyTo: p.replyAuthor, messageId: safe(outcome.messageId, 160), reason: safe(outcome.reason) });
@@ -583,6 +664,7 @@ export class Director {
     }
     this.db.prepare("UPDATE director_plans SET state='cancelled',reason=?,updated_at=? WHERE id=?").run(reason, this.s.now(), row.id);
     this.db.prepare("UPDATE director_opportunities SET state='handled' WHERE owner_plan=? AND state='generating'").run(row.id);
+    this.db.prepare("UPDATE director_opportunities SET state='cancelled' WHERE key LIKE 'event:%' AND owner_plan=? AND state='offered'").run(row.id);
   }
   cancelUnused(reason, clientId = null) {
     for (const row of this.db.prepare("SELECT * FROM director_plans WHERE state IN ('offered','generating','leased')").all().filter(x => !clientId || x.client_id === clientId)) this.cancelRow(row, reason);
@@ -598,17 +680,20 @@ export class Director {
     for (const row of this.db.prepare("SELECT * FROM director_plans WHERE state IN ('offered','leased','generating')").all()) {
       const p = JSON.parse(row.payload_json), obs = this.observation(row.client_id);
       const permit = row.reservation_id ? this.db.prepare('SELECT state FROM host_permits WHERE reservation_id=?').get(row.reservation_id) : null;
-      if (p.expiresAt <= this.s.now() || !obs || !same(obs.binding, p.binding) || this.s.paused || permit && ['expired', 'cancelled'].includes(permit.state)) {
+      if (p.expiresAt <= this.s.now() || !obs || !same(obs.binding, p.binding) || this.s.paused || p.kind === 'event' && (!this.canPlan(row.client_id) || !obs.events?.some(e => sameEvent(e, p.event))) || permit && ['expired', 'cancelled'].includes(permit.state)) {
         this.cancelRow(row, p.expiresAt <= this.s.now() ? 'The unused message plan expired.' : 'Waiting for fresh browser state.');
       }
     }
   }
   history(accountId = 'all', beforeId = 0) {
     if (accountId !== 'all' && !PROFILE_IDS.includes(accountId) || !Number.isSafeInteger(beforeId) || beforeId < 0) throw failure('Invalid history page.');
-    const rows = this.db.prepare(`SELECT * FROM director_history WHERE (?='all' OR client_id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT 51`).all(accountId, accountId, beforeId, beforeId);
-    return { history: rows.slice(0, 50).map(row => ({ id: row.id, accountId: row.client_id, account: row.account, channel: row.channel, streamId: row.stream_id, kind: row.kind,
+    const rows = this.db.prepare(`SELECT h.*,p.payload_json AS plan_payload FROM director_history h LEFT JOIN director_plans p ON p.reservation_id=h.attempt_id WHERE (?='all' OR h.client_id=?) AND (?=0 OR h.id<?) ORDER BY h.id DESC LIMIT 51`).all(accountId, accountId, beforeId, beforeId);
+    return { history: rows.slice(0, 50).map(row => {
+      const event = row.kind === 'event' && row.plan_payload ? publicEvent(JSON.parse(row.plan_payload).event, row.channel) : null;
+      return { id: row.id, accountId: row.client_id, account: row.account, channel: row.channel, streamId: row.stream_id, kind: row.kind,
       text: row.text, textAvailable: row.text !== null, delivery: row.delivery, source: row.source, at: row.at, updatedAt: row.updated_at, submitted: !!row.submitted,
-      category: row.category, replyTo: row.reply_to, messageId: row.message_id, reason: row.reason })), nextBeforeId: rows.length > 50 ? rows[49].id : null };
+      category: row.category, replyTo: row.reply_to, messageId: row.message_id, reason: row.reason, ...(event ? { event } : {}) };
+    }), nextBeforeId: rows.length > 50 ? rows[49].id : null };
   }
   status() {
     return this.s.transaction(() => {
@@ -617,7 +702,8 @@ export class Director {
         profiles: [...this.s.clients.values()].map(c => ({ id: c.id, account: c.account, ...this.profile(c.id), imports: this.imports(c.id), ready: this.ready, reason: this.ready ? '' : 'History migration is incomplete.' })),
         imports, plans: this.db.prepare("SELECT * FROM director_plans WHERE state IN ('offered','leased','generating','submitting','unknown') ORDER BY created_at DESC LIMIT 30").all().map(row => {
           const p = JSON.parse(row.payload_json); return { planId: row.id, accountId: row.client_id, account: p.account, channel: p.channel, streamId: p.streamId, kind: p.kind, text: p.text,
-            category: p.category, source: p.source, state: row.state, notBefore: p.notBefore, expiresAt: p.expiresAt, reason: row.reason, cancellable: ['offered', 'leased', 'generating'].includes(row.state) };
+            category: p.category, source: p.source, state: row.state, notBefore: p.notBefore, expiresAt: p.expiresAt, reason: row.reason, cancellable: ['offered', 'leased', 'generating'].includes(row.state),
+            ...(p.kind === 'event' && publicEvent(p.event, p.channel) ? { event: publicEvent(p.event, p.channel) } : {}) };
         }), ...this.history(), lastMutation: current.requestId === 'initial-defaults' || current.requestId.startsWith('seed:') || current.requestId === 'migration/fourth/v1' ? null : { requestId: current.requestId, revision: current.revision } };
     });
   }

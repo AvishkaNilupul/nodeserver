@@ -1,9 +1,10 @@
 import { validateReply } from './core.js';
+import { validNativeEvent } from './native-events.js';
 
 const LOGIN = /^[a-z0-9_]{3,25}$/;
 const ID = /^[a-zA-Z0-9:_-]{1,200}$/;
 const deliveries = new Set(['pending', 'confirmed', 'rejected', 'unknown', 'cancelled']);
-const kinds = new Set(['', 'greeting', 'topic', 'conversation', 'exchange']);
+const kinds = new Set(['', 'greeting', 'topic', 'conversation', 'exchange', 'event']);
 export const sameBinding = (a, b) => !!a && !!b && a.generation === b.generation && a.sessionId === b.sessionId
   && a.settingsRevision === b.settingsRevision;
 export function directorBinding(binding, settingsRevision) {
@@ -91,5 +92,11 @@ export function directorOffer(value, { account, channel, binding, authorityEpoch
   if (value.replyId && (!ID.test(value.replyId) || !LOGIN.test(value.replyAuthor) || value.replyAt > now || now - value.replyAt > 45_000)) return null;
   if (!value.replyId && (value.replyAuthor || value.replyAt !== 0)) return null;
   if (value.source === 'automatic' && !value.streamId) return null;
-  return { ...value, binding: { ...value.binding } };
+  if (value.kind === 'event') {
+    if (value.source !== 'automatic' || !validNativeEvent(value.event) || value.event.channel !== channel || value.category !== value.event.type
+      || value.event.at > now || now - value.event.at > 45_000 || value.expiresAt > value.event.at + 45_000
+      || value.event.type === 'gift' && value.event.id.startsWith('gift:') || value.replyId
+      || value.participationKey !== `event:${channel}:${value.event.id}` || value.opportunityKey !== value.participationKey) return null;
+  } else if (value.event !== undefined) return null;
+  return { ...value, binding: { ...value.binding }, ...(value.kind === 'event' ? { event: { ...value.event } } : {}) };
 }

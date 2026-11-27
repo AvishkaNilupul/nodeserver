@@ -208,3 +208,14 @@ test('Twitch device links preserve only documented activation parameters bound t
     await assert.rejects(f.manager.clipAuthorization('primary', { action: 'poll' }), /invalid authorization details/);
   }
 });
+
+
+test('native alert status is typed, never leaks details and cannot stay enabled when disconnected', async () => {
+  for (const [connected, rawStatus, expected] of [[true, 'enabled', 'enabled'], [false, 'enabled', 'unavailable'], [true, 'RAW_PRIVATE', 'unavailable']]) {
+    const f = fixture(() => { const s = status(); s.connected = connected; s.eventFeed = { status: rawStatus, token: 'RAW_PRIVATE', reason: 'RAW_PRIVATE' }; s.sent[0].kind = 'event'; return Response.json(s); });
+    const value = await f.manager.snapshot();
+    assert.deepEqual(value.instances[0].eventFeed, { status: expected });
+    assert.equal(value.instances[0].sent[0].kind, 'event');
+    assert.equal(JSON.stringify(value).includes('RAW_PRIVATE'), false);
+  }
+});

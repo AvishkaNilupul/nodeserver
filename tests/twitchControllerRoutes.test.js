@@ -619,3 +619,21 @@ test('fourth companion routes and every exact four-account clip subset remain bo
   assert.equal((await post(c, '/api/director/bank', { requestId: 'missing-fourth-profile', expectedRevision: 1, bank: threeProfileBank }, csrf)).status, 400);
   assert.equal(f.seen.length, before, 'unsupported identities and stale bank shapes cannot reach the Mac');
 });
+
+
+test('event wording banks pass the existing authenticated bounded single-forward gateway', async t => {
+  const f = await fixture(t, { upstream: (req, res) => respond(res, 200, req.method === 'POST' ? { ok: true, revision: 10 } : { csrfToken: UPSTREAM_TOKEN }) });
+  const c = await f.client(), csrf = await nonce(c, '/api/director');
+  const profiles = ['primary', 'test', 'third', 'fourth'].map(id => ({ id, chatMode: 'participate', replySource: 'local' }));
+  const entry = { id: 'native_event', kind: 'event', category: 'bits', lines: ['nice cheer'], accountIds: ['primary'], enabled: true };
+  const body = (count, changes = {}) => ({ requestId: 'event-save', expectedRevision: 9, bank: { profiles, entries: Array.from({ length: count }, (_, i) => ({ ...entry, id: 'event_' + i, ...changes })) } });
+  for (const category of ['bits', 'sub', 'resub', 'gift', 'gift_batch']) {
+    const value = body(144, { category }), before = f.seen.length;
+    assert.equal((await post(c, '/api/director/bank', value, csrf)).status, 200);
+    assert.equal(f.seen.length, before + 1); assert.deepEqual(f.seen.at(-1).body, value);
+  }
+  assert.equal((await post(c, '/api/director/bank', body(160), csrf)).status, 200);
+  for (const value of [body(161), body(144, { category: 'raid' }), body(144, { lines: ['thanks {user}'] }), body(144, { lines: ['https://outside.example'] })]) {
+    const before = f.seen.length; assert.equal((await post(c, '/api/director/bank', value, csrf)).status, 400); assert.equal(f.seen.length, before);
+  }
+});

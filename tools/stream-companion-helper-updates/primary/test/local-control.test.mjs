@@ -234,3 +234,16 @@ test('a held companion accepts safe view/preferences cleanup but rejects draft/s
     assert.equal(f.c.stopped, true);
   }
 });
+
+
+test('native subscription feed status is typed and unavailable after Stop or disconnect', () => {
+  const f = fixture();
+  let connected = true, status = 'enabled';
+  f.twitch.status = () => ({ account: 'sample_account', authorized: true, connected, channel: 'sample_channel', messages: [], sent: [], eventFeed: { status, reason: 'RAW_PRIVATE', token: 'RAW_PRIVATE' } });
+  f.c.stopped = false;
+  assert.deepEqual(f.c.status().eventFeed, { status: 'enabled' });
+  assert.equal(JSON.stringify(f.c.status()).includes('RAW_PRIVATE'), false);
+  connected = false; assert.deepEqual(f.c.status().eventFeed, { status: 'unavailable' });
+  connected = true; status = 'unexpected'; assert.deepEqual(f.c.status().eventFeed, { status: 'unavailable' });
+  status = 'enabled'; f.c.stopped = true; assert.deepEqual(f.c.status().eventFeed, { status: 'unavailable' });
+});

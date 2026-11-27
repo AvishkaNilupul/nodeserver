@@ -59,7 +59,7 @@ test('strict construction excludes sensitive values even in unexpected fields, e
   assert.equal(f.read().length, 1); assert.equal(f.read()[0].errorCode, 'other'); assert.equal(f.read()[0].playbackStatus, 'unknown');
   assert.deepEqual(Object.keys(f.read()[0]).sort(), ['version', 'event', 'observedAt', 'profile', 'helperAvailable', 'chatTokenPresent', 'chatConnected',
     'controlPaused', 'automaticReplies', 'recoveryEnabled', 'browserFresh', 'watchEnabled', 'playbackStatus', 'playbackFresh',
-    'coordinationAvailable', 'coordinationPaused', 'errorCode', 'browserObservedAt', 'playbackObservedAt'].sort());
+    'coordinationAvailable', 'coordinationPaused', 'errorCode', 'browserObservedAt', 'playbackObservedAt', 'subscriptionEvents'].sort());
 });
 
 test('rotation retains complete records in at most four bounded owner-only files and restart records a new baseline', t => {
@@ -107,4 +107,16 @@ test('a partial failed append is repaired before the next observation even if im
   f.time(NOW + 2000); assert.equal(f.observe(value), true);
   assert.deepEqual(f.read().map(x => x.event), ['baseline', 'transition']);
   assert.equal(f.read().at(-1).chatConnected, false); assert.equal(f.warnings.length, 1);
+});
+
+
+test('native subscription feed availability creates typed transitions without storing arbitrary details', t => {
+  const f = fixture(t), value = instance();
+  value.eventFeed = { status: 'enabled', reason: 'sensitive-native-notice', token: 'sensitive-native-token' };
+  f.observe(value); assert.equal(f.read().at(-1).subscriptionEvents, 'enabled');
+  f.time(NOW + 1); value.eventFeed.status = 'unexpected-private'; f.observe(value);
+  assert.equal(f.read().at(-1).event, 'transition'); assert.equal(f.read().at(-1).subscriptionEvents, 'unavailable');
+  f.time(NOW + 2); value.eventFeed.status = 'enabled'; value.connected = false; f.observe(value);
+  assert.equal(f.read().at(-1).subscriptionEvents, 'unavailable');
+  const text = JSON.stringify(f.read()); for (const privateValue of ['sensitive-native-notice', 'sensitive-native-token', 'unexpected-private']) assert.equal(text.includes(privateValue), false);
 });

@@ -97,7 +97,7 @@ test('real USA relay transfers an official root reconnect without resubscription
   for (let i = 0; i < 5; i++) await h.tick();
   assert.equal(h.twitch.generation, generation); assert.equal(h.twitch.connected, true);
   assert.equal(h.helper.status().sockets, 1); assert.equal(h.sockets.length, 2);
-  assert.equal(h.calls.filter(row => row.url.endsWith('/eventsub/subscriptions')).length, 1);
+  assert.deepEqual(h.calls.filter(row => row.url.endsWith('/eventsub/subscriptions')).map(row => JSON.parse(row.options.body).type), ['channel.chat.message', 'channel.chat.notification']);
   assert.equal(h.calls.filter(row => row.url.endsWith('/chat/messages')).length, 1);
   await assert.rejects(h.twitch.send(input));
   assert.equal(h.calls.filter(row => row.url.endsWith('/chat/messages')).length, 1);

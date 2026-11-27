@@ -511,7 +511,7 @@ function renderCards(view, state, now) {
     const session = sessionStatus(instance, state, now);
     heading.append(title, pill(view, session.title, session.tone));
     const details = view.el('dl', undefined, 'card-details');
-    details.append(pair(view, 'Channel', instance?.channel ? `#${instance.channel}` : 'No channel'), pair(view, 'Playback', playing.title), pair(view, 'Chat connection', stale ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected'), pair(view, 'Browser bridge', stale ? 'Unverified' : bridgeFresh(instance, now) ? 'Current' : 'Unavailable'));
+    details.append(pair(view, 'Channel', instance?.channel ? `#${instance.channel}` : 'No channel'), pair(view, 'Playback', playing.title), pair(view, 'Chat connection', stale ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected'), pair(view, 'Browser bridge', stale ? 'Unverified' : bridgeFresh(instance, now) ? 'Current' : 'Unavailable'), pair(view, 'Sub & gift alerts', stale ? 'Unverified' : instance?.connected && instance?.eventFeed?.status === 'enabled' ? 'Listening' : 'Unavailable'));
     const reason = view.el('p', stale ? 'Showing last known account data. Waiting for a fresh host response.' : bridgeReason(instance, now) || text(instance?.activity?.reason, 'Ready for account controls.'), 'card-reason');
     const link = view.el('a', 'Open account controls', 'open-account'); link.setAttribute('href', controllerPath(state.basePath || '', `/accounts/${id}`));
     card.append(heading, details, reason, link); cards.push(card);

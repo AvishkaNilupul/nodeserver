@@ -118,7 +118,7 @@ function element(document, tag, className, value) {
 const tone = (node, value) => { node.setAttribute('data-tone', value); return node; };
 const accountName = value => typeof value === 'string' && value ? `@${text(value)}` : 'Account not identified';
 const lookup = (map, key, fallback) => typeof key === 'string' && Object.hasOwn(map, key) ? map[key] : fallback;
-const kindName = value => lookup({ greeting: 'Greeting', topic: 'Category question', conversation: 'Conversation reply', reply: 'Direct reply', manual: 'Manual message', exchange: 'Bot exchange' }, value, 'Contribution');
+const kindName = value => lookup({ greeting: 'Greeting', topic: 'Category question', conversation: 'Conversation reply', reply: 'Direct reply', manual: 'Manual message', exchange: 'Bot exchange', event: 'Stream event reaction' }, value, 'Contribution');
 const playbackName = value => lookup({ playing: 'Playing', paused: 'Paused', ad: 'Ad playing', advertisement: 'Ad playing', buffering: 'Buffering', stalled: 'Stalled', offline: 'Offline', ended: 'Ended', checking: 'Checking', commercial: 'Commercial break', off: 'Checks off', error: 'Needs attention' }, value, 'Unverified');
 const freshCheckIn = (client, now) => client.online === true && Number.isFinite(time(client.lastSeenAt))
   && time(client.lastSeenAt) <= now + 5000 && now - time(client.lastSeenAt) <= 45000;

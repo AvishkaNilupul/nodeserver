@@ -372,7 +372,7 @@ test('documented root reconnect transfers once, ignores retired frames and never
   assert.equal(h.client.messages.some(message => message.id === 'retired-message'), false);
   assert.equal(h.client.generation, generation); assert.equal(h.client.error, '');
   assert.equal(h.client.connected, true); assert.equal(Socket.all.length, 2);
-  assert.equal(h.calls.filter(call => call.url.endsWith('/eventsub/subscriptions')).length, 1);
+  assert.deepEqual(h.calls.filter(call => call.url.endsWith('/eventsub/subscriptions')).map(call => JSON.parse(call.options.body).type), ['channel.chat.message', 'channel.chat.notification']);
   assert.equal(h.calls.filter(call => call.url.endsWith('/chat/messages')).length, 1);
   await assert.rejects(h.client.send(input));
   assert.equal(h.calls.filter(call => call.url.endsWith('/chat/messages')).length, 1);
@@ -385,7 +385,7 @@ test('EventSub reconnect transfers the session once, validates its host, and rev
   const next = Socket.all.at(-1); assert.notEqual(next, old); assert.equal(old.closed, false);
   await h.emit(next, 'session_welcome', { session: { id: 'transferred' } });
   assert.equal(old.closed, true); assert.equal(h.client.connected, true);
-  assert.equal(h.calls.filter(c => c.url.endsWith('/eventsub/subscriptions')).length, 1);
+  assert.deepEqual(h.calls.filter(c => c.url.endsWith('/eventsub/subscriptions')).map(c => JSON.parse(c.options.body).type), ['channel.chat.message', 'channel.chat.notification']);
   await h.emit(next, 'revocation', {}); assert.equal(h.client.connected, false); assert.equal(next.closed, true);
   for (const url of ['wss://evil.example/ws', 'https://eventsub.wss.twitch.tv/ws', 'wss://user@eventsub.wss.twitch.tv/ws', 'wss://eventsub.wss.twitch.tv/elsewhere']) assert.throws(() => reconnectUrl(url));
 });
@@ -512,7 +512,7 @@ test('EventSub revocation preserves only its known safe reason and never automat
     const state = h.client.status();
     assert.equal(state.connected, false); assert.equal(state.recoverable, false); assert.equal(socket.closed, true);
     assert.match(state.error, expected); assert.doesNotMatch(JSON.stringify(state), /RAW_PRIVATE_PAYLOAD|RAW_PRIVATE_SESSION|secret-access/);
-    assert.equal(h.calls.filter(c => c.url.endsWith('/eventsub/subscriptions')).length, 1);
+    assert.deepEqual(h.calls.filter(c => c.url.endsWith('/eventsub/subscriptions')).map(c => JSON.parse(c.options.body).type), ['channel.chat.message', 'channel.chat.notification']);
     assert.equal(h.calls.filter(c => c.url.endsWith('/chat/messages')).length, 0);
     assert.equal(h.timers.size, 0);
   }

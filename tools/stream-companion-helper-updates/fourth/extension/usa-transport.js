@@ -193,6 +193,7 @@ export class UsaBrowserRelay {
       if (job.kind === 'fetch') {
         controller = new AbortController(); this.requests.add(controller);
         timer = this.setTimer(() => controller.abort(), Math.max(1, Math.min(10000, deadline - this.now()))); timer?.unref?.();
+        if (!valid() || deadline <= this.now()) return;
         const response = await this.fetch(request.url, { method: request.method, headers: request.headers, ...(request.body === undefined ? {} : { body: request.body }),
           credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal });
         if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) throw failure('bad_response');

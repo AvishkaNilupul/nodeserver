@@ -65,12 +65,14 @@ export function createUsTransport({ now = Date.now, requestMs = 10_000, leaseMs 
     for (const job of [...jobs.values()]) if (job.expiresAt <= now() || !matching(job)) settle(job, failure('usa_transport_expired', job.state !== 'begun'));
   }
   const interval = setInterval(sweep, Math.max(10, sweepMs)); interval.unref?.();
-  function queue(kind, fields = {}, signal) {
+  function queue(kind, fields = {}, signal, providerDeadlineAt) {
     sweep();
     if (closed || !online() || jobs.size >= 32 || signal?.aborted) throw failure();
-    const job = { ...fields, id: randomUUID(), kind, epoch, fence: fence(), state: 'queued', expiresAt: now() + requestMs, signal };
+    const at = now(), expiresAt = Math.min(at + requestMs, providerDeadlineAt ?? Infinity);
+    if (expiresAt <= at) throw failure('usa_transport_expired');
+    const job = { ...fields, id: randomUUID(), kind, epoch, fence: fence(), state: 'queued', expiresAt, signal };
     job.promise = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
-    job.timer = setTimer(() => settle(job, failure('usa_transport_timeout', job.state !== 'begun')), requestMs); job.timer?.unref?.();
+    job.timer = setTimer(() => settle(job, failure('usa_transport_timeout', job.state !== 'begun')), expiresAt - at); job.timer?.unref?.();
     job.abort = () => { const begun = job.state === 'begun'; settle(job, failure('usa_transport_aborted', !begun)); if (begun) invalidate(); };
     jobs.set(job.id, job); signal?.addEventListener('abort', job.abort, { once: true });
     return job;
@@ -217,7 +219,11 @@ export function createUsTransport({ now = Date.now, requestMs = 10_000, leaseMs 
       try { request = validateFetch(raw instanceof URL ? raw.href : raw, { method: options.method || 'GET', headers: [...new Headers(options.headers || {})],
         ...(options.body === undefined || options.body === null ? {} : { body: options.body instanceof URLSearchParams ? options.body.toString() : options.body }) }); }
       catch { throw failure('usa_transport_target', true, 400); }
-      return queue('fetch', request, options.signal).promise;
+      if (options.providerDeadlineAt !== undefined && (!Number.isFinite(options.providerDeadlineAt) || options.providerDeadlineAt < 0
+        || request.method !== 'POST' || request.url !== 'https://api.twitch.tv/helix/chat/messages')) throw failure('usa_transport_target', true, 400);
+      // A caller may only shorten the existing queue TTL. This private option
+      // never becomes a Twitch header/body or expands the finite target policy.
+      return queue('fetch', request, options.signal, options.providerDeadlineAt).promise;
     }, poll, begin, complete, event, invalidate,
     bind({ getGeneration: nextGeneration, getControlGeneration: nextControl } = {}) { if (nextGeneration) getGeneration = nextGeneration; if (nextControl) getControlGeneration = nextControl; },
     status() { sweep(); const valid = online() && fresh(proof); return { countryRequired: 'US', state: closed ? 'closed' : valid ? 'ready' : 'held', country: valid ? 'US' : null,

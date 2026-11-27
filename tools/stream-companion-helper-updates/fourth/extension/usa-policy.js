@@ -41,7 +41,7 @@ function jsonBody(body, path) {
     if (!exact(value, keys) || !digits(value.broadcaster_id) || !digits(value.sender_id) || typeof value.message !== 'string' || value.message.length > 300
       || Object.hasOwn(value, 'reply_parent_message_id') && !opaque(value.reply_parent_message_id, 160)) invalid();
     try { if (validateReply(value.message) !== value.message) invalid(); } catch { invalid(); }
-  } else if (!exact(value, ['type', 'version', 'condition', 'transport']) || value.type !== 'channel.chat.message' || value.version !== '1'
+  } else if (!exact(value, ['type', 'version', 'condition', 'transport']) || !['channel.chat.message', 'channel.chat.notification'].includes(value.type) || value.version !== '1'
     || !exact(value.condition, ['broadcaster_user_id', 'user_id']) || !digits(value.condition.broadcaster_user_id) || !digits(value.condition.user_id)
     || !exact(value.transport, ['method', 'session_id']) || value.transport.method !== 'websocket' || !opaque(value.transport.session_id, 200)) invalid();
 }

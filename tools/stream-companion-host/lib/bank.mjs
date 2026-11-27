@@ -7,6 +7,8 @@ export const PROFILE_IDS = Object.freeze(['primary', 'test', 'third', 'fourth'])
 const LEGACY_PROFILE_IDS = Object.freeze(['primary', 'test', 'third']);
 export const REPLY_CATEGORIES = Object.freeze([...Object.keys(replyBank), 'game', 'streamtitle', 'livestatus']);
 export const TOPIC_CATEGORIES = Object.freeze(['general', 'just chatting', 'music', 'art']);
+export const EVENT_CATEGORIES = Object.freeze(['bits', 'sub', 'resub', 'gift', 'gift_batch']);
+export const MAX_BANK_ENTRIES = 160;
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export const opaque = value => typeof value === 'string' && /^[A-Za-z0-9_:-]{1,160}$/.test(value);
 export const record = value => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -33,15 +35,15 @@ export function defaultBank() {
 }
 
 function validateBankForRoster(input, profileIds) {
-  if (!exact(input, ['entries', 'profiles']) || !Array.isArray(input.entries) || input.entries.length < 1 || input.entries.length > 128
+  if (!exact(input, ['entries', 'profiles']) || !Array.isArray(input.entries) || input.entries.length < 1 || input.entries.length > MAX_BANK_ENTRIES
     || !Array.isArray(input.profiles) || input.profiles.length !== profileIds.length || Buffer.byteLength(JSON.stringify(input)) > 60000) throw failure('The message bank is invalid or too large.');
   const seen = new Set();
   const entries = input.entries.map(item => {
     if (!exact(item, ['id', 'kind', 'category', 'lines', 'accountIds', 'enabled']) || typeof item.id !== 'string' || !/^[a-z0-9_:-]{1,80}$/.test(item.id) || seen.has(item.id)
-      || !['greeting', 'topic', 'reply', 'exchange'].includes(item.kind) || typeof item.enabled !== 'boolean'
+      || !['greeting', 'topic', 'reply', 'exchange', 'event'].includes(item.kind) || typeof item.enabled !== 'boolean'
       || !Array.isArray(item.accountIds) || !item.accountIds.length || item.accountIds.length > profileIds.length || new Set(item.accountIds).size !== item.accountIds.length || item.accountIds.some(id => !profileIds.includes(id))
       || !Array.isArray(item.lines) || !item.lines.length || item.lines.length > 16 || item.kind === 'exchange' && item.lines.length !== 2) throw failure('A message bank entry is invalid.');
-    const categories = item.kind === 'reply' ? REPLY_CATEGORIES : item.kind === 'topic' ? TOPIC_CATEGORIES : [item.kind];
+    const categories = item.kind === 'reply' ? REPLY_CATEGORIES : item.kind === 'topic' ? TOPIC_CATEGORIES : item.kind === 'event' ? EVENT_CATEGORIES : [item.kind];
     if (!categories.includes(item.category)) throw failure('Choose a supported message category.');
     seen.add(item.id);
     const lines = item.lines.map(line => {

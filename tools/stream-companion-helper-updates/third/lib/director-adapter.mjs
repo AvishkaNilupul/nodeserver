@@ -1,6 +1,7 @@
 import { composeRequest, generate } from './composer.mjs';
 import { directorBinding, sameBinding } from '../extension/director.js';
 import { exchangeContext } from '../extension/chat-context.js';
+import { currentNativeEvent } from '../extension/native-events.js';
 
 const opaque = value => typeof value === 'string' && /^[a-zA-Z0-9:_-]{1,200}$/.test(value);
 /** Paired local execution adapter. Incoming chat/metadata never come from browser echoes. */
@@ -40,7 +41,7 @@ export class DirectorAdapter {
         accounts: this.twitch.coordinator.snapshot(channel).accounts || [], now: this.now() }) : null });
     this.binding(input, { allowStopped: true });
     return { protocol: 1, binding, armed, streamContext: context,
-      messages: this.twitch.status().messages.slice(-60),
+      messages: this.twitch.status().messages.slice(-60), events: this.twitch.status().events || [],
       restrictions: { sharedChat: info?.sharedChat === true, emoteOnly: info?.chatSettings?.emoteOnly === true,
         subscribersOnly: info?.chatSettings?.subscribersOnly === true, sendHeld } };
   }
@@ -86,6 +87,7 @@ export class DirectorAdapter {
         || !['playing', 'ad'].includes(watch.status) || watch.checkedAt > this.now() + 5000 || this.now() - watch.checkedAt > 45_000
         || plan.kind && settings.chatMode !== 'participate') throw Error('Automatic central messages are held until current playback and participation are armed.');
     }
+    if (plan.kind === 'event' && !currentNativeEvent(this.twitch.status().events || [], plan.event, plan.channel, this.now())) throw Error('The verified native event expired or changed before submission.');
     return plan;
   }
   async resolveGeneration(result, input) {
