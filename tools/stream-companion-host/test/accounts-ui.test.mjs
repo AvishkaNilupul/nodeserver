@@ -23,6 +23,32 @@ class Node {
 function view() { const nodes = new Map(); return createAccountsView({ getElementById: id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); }, createElement: tag => new Node(tag) }); }
 const visible = v => Object.values(v.nodes).map(node => node.textContent).join('\n');
 
+test('overview and account distinguish the shared hold, playback wait and enabled automatic chat', async () => {
+  const row = instance(), c = controller(async () => reply(snapshot({ instances: [row] })));
+  row.settings.autoReply = true;
+  row.coordination.paused = true;
+  async function expectStatus(expected) {
+    await c.refresh();
+    const v = view();
+    renderAccounts(v, c.getState(), { now: at });
+    assert.ok(v.nodes['account-cards'].children[0].textContent.includes('Automatic chat' + expected));
+    renderAccounts(v, c.getState(), { id: 'primary', now: at });
+    assert.ok(v.nodes['settings-current'].textContent.endsWith('Automatic chat · ' + expected));
+  }
+  await expectStatus('On hold for all accounts');
+  row.coordination.paused = false;
+  await expectStatus('Waiting for playback');
+  row.watch.enabled = true;
+  for (const status of ['playing', 'ad']) {
+    row.watch.status = status;
+    await expectStatus('Enabled');
+  }
+  row.coordination.available = false;
+  await expectStatus('Unverified');
+  row.settings.autoReply = false;
+  await expectStatus('Off');
+});
+
 const sharedReview = (rid, text = 'The blue team leads.', time = at) => command({ requestId: rid, action: 'draft', params: { mode: 'reply' } },
   { id: 'review:' + rid, createdAt: time, state: 'completed', result: { text, account: 'example_account', channel: 'example_channel', targetAuthor: 'viewer', streamId: '1234' } });
 

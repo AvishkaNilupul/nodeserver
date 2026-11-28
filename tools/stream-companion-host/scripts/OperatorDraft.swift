@@ -88,7 +88,8 @@ private func factualLines(_ context: Context, includeOperator: Bool = true) -> [
     let messages = context.messages.filter { includeOperator || $0.author.caseInsensitiveCompare(context.account) != .orderedSame }.map(\.text)
     let earlierClauses = context.target.text.components(separatedBy: ". ").dropLast()
     return (messages + earlierClauses).filter {
-        !claimsPlayed($0) && !matches(#"[?？]|\b(?:if|maybe|guess|might|will|hope|think)\b"#, in: $0)
+        !claimsPlayed($0) && !matches(#"[?？]|\b(?:if|maybe|possibly|probably|guess|might|will|hope|think|suspect)\b|\b(?:could|may)\s+(?:be|have|affect|cause|explain|change|break)\b"#, in: $0)
+            && !matches(#"^\s*(?:(?:yeah|yes|yep|sure|ok(?:ay)?|fair(?: enough)?|true|right)\b[,! .]*)+$"#, in: $0)
     }
 }
 
@@ -98,14 +99,27 @@ private func socialTurn(_ text: String) -> Bool {
     return line.count <= 80 && matches(#"^(?:thanks?\b|thank you\b|cheers\b|good (?:morning|night)\b|how are you[?!. ]*$|hey[! .]*$|hello[! .]*$|ありがとう|gracias\b|merci\b)"#, in: line)
 }
 
-private func relevantMetadata(_ context: Context) -> String? {
-    if matches(#"\b(?:what|which) (?:game|category) (?:is this|is it|is (?:the )?(?:stream|channel) in|are (?:we|you|they) playing)\b"#, in: context.target.text) {
-        return context.stream["category"]
-    }
-    if matches(#"\b(?:what(?:['’]s| is)|tell me) (?:the )?(?:stream|broadcast|channel) title\b"#, in: context.target.text) {
-        return context.stream["title"]
-    }
-    return nil
+// A short check-in is an invitation to greet someone. There is no source
+// for the operator's mood, current activity or what the rest of chat is doing.
+private func isCheckIn(_ text: String) -> Bool {
+    matches(#"^\s*(?:@[a-z0-9_]+[ ,:!]+)?(?:(?:hey|hi|hello|yo)[ ,:!]+)?how(?:\s+(?:are|is)|['’]s)\s+(?:you|everyone|everybody|chat|you all|y['’]?all)(?:\s+doing)?(?:\s+(?:today|tonight))?[?!. ]*$"#, in: text)
+}
+
+// A question about "your" theory needs an actual earlier operator turn.
+// Other viewers' guesses and passing acknowledgements cannot supply one.
+private func asksToRepeatTheory(_ text: String) -> Bool {
+    matches(#"\b(?:you|u)\s+(?:think|thought|suspect(?:ed)?|guess(?:ed)?)\s+(?:it(?:['’]s| was| is)|that(?:['’]s| was| is))\s+(?:the\s+)?what\b|\bwhat\s+(?:did|do)\s+(?:you|u)\s+(?:think|suspect|guess)\s+(?:it\s+(?:was|is)|(?:was|is)\s+(?:causing|behind))\b"#, in: text)
+}
+
+private func asksCategory(_ text: String, category: String?) -> Bool {
+    if matches(#"\b(?:what|which) (?:game|category) (?:is this|is it|is (?:the )?(?:stream|channel) in|are (?:we|you|they) playing)\b"#, in: text) { return true }
+    // A bare "back to the bridge?" could be asking about a location in the game.
+    // Accept a named listing, a game-like abbreviation, or an explicit "playing".
+    let opening = #"^\s*(?:@[a-z0-9_]+[ ,:!]+)?(?:are\s+)?(?:we|you|they)\s+back\s+to\s+"#
+    guard let prefix = text.range(of: opening, options: [.regularExpression, .caseInsensitive]) else { return false }
+    let subject = text[prefix.upperBound...].trimmingCharacters(in: CharacterSet(charactersIn: "?？!. "))
+    return matches(#"^playing\s+[\p{L}\p{N}][\p{L}\p{N} '’:-]{0,60}$|^[a-z]{2,8}\d{1,4}$"#, in: subject)
+        || category?.caseInsensitiveCompare(subject) == .orderedSame
 }
 
 private func hasGroundedDetail(_ answer: String, _ facts: [String], target: String) -> Bool {
@@ -212,8 +226,35 @@ private func run() async throws {
         try writeDraft(nil)
         return
     }
+    let target = context.target.text
+    if asksCategory(target, category: context.stream["category"]) {
+        let future = matches(#"\b(?:tomorrow|later|next (?:time|week|month|stream|game)|after (?:this|the) (?:game|round|break))\b"#, in: target)
+        let category = future ? nil : context.stream["category"]
+        try writeDraft(category.map { "Twitch lists this stream under \($0)." })
+        return
+    }
+    if matches(#"\b(?:what(?:['’]s| is)|tell me) (?:the )?(?:stream|broadcast|channel) title\b"#, in: target) {
+        try writeDraft(context.stream["title"])
+        return
+    }
+    if isCheckIn(target) {
+        try writeDraft("Hey! How’s it going?")
+        return
+    }
+    if asksToRepeatTheory(target) {
+        // The selector supplies confirmed operator turns. Quote the earlier
+        // wording so attributing a guess to someone else is preserved too.
+        let earlier = context.messages.last { $0.author.caseInsensitiveCompare(context.account) == .orderedSame }
+        if let earlier = earlier?.text, earlier.count <= 185, !matches(#"[?？]"#, in: earlier),
+           matches(#"\b(?:maybe|might|could|guess|suspect|think)\b"#, in: earlier) {
+            try writeDraft("My earlier message was “\(earlier)”")
+        } else {
+            try writeDraft(nil)
+        }
+        return
+    }
     let facts = factualLines(context)
-    if let reported = scoreReply(context, facts: factualLines(context, includeOperator: false)) ?? relevantMetadata(context) {
+    if let reported = scoreReply(context, facts: factualLines(context, includeOperator: false)) {
         try writeDraft(reported)
         return
     }

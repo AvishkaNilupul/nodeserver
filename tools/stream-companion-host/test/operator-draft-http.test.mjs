@@ -79,7 +79,7 @@ test('local and paired account pages draft corrected scores and dispatch only an
     const profile = f.profiles[i], score = 14 + i, id = `score-${client.id}`;
     const facts = f.row('scores', viewer, 'Amber finished with 8 points and Teal finished with 11 points.', 24_000);
     const correction = f.row('correction', viewer, `Correction: Teal finished with ${score} points.`, 4000);
-    const target = f.row('question', viewer, 'So what was Teal’s final score?', 3000);
+    const target = f.row('question-' + client.id, viewer, 'So what was Teal’s final score?', 3000);
     const other = f.row('other', 'different_fan', 'Who won the fishing event?', 1000);
     f.store.director.writeHistory({ clientId: client.id, account: client.account, channel, streamId: '111', kind: 'conversation',
       attemptId: 'earlier-' + client.id, messageId: 'confirmed', at: facts.at + 1000,
@@ -252,5 +252,33 @@ test('draft POST enforces local CSRF, remote pairing and an eligible viewer befo
   assert.equal(issue.status, 409);
   assert.match(issue.data.error, /no recent viewer/i);
   assert.deepEqual(f.modelCalls, []);
+  f.assertDeliveryState();
+});
+
+test('local and remote reviewers competing over one shared message see one draft and a named quiet receipt', async t => {
+  const f = await fixture(t, 'Teal leads.', () => { throw Error('No helper command expected'); });
+  for (const profile of f.profiles) profile.chat.messages = [f.row('room-question', viewer, 'Who leads?', 500)];
+  const attempts = await Promise.all(clients.map((client, index) => {
+    const paired = index % 2;
+    const path = (paired ? REMOTE_PREFIX : '') + '/api/accounts/' + client.id + '/command';
+    return f.request(path, { ...(paired ? f.remote : f.local), 'X-CSRF-Token': csrfToken }, draftBody('review-' + client.id));
+  }));
+  const winner = attempts.findIndex(result => result.status === 200);
+  assert.ok(winner >= 0);
+  assert.equal(attempts.filter(result => result.status === 200).length, 1);
+  for (const result of attempts.filter(result => result.status !== 200)) {
+    assert.equal(result.status, 409);
+    assert.equal(result.data.code, 'no_conversation');
+    assert.match(result.data.error, new RegExp('in review on @' + clients[winner].account));
+  }
+  const loser = clients[(winner + 1) % clients.length];
+  const later = await f.request(REMOTE_PREFIX + '/api/accounts/' + loser.id + '/command',
+    { ...f.remote, 'X-CSRF-Token': csrfToken }, draftBody('try-again'));
+  assert.equal(later.status, 409);
+  assert.equal(f.modelCalls.length, 1);
+  const polled = await f.request(REMOTE_PREFIX + '/api/accounts', f.remote);
+  const receipts = polled.data.instances.flatMap(account => account.controls.recent.filter(command => command.result?.text));
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].result.target.id, 'room-question');
   f.assertDeliveryState();
 });

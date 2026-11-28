@@ -183,6 +183,7 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
   const jobs = new Map(), epochs = new Map();
   const configured = new Set(companionLogins.filter(login));
   let closed = false;
+  let requestSequence = 0;
 
   function finish(job, state, error, result) {
     clearTimeout(job.timer);
@@ -267,12 +268,36 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     for (const job of history(id)) if (['running', 'completed'].includes(job.command.state)) finish(job, 'cancelled', 'The account was stopped or changed. Request a fresh draft.');
   }
 
+  // Twitch message IDs identify the source across profiles even when their
+  // local receive times differ. A missing stream lookup cannot split a claim.
+  function sameSource(job, channel, broadcast, targetId) {
+    return job.channel === channel && job.targetId === targetId
+      && (!job.streamId || !broadcast || job.streamId === broadcast);
+  }
+
+  function openDraft(job) {
+    return job.command.state === 'running' || job.command.state === 'completed' && !!job.command.result?.text;
+  }
+
+  function reviewOwner(instance, broadcast, targetId, peers, companions, sequence) {
+    for (const profile of profiles) {
+      for (const job of history(profile)) {
+        if (!sameSource(job, instance.channel, broadcast, targetId)) continue;
+        if (job.submission) return job;
+        if (profile === instance.id) continue;
+        // A delayed, older snapshot cannot withdraw a newer request's claim.
+        if (job.sequence < sequence) reconcile(job, peers.find(peer => peer.id === profile), companions);
+        if (openDraft(job)) return job;
+      }
+    }
+  }
+
   async function request(id, input) {
     const body = validateCommand(input);
     if (body.action !== 'draft' || body.params.mode !== 'reply') throw failure('Choose Draft reply to request a reviewed draft.', 400);
     if (!profiles.has(id)) throw failure('Unknown companion.', 404);
     if (closed) throw failure('The draft service is offline.', 503);
-    const epoch = epochs.get(id);
+    const epoch = epochs.get(id), sequence = ++requestSequence;
     let instances;
     try { ({ instances } = await snapshot()); } catch { throw failure('The companion status is unavailable.', 503); }
     if (closed || epoch !== epochs.get(id)) throw failure('The account changed while loading. Request a fresh draft.');
@@ -290,8 +315,16 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     if (entries.length >= 30) throw failure('Too many recent draft requests. Wait before requesting another draft.', 429);
     if (!companions) throw failure('Companion identities are unavailable. Refresh the account list before drafting.');
     const { target, thread, directed, context } = selectConversation(instance, companions, now());
+    const broadcast = streamId(instance);
+    // No await between checking the other accounts and registering this job.
+    const owner = reviewOwner(instance, broadcast, target.id, instances, companions, sequence);
+    if (owner) {
+      const reason = owner.submission ? 'A reply to this message was already submitted for sending by @'
+        : 'This message already has a draft in review on @';
+      throw Object.assign(failure(reason + owner.account + '.'), { code: 'no_conversation' });
+    }
     const createdAt = now(), command = { id: 'review:' + body.requestId, ...body, state: 'running', createdAt, expiresAt: createdAt + jobTimeout, error: '' };
-    const job = { id, command, thread, directed, account: instance.account, channel: instance.channel, streamId: streamId(instance),
+    const job = { id, command, thread, directed, sequence, account: instance.account, channel: instance.channel, streamId: broadcast,
       targetId: target.id, targetAuthor: target.author, targetAt: target.at, targetText: target.text, parentId: target.replyParentId, controller: new AbortController() };
     job.timer = setTimeout(() => { if (job.command.state === 'running') finish(job, 'expired', modelErrors.model_timeout); }, jobTimeout);
     job.timer.unref();
@@ -322,7 +355,13 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     reconcile(job, instance, companionsFor(peers));
     if (job.command.state !== 'completed' || !job.command.result?.text || !job.command.result.targetAuthor) return null;
     job.submission = { requestId: body.requestId, text: body.params.text, outcome: null };
-    finish(job, 'cancelled', 'This draft has been used. Check the separate send request for delivery status.');
+    // A reviewer may have requested another wording for the same message.
+    // Once any wording is submitted, withdraw all of its other open drafts.
+    for (const other of history(instance.id)) {
+      if (openDraft(other) && sameSource(other, job.channel, job.streamId, job.targetId)) {
+        finish(other, 'cancelled', 'This draft has been used. Check the separate send request for delivery status.');
+      }
+    }
     return job.submission;
   }
 

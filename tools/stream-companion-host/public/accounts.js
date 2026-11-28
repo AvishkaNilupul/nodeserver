@@ -548,6 +548,16 @@ function playback(instance, now, stale = false) {
   return { title: label({ playing: 'Playing', paused: 'Paused', offline: 'Channel offline', buffering: 'Buffering', error: 'Playback error', not_found: 'Watch page missing', stopped: 'Stopped', idle: 'Idle', unknown: 'Unverified' }, status, status), detail: text(watch.error, `${watch.channel ? `#${watch.channel} · ` : ''}${age(watch.checkedAt, now)}`), tone: status === 'playing' ? 'good' : 'warn' };
 }
 function pair(view, name, value) { const node = view.el('div'); node.append(view.el('dt', name), view.el('dd', value)); return node; }
+function automaticChatStatus(instance, current, now) {
+  if (!current || !instance?.available || !bridgeFresh(instance, now)) return 'Unverified';
+  if (instance.settings?.paused || instance.settings?.autoReply === false) return 'Off';
+  if (!instance.settings?.autoReply || !instance.coordination?.available) return 'Unverified';
+  if (instance.coordination.paused) return 'On hold for all accounts';
+  if (!instance.authorized || !instance.connected || !instance.channel || instance.settings.allowedChannel !== instance.channel) return 'Waiting for chat';
+  if (!instance.streamContext?.isLive || !instance.streamContext.streamId || instance.streamContext.channel !== instance.channel) return 'Waiting for a live broadcast';
+  if (!instance.watch?.enabled || instance.watch.channel !== instance.channel || !['playing', 'ad'].includes(instance.watch.status) || !fresh(instance.watch.checkedAt, BRIDGE_FRESH_MS, now)) return 'Waiting for playback';
+  return 'Enabled';
+}
 function sessionStatus(instance, state, now) {
   if (!hostFresh(state, now)) return { title: 'Status stale', tone: 'warn' };
   if (!bridgeFresh(instance, now)) return { title: 'Session unverified', tone: 'warn' };
@@ -629,6 +639,7 @@ function renderCards(view, state, now) {
     heading.append(title, pill(view, session.title, session.tone));
     const details = view.el('dl', undefined, 'card-details');
     details.append(pair(view, 'Channel', instance?.channel ? `#${instance.channel}` : 'No channel'), pair(view, 'Playback', playing.title), pair(view, 'Chat connection', stale ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected'), pair(view, 'Browser bridge', stale ? 'Unverified' : bridgeFresh(instance, now) ? 'Current' : 'Unavailable'), pair(view, 'Sub & gift alerts', stale ? 'Unverified' : instance?.connected && instance?.eventFeed?.status === 'enabled' ? 'Listening' : 'Unavailable'));
+    details.append(pair(view, 'Automatic chat', automaticChatStatus(instance, !stale, now)));
     const recovery = chatRecovery(instance, !stale, now);
     if (recovery && !instance.connected && !instance.settings?.paused) details.append(pair(view, 'Chat recovery', recovery.title));
     const reason = view.el('p', stale ? 'Showing last known account data. Waiting for a fresh host response.' : bridgeReason(instance, now) || text(instance?.activity?.reason, 'Ready for account controls.'), 'card-reason');
@@ -745,7 +756,13 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n.stop.textContent = operation?.action === 'stop' && (operation.transport || active(operation.command, now)) ? `${commandState(operation.command)}…` : 'Stop';
   const settings = instance?.settings;
   const currentBridge = online && bridgeFresh(instance, now);
-  n['settings-current'].textContent = !instance?.browser?.lastSeenAt ? 'Settings unverified. Waiting for the browser’s first check-in.' : settings ? `${currentBridge ? 'Current session' : 'Last reported settings'}: ${settings.chatMode === 'participate' ? 'Occasional participation' : 'Mentions'} · ${settings.replySource === 'ai' ? 'AI replies' : 'Bank replies'} · recovery ${settings.autoResume ? 'on' : 'off'} · ${settings.autoReply ? 'automatic replies on' : 'automatic replies off'}` : 'Current settings unavailable.';
+  const settingsLine = n['settings-current'];
+  if (!instance?.browser?.lastSeenAt || !settings) {
+    settingsLine.textContent = 'Settings unverified. Waiting for a browser check-in.';
+  } else {
+    const prefs = [settings.chatMode === 'participate' ? 'Occasional participation' : 'Mentions', settings.replySource === 'ai' ? 'AI replies' : 'Bank replies', `recovery ${settings.autoResume ? 'on' : 'off'}`];
+    settingsLine.textContent = `${currentBridge ? 'Current session' : 'Last reported settings'}: ${prefs.join(' · ')} · Automatic chat · ${automaticChatStatus(instance, online, now)}`;
+  }
   const video = playback(instance, now, !online);
   n['status-checks'].replaceChildren(check(view, 'Chat connection', !online ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected', instance?.channel ? `#${instance.channel}` : 'No current chat channel', online && instance?.connected ? 'good' : 'warn'), check(view, 'Video playback', video.title, video.detail, video.tone), check(view, 'Browser bridge', !online ? 'Unverified' : currentBridge ? 'Current' : 'Unavailable', `Last check-in: ${age(instance?.browser?.lastSeenAt, now)}`, currentBridge ? 'good' : 'warn'), check(view, 'Playback access', !online ? 'Unverified' : instance?.permissions?.playbackAccess === true ? 'Granted' : 'Required', !online ? 'Waiting for a fresh host response.' : instance?.permissions?.playbackAccess === true ? 'Permission is separate from playback.' : 'Grant in the extension fallback controls.', online && instance?.permissions?.playbackAccess === true ? 'good' : 'warn'));
   const recovery = chatRecovery(instance, online, now);

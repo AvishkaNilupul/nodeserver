@@ -133,6 +133,35 @@ test('native drafts abstain from reporting the player’s progress and preserve 
     t.diagnostic(JSON.stringify({ unsupportedPlayerQuestions: 11, noScore, answer, correction }));
   });
 
+test('native drafts answer game shorthand with the listing and distinguish a game from a location',
+  { skip: process.env.COMPANION_QA_DEVICE_MODEL !== '1' }, async () => {
+    const ask = (text, stream) => generateOperatorDraft({ ...context, messages: [], stream, target: { author: 'viewer', text } },
+      { selectedConversation: true });
+    for (const text of ['We back to SM64?', 'are we back to sm64?', 'Are we back to playing Hades?', 'We back to Deadlock?', 'What game is this?']) {
+      assert.equal(await ask(text, { category: 'Deadlock' }), 'Twitch lists this stream under Deadlock.', text);
+    }
+    await assert.rejects(ask('We back to SM64?', { title: 'Playing SM64?' }), errorCode('no_reply'));
+    for (const text of ['We back to the bridge?', 'We back to 1080p?', 'Are we back to Deadlock tomorrow?', 'Are we back to playing Hades tomorrow?', 'What game are we playing next week?']) {
+      await assert.rejects(ask(text, { category: 'Deadlock' }), errorCode('no_reply'), text);
+    }
+  });
+
+test('native check-ins avoid unsupported personal activity and ambiguous theories retain their speaker',
+  { skip: process.env.COMPANION_QA_DEVICE_MODEL !== '1' }, async () => {
+    const ask = (text, messages) => generateOperatorDraft({ ...context, messages, target: { author: 'viewer', text } },
+      { selectedConversation: true });
+    const guess = { author: 'viewer', text: 'The Vue update could be causing the OBS issue.' };
+    const aside = { author: 'viewer', text: 'yeah fair' };
+    for (const text of ['how is everyone?', 'hey, how’s everybody doing tonight?', '@operator how are you?']) {
+      assert.equal(await ask(text, [guess, aside]), 'Hey! How’s it going?');
+    }
+    for (const text of ["You think it's the what?", 'What did you think was causing it?', 'What caused the OBS issue?']) {
+      await assert.rejects(ask(text, [guess, aside]), errorCode('no_reply'), text);
+    }
+    const own = { author: 'operator', text: 'The capture source might be muted.' };
+    assert.equal(await ask("You think it's the what?", [guess, own]), 'My earlier message was “The capture source might be muted.”');
+  });
+
 test('propagates unavailable model and handles malformed or excessive output without revealing it', async () => {
   await assert.rejects(generateOperatorDraft(context, { spawnImpl: fixture('process.exit(69)') }), errorCode('model_unavailable'));
   for (const raw of ['invalid response containing the fixture secret', 'x'.repeat(2500)]) {

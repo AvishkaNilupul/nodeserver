@@ -34,7 +34,7 @@ test('all four accounts receive independent review jobs and only the confirmed n
   for (const account of f.instances) {
     account.chat.messages = [
       msg('old', 'viewerone', 'Did the left turn tighten?', 20_000),
-      msg('related', 'viewerone', 'So brake before the crest?', 4000, { replyParentId: 'own' }),
+      msg('related-' + account.id, 'viewerone', 'So brake before the crest?', 4000, { replyParentId: 'own' }),
       msg('crowd', 'otherperson', 'Loved the livery', 3000),
       msg('friend', logins[(ids.indexOf(account.id) + 1) % 4], 'Trying the hard tyres?', 2500),
       msg('bot', 'modaccount', 'Time to redeem rewards', 2000, { isBot: true }),
@@ -56,7 +56,7 @@ test('all four accounts receive independent review jobs and only the confirmed n
   for (const account of f.instances) {
     assert.deepEqual(f.status('draft-1', account).result, { text: 'Yeah, just before the red post.', reason: 'Draft reply to @viewerone.',
       account: account.account, channel, targetAuthor: 'viewerone', streamId: '123',
-      target: { id: 'related', author: 'viewerone', text: 'So brake before the crest?', at: start - 4000 } });
+      target: { id: 'related-' + account.id, author: 'viewerone', text: 'So brake before the crest?', at: start - 4000 } });
     assert.equal(f.service.decorate(account).controls.pending, null);
     assert.equal(account.settings.replySource, 'local');
   }
@@ -391,10 +391,95 @@ test('expiration releases per-account capacity, and host shutdown aborts all out
   assert.equal(f.status().state, 'expired');
   assert.ok(f.calls[0].signal.aborted);
   await f.service.request('primary', body('newer'));
+  f.instances[3].chat.messages[0].id = 'independent';
   await f.service.request('fourth', body('newest'));
   f.service.stop();
   assert.ok(f.calls[1].signal.aborted && f.calls[2].signal.aborted);
   await assert.rejects(f.service.request('primary', body('late')), { status: 503 });
   f.advance(300_000);
   assert.equal(f.status(), undefined);
+});
+
+test('four simultaneous reviewers generate one draft for a shared message even with different receive times', async t => {
+  const f = fixture(t);
+  f.instances.forEach((a, i) => { a.chat.messages[0].at -= 2000 + i * 37; });
+  const attempts = await Promise.allSettled(ids.map(id => f.service.request(id, body())));
+  const acceptedIndex = attempts.findIndex(result => result.status === 'fulfilled');
+  assert.ok(acceptedIndex >= 0);
+  const owner = f.instances[acceptedIndex], others = f.instances.filter(a => a !== owner);
+  for (const result of attempts.filter(result => result.status !== 'fulfilled')) {
+    assert.equal(result.reason.code, 'no_conversation');
+    assert.match(result.reason.message, new RegExp('draft in review on @' + owner.account));
+  }
+  assert.equal(f.calls.length, 1);
+  f.calls[0].resolve('The left turn was tighter.'); await nextTurn();
+  f.advance(86_000);
+  for (const a of f.instances) a.checkedAt = a.browser.lastSeenAt = start + 86_000;
+  for (const a of others) await assert.rejects(f.service.request(a.id, body('refresh')), { code: 'no_conversation' });
+  assert.equal(f.calls.length, 1);
+  assert.equal((await f.service.request(owner.id, body())).command.result.text, 'The left turn was tighter.');
+});
+
+test('an older asynchronous snapshot cannot withdraw a newer peer reservation', async t => {
+  const pending = [];
+  const f = fixture(t, { snapshot: () => new Promise(resolve => pending.push(resolve)) });
+  const old = f.service.request('primary', body()), newer = f.service.request('test', body());
+  const stale = structuredClone(f.instances);
+  stale[1].chat.messages = [];
+  pending[1]({ instances: f.instances }); await newer;
+  pending[0]({ instances: stale });
+  await assert.rejects(old, /in review on @secondhost/);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.status('draft-1', f.instances[1]).state, 'running');
+});
+
+test('an abstention, error, Stop, or withdrawn source frees the room message for another reviewer', async t => {
+  for (const release of ['abstain', 'error', 'stop', 'withdraw']) {
+    const f = fixture(t);
+    await f.service.request('primary', body());
+    if (release === 'abstain') f.calls[0].reject(Object.assign(new Error(), { code: 'no_reply' }));
+    if (release === 'error') f.calls[0].reject(new Error());
+    if (release === 'stop') f.service.invalidate('primary');
+    if (release === 'withdraw') {
+      f.calls[0].resolve('Brake earlier.');
+      await nextTurn();
+      f.account.chat.messages = [];
+    }
+    await nextTurn();
+    assert.equal((await f.service.request('test', body())).command.state, 'running', release);
+    assert.equal(f.calls.length, 2);
+  }
+});
+
+test('reservations respect separate channels, broadcasts, source IDs and uniquely named turns', async t => {
+  const f = fixture(t);
+  const [, otherRoom, otherStream, named] = f.instances;
+  otherRoom.channel = otherRoom.settings.allowedChannel = otherRoom.streamContext.channel = otherRoom.chat.messages[0].channel = 'elsewhere';
+  otherStream.streamContext.streamId = '456';
+  const direct = msg('direct', 'viewertwo', 'Fourthhost, which lap?');
+  for (const a of [f.account, named]) a.chat.messages.push(direct);
+  for (const a of f.instances) assert.equal((await f.service.request(a.id, body())).command.state, 'running');
+  assert.equal(f.contexts[0].target.author, 'viewerone');
+  assert.equal(f.contexts[3].target.text, direct.text);
+  const unknown = fixture(t);
+  unknown.account.streamContext = null;
+  await unknown.service.request('primary', body());
+  await assert.rejects(unknown.service.request('third', body()), /in review on @mainhost/);
+});
+
+test('submitting a reviewed reply withdraws alternate wording and prevents any second review of that source', async t => {
+  const f = fixture(t);
+  await f.service.request('primary', body());
+  f.calls[0].resolve('The left turn was tighter.'); await nextTurn();
+  await f.service.request('primary', body('other-wording'));
+  f.calls[1].resolve('The left was tighter.'); await nextTurn();
+  const send = { requestId: 'review-send:fixture:draft-1', action: 'send', params: { text: 'Left was tighter.' } };
+  const claim = f.service.claimSend(f.account, f.instances, 'draft-1', send);
+  assert.ok(claim);
+  assert.equal(f.service.claimSend(f.account, f.instances, 'draft-1', send), claim);
+  assert.equal(f.status('other-wording').state, 'cancelled');
+  assert.equal(f.service.claimSend(f.account, f.instances, 'other-wording', { ...send, requestId: 'review-send:two:other-wording' }), null);
+  f.service.invalidate('primary');
+  for (const id of ids) await assert.rejects(f.service.request(id, body('replay')), /already submitted for sending/);
+  assert.equal(f.calls.length, 2);
 });
