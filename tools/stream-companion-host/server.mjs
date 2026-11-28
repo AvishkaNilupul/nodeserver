@@ -21,6 +21,10 @@ const STATIC = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/ap
   ['/accounts.js', ['accounts.js', 'text/javascript; charset=utf-8']], ['/accounts.css', ['accounts.css', 'text/css; charset=utf-8']],
   ['/controller-path.js', ['controller-path.js', 'text/javascript; charset=utf-8']],
   ['/clips.js', ['clips.js', 'text/javascript; charset=utf-8']], ['/clips.css', ['clips.css', 'text/css; charset=utf-8']]]);
+const LOCAL_WATCH_ASSETS = new Map([
+  ['/watch', ['watch.html', 'text/html; charset=utf-8']],
+  ['/watch.js', ['watch.js', 'text/javascript; charset=utf-8']]
+]);
 const REMOTE_GET = new Set([...STATIC.keys(), '/api/status', '/api/accounts', '/api/channels', '/api/clips', '/api/director']);
 const DIRECTOR_HISTORY = /^\/api\/director\/history\/(all|primary|test|third|fourth)\/([0-9]{1,16})$/;
 const CHANNEL_LOOKUP = /^\/api\/channels\/([a-z0-9_]{3,25})$/;
@@ -236,7 +240,7 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         return send(res, 200, keys[0] === 'paused' ? store.setPaused(body.paused) : store.setExchangesEnabled(body.exchangesEnabled));
       }
       if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
-      const asset = STATIC.get(path); if (!asset) return send(res, 404, { error: 'Not found.' });
+      const asset = STATIC.get(path) || (!remote && LOCAL_WATCH_ASSETS.get(path)); if (!asset) return send(res, 404, { error: 'Not found.' });
       try {
         const content = await readFileImpl(new URL(`./public/${asset[0]}`, import.meta.url));
         return send(res, 200, asset[1].startsWith('text/html')

@@ -49,6 +49,7 @@ export function watchPage() {
     if (!media.ids.has(video)) media.ids.set(video, `v${media.next++}`);
     result.videoId = media.ids.get(video);
     result.hasVideo = true;
+    result.decodedHeight = video.videoHeight || 0;
     result.currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
     result.readyState = video.readyState;
     result.paused = video.paused;

@@ -781,6 +781,7 @@ if (globalThis.document?.querySelector('[data-accounts-app]')) {
   const basePath = basePathFromModule(import.meta.url);
   const document = globalThis.document, id = accountFromPath(globalThis.location.pathname, basePath), view = createAccountsView(document);
   configureControllerMount(document, basePath);
+  if (!basePath && !id) document.getElementById('extra-watch-link').hidden = false;
   const controller = createAccountsController({ basePath, profileProvider: savedDirectorProfile, onState: state => renderAccounts(view, state, { id, canCommand: controller.canCommand }) });
   if (id) {
     const n = view.nodes;

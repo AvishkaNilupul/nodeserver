@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watch in this profile · Stream Companion</title>
+  <link rel="stylesheet" href="/accounts.css">
+  <script type="module" src="/watch.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="page-header"><a href="/accounts">Back to accounts</a></header>
+    <div class="page-heading"><div><h1>Watch in this Chrome profile</h1>
+      <p>Open this page in each extra account’s Chrome profile. Twitch opens in this tab with that profile’s sign-in and native chat. Close the tab to stop watching.</p>
+    </div></div>
+    <section class="panel">
+      <form id="watch-channel-form">
+        <div class="quick-lookup-row">
+          <label for="watch-channel">Twitch channel<input id="watch-channel" required pattern="[A-Za-z0-9_]{3,25}" maxlength="25" placeholder="Channel name" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
+          <button class="primary" type="submit">Open watch tab</button>
+        </div>
+        <p id="watch-error" role="alert" hidden></p>
+      </form>
+      <p>Tile your watch windows so each player stays visible. A fully covered window can pause.</p>
+      <details><summary>Automatic low video quality</summary>
+        <p>In this profile, open <code>chrome://extensions</code>, enable Developer mode, choose <strong>Load unpacked</strong>, and select <code>~/projects/stream-companion-host/watch-only-extension</code>. You only need to do this once per profile.</p>
+      </details>
+    </section>
+  </main>
+</body>
+</html>

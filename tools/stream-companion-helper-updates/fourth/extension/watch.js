@@ -1,9 +1,10 @@
 import { watchPage } from './watch-page.js';
+import { preferLowWatchQuality } from './watch-quality.js';
 
 export const WATCH_ACCESS = { permissions: ['scripting'], origins: ['https://www.twitch.tv/*'] };
 const STORAGE_KEY = 'watchSession';
 const RESERVED = new Set(['directory', 'settings', 'downloads', 'videos', 'subscriptions', 'inventory', 'drops', 'wallet', 'search', 'popout', 'clip', 'clips', 'collections', 'dashboard', 'login', 'signup', 'logout', 'activate', 'turbo', 'jobs', 'p', 'friends', 'messages', 'store', 'products', 'prime', 'team', 'teams', 'bits', 'checkout', 'payments', 'moderator']);
-const OFF = { enabled: false, tabId: null, account: '', channel: '', url: '', status: 'off', detail: 'Playback checks are off.', checkedAt: 0, lastProgressAt: 0, error: '', syncStatus: 'idle', syncError: '', generation: 0, sessionId: '', documentId: '', videoId: '' };
+const OFF = { decodedHeight: 0, qualityDocument: '', qualityChannel: '', requestedHeight: 0, enabled: false, tabId: null, account: '', channel: '', url: '', status: 'off', detail: 'Playback checks are off.', checkedAt: 0, lastProgressAt: 0, error: '', syncStatus: 'idle', syncError: '', generation: 0, sessionId: '', documentId: '', videoId: '' };
 
 export function watchChannel(raw) {
   try {
@@ -34,6 +35,7 @@ export function playbackState(snapshot, previous = {}, now = Date.now()) {
   else if (now - (lastProgressAt || waitingSince) >= 30_000) { status = 'stalled'; detail = 'The player has not advanced for at least 30 seconds.'; }
   else if (snapshot.readyState < 3) { status = 'buffering'; detail = 'The native player is buffering.'; }
   else if (lastProgressAt && now - lastProgressAt < 15_000) { status = snapshot.ad ? 'ad' : 'playing'; detail = snapshot.ad ? 'A normal Twitch ad is playing.' : 'The native video advanced at the last checkpoint.'; }
+  if (status === 'playing' && snapshot.decodedHeight) detail += ` Decoding ${snapshot.decodedHeight}p.`;
   return { ...snapshot, status, detail, checkedAt: now, lastProgressAt, waitingSince, error: snapshot.error ? detail : '' };
 }
 
@@ -93,7 +95,7 @@ export class WatchSession {
       // event after a raid must not cancel the still-valid channel validation.
       this.epoch++; this.lastPollAt = 0;
       if (changed) this.hooks.onNavigation?.(token);
-      return { ...token, status: channel ? 'checking' : 'unavailable', detail: channel ? 'Checking the new stream page.' : 'The tracked tab is no longer on a stream channel.', checkedAt: 0, lastProgressAt: 0, documentId: '', videoId: '', currentTime: 0, hasVideo: false, waitingSince: 0, loading, error: '', syncStatus: changed ? 'checking' : old.syncStatus, syncError: changed ? '' : old.syncError };
+      return { ...token, status: channel ? 'checking' : 'unavailable', detail: channel ? 'Checking the new stream page.' : 'The tracked tab is no longer on a stream channel.', checkedAt: 0, lastProgressAt: 0, documentId: '', videoId: '', decodedHeight: 0, currentTime: 0, hasVideo: false, waitingSince: 0, loading, error: '', syncStatus: changed ? 'checking' : old.syncStatus, syncError: changed ? '' : old.syncError };
     });
     if (!token || !changed || !await this.current(token)) return this.state();
     try {
@@ -149,7 +151,27 @@ export class WatchSession {
       if ((tab.pendingUrl || tab.url) !== s.url || tab.status === 'loading') { await this.navigate(tab.pendingUrl || tab.url, { loading: tab.status === 'loading' }); return this.state(); }
       const raw = snapshot.result;
       const bounded = { documentId: snapshot.documentId, videoId: typeof raw.videoId === 'string' && /^v[1-9]\d{0,8}$/.test(raw.videoId) ? raw.videoId : '', url: raw.url, hasVideo: !!raw.hasVideo, currentTime: Number.isFinite(raw.currentTime) && raw.currentTime >= 0 ? raw.currentTime : 0, readyState: Math.max(0, Math.min(4, Number(raw.readyState) || 0)), paused: !!raw.paused, ended: !!raw.ended, ad: !!raw.ad, offline: !!raw.offline, error: !!raw.error };
-      await this.patch(playbackState(bounded, s), token);
+      bounded.decodedHeight = Number.isInteger(raw.decodedHeight) && raw.decodedHeight > 0 && raw.decodedHeight <= 16384 ? raw.decodedHeight : 0;
+      const next = playbackState(bounded, s);
+      if (next.status === 'playing' && next.decodedHeight && s.syncStatus === 'aligned'
+        && (s.qualityDocument !== snapshot.documentId || s.qualityChannel !== s.channel)) {
+        next.qualityDocument = snapshot.documentId;
+        next.qualityChannel = s.channel;
+        next.requestedHeight = 0;
+        // Address the exact observed document. Navigations and missing menus
+        // must never downgrade the health of a working player.
+        try {
+          const guard = { sessionId: token.sessionId, generation: token.generation, tabId: token.tabId };
+          const applied = await this.api.scripting.executeScript({
+            target: { tabId: s.tabId, documentIds: [snapshot.documentId] }, world: 'ISOLATED',
+            func: preferLowWatchQuality, args: [s.url, guard]
+          });
+          const height = applied.find(row => row.documentId === snapshot.documentId)?.result;
+          if (Number.isInteger(height) && height > 0 && height <= 16384) next.requestedHeight = height;
+        } catch {}
+        if (epoch !== this.epoch || !await this.current(token)) return this.state();
+      }
+      await this.patch(next, token);
       return this.state();
     } catch (e) {
       const s = await this.raw();

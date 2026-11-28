@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Companion Watch Quality",
+  "version": "1.0.0",
+  "description": "Choose a lower video quality for watch tabs opened from the local Accounts page.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.twitch.tv/*"
+      ],
+      "js": [
+        "watch-only.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
