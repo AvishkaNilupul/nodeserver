@@ -95,6 +95,39 @@ test('conflict retains local edits and never automatically repeats the mutation'
   assert.equal(posts, 1); assert.equal(c.getState().bank.entries[0].lines[0], 'keep me'); assert.equal(c.getState().conflict, true); assert.equal(c.canSave(), false);
 });
 
+test('a Mac connection refresh preserves unsaved bank changes and allows explicit Save after fresh status', async () => {
+  const posts = []; let token = 'initial-token';
+  const c = ctrl(async (_url, options) => {
+    if (options.method === 'GET') return response(snapshot({ csrfToken: token }));
+    posts.push(options.headers['X-CSRF-Token']); token = 'renewed-token';
+    return response({ code: 'controller_refresh_required' }, 409);
+  });
+  await c.refresh(); c.editEntry('hello', 'lines', 'unsaved edit');
+  assert.equal(await c.saveBank(), false);
+  assert.deepEqual(posts, ['initial-token']); assert.equal(c.getState().data.csrfToken, 'renewed-token');
+  assert.equal(c.getState().conflict, false); assert.equal(c.canSave(), true);
+  assert.deepEqual(c.getState().bank.entries[0].lines, ['unsaved edit']);
+});
+
+test('a proven save overtaken by a second tab releases the save receipt while preserving newer local work', async () => {
+  for (const editing of [false, true]) {
+    let data = snapshot(); const held = deferred(), posts = [];
+    const c = ctrl(async (_url, options) => {
+      if (options.method === 'GET') return response(data);
+      const input = JSON.parse(options.body); posts.push(input); await held.promise;
+      data = snapshot({ revision: 3, lastMutation: { requestId: 'tab-two', revision: 3 } });
+      data.bank.entries[0].lines = ['from tab two'];
+      return response({ ok: true, requestId: input.requestId, revision: 2 });
+    });
+    await c.refresh(); c.editEntry('hello', 'lines', 'first edit'); const saving = c.saveBank();
+    if (editing) c.editEntry('hello', 'lines', 'newer edit');
+    held.resolve(); await saving;
+    assert.equal(posts.length, 1); assert.equal(c.getState().mutation, null);
+    assert.equal(c.getState().dirty, editing); assert.equal(c.getState().conflict, editing);
+    assert.deepEqual(c.getState().bank.entries[0].lines, [editing ? 'newer edit' : 'from tab two']);
+  }
+});
+
 test('lost save response reconciles the original request by host mutation identity without retry', async () => {
   let data = snapshot(), posts = 0;
   const c = ctrl(async (_url, options) => { if (options.method === 'POST') { posts++; const body = JSON.parse(options.body); data = snapshot({ bank: body.bank, revision: 2, lastMutation: { requestId: body.requestId, revision: 2 } }); throw Error('transport lost'); } return response(data); });
@@ -149,10 +182,46 @@ test('only host-proven cancellable plans can be cancelled; unknown cancel is not
 
 test('history paging has fixed bounded path and ignores a late page after account filter changes', async () => {
   const held = deferred(), paths = [];
-  const c = ctrl(async (url) => { paths.push(url); if (url.includes('/history/')) return held.promise; return response(snapshot({ nextBeforeId: 25 })); }, { basePath: '/admin/stream-companion' });
+  const c = ctrl(async (url) => { paths.push(url); if (url.includes('/history/all/')) return held.promise;
+    if (url.includes('/history/primary/0')) return response({ history: [{ id: 9, accountId: 'primary', at }], nextBeforeId: 9 });
+    return response(snapshot({ nextBeforeId: 25 })); }, { basePath: '/admin/stream-companion' });
   await c.refresh(); const old = c.loadHistory(); c.choose('historyAccount', 'primary'); held.resolve(response({ history: [{ id: 20, accountId: 'test', at }], nextBeforeId: 10 })); await old;
-  assert.equal(paths[1], '/admin/stream-companion/api/director/history/all/25'); assert.equal(c.getState().older.length, 0); assert.equal(c.getState().nextBeforeId, 0); assert.equal(c.getState().historyLoading, false);
-  await c.refresh(); assert.equal(c.getState().nextBeforeId, 0, 'global polling cannot replace the selected account cursor');
+  assert.equal(paths[1], '/admin/stream-companion/api/director/history/all/25'); assert.equal(c.getState().older.length, 0); assert.equal(c.getState().historyLoading, false);
+  await c.refresh(); assert.equal(c.getState().nextBeforeId, 9, 'global polling cannot replace the selected account cursor');
+  assert.deepEqual(historyRows(c.getState(), 'primary').map(row => row.id), [9]);
+});
+
+test('live history retains the boundary of an older page while the global head advances', async () => {
+  const range = (high, low) => Array.from({ length: high - low + 1 }, (_, index) => ({ id: high - index, accountId: 'third', at: high - index }));
+  let high = 100; const held = deferred();
+  const c = ctrl(async url => url.includes('/history/') ? held.promise : response(snapshot({ history: range(high, high - 49), nextBeforeId: high - 49 })));
+  await c.refresh(); const older = c.loadHistory();
+  high++; await c.refresh();
+  held.resolve(response({ history: range(50, 1), nextBeforeId: null })); await older;
+  high++; await c.refresh();
+  assert.deepEqual(historyRows(c.getState()).map(row => row.id), range(102, 1).map(row => row.id));
+  high = 220; await c.refresh();
+  assert.equal(c.getState().nextBeforeId, 171, 'a disjoint head can fetch the missed interval');
+  assert.equal(historyRows(c.getState()).length, 50);
+});
+
+test('account detail polls its own latest history even when all 50 global rows belong to another profile', async () => {
+  const paths = [], document = doc();
+  let delivery = 'pending', offline = false;
+  const c = ctrl(async url => {
+    paths.push(url);
+    if (!url.includes('/history/')) return response(snapshot({ history: Array.from({ length: 50 }, (_, i) => ({ id: 100 - i, accountId: 'test', at })) }));
+    if (offline) throw new Error('unreachable');
+    return response({ history: [{ id: 3, accountId: 'fourth', at, text: 'older account message', delivery }], nextBeforeId: null });
+  }, { historyAccount: 'fourth', basePath: '/admin/stream-companion' });
+  await c.refresh(); renderAccountDirector(document, c.getState(), 'fourth', at);
+  assert.deepEqual(paths, ['/admin/stream-companion/api/director', '/admin/stream-companion/api/director/history/fourth/0']);
+  assert.match(document.getElementById('delivery-history').textContent, /older account message/);
+  delivery = 'confirmed'; await c.refresh(); renderAccountDirector(document, c.getState(), 'fourth', at);
+  assert.match(document.getElementById('delivery-history').textContent, /Delivery confirmed/);
+  offline = true; await c.refresh(); renderAccountDirector(document, c.getState(), 'fourth', at);
+  assert.match(document.getElementById('central-message-notice').textContent, /history could not be refreshed/);
+  assert.match(document.getElementById('delivery-history').textContent, /older account message/);
 });
 
 test('timeline preserves uncertain delivery and imported text-unavailable provenance without fake confirmation', () => {

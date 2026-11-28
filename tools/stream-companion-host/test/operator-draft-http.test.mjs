@@ -14,7 +14,7 @@ const remoteToken = 'synthetic-browser-pairing'.repeat(2), csrfToken = 'fixture-
 const deviceQA = process.env.COMPANION_QA_DEVICE_MODEL === '1';
 const draftBody = requestId => ({ requestId, action: 'draft', params: { mode: 'reply' } });
 
-async function fixture(t, cannedReply) {
+async function fixture(t, cannedReply, dispatch) {
   const now = Date.now();
   const store = new HostStore({ file: ':memory:', clients, directorEnabled: true });
   const stream = { channel, isLive: true, streamId: '111', checkedAt: now, title: 'Team finals', gameName: 'Racing' };
@@ -31,12 +31,13 @@ async function fixture(t, cannedReply) {
       }) }),
       command: async (id, body) => {
         helperCalls.push({ id, body });
+        if (dispatch) return dispatch(id, body);
         return { ok: true, command: { ...body, state: 'queued' } };
       } },
     browserLauncher: { available: () => false },
     generateDraft(context, options) {
       modelCalls.push(context);
-      if (deviceQA) return generateOperatorDraft(context, options);
+      if (deviceQA && !dispatch) return generateOperatorDraft(context, options);
       if (cannedReply) return cannedReply;
       const corrected = context.messages.find(m => m.text.startsWith('Correction:'));
       return corrected?.text.slice('Correction: '.length) || 'Which score did you mean?';
@@ -135,6 +136,58 @@ test('local and paired account pages draft corrected scores and dispatch only an
   assert.equal(approved.status, 200);
   assert.equal(approved.data.command.state, 'queued');
   f.assertDeliveryState(4, [{ id: 'third', body: edited }]);
+});
+
+test('phone and desktop using the same draft can dispatch only one reviewed send', async t => {
+  let beginDispatch, release;
+  const started = new Promise(resolve => { beginDispatch = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, 'Blue leads.', async (_id, body) => {
+    beginDispatch(); await held;
+    return { ok: true, command: { ...body, state: 'queued' } };
+  });
+  f.profiles[0].chat.messages = [f.row('question', viewer, 'Who leads?', 500)];
+  const headers = { ...f.local, 'X-CSRF-Token': csrfToken }, path = '/api/accounts/primary/command';
+  const created = await f.request(path, headers, draftBody('one-draft'));
+  assert.equal(created.status, 200);
+  let ready = false;
+  for (let i = 0; i < 160; i++) {
+    const snapshot = await f.request('/api/accounts', f.local);
+    if (snapshot.data.instances[0].controls.recent.some(c => c.requestId === 'one-draft' && c.result?.text)) { ready = true; break; }
+    await sleep(50);
+  }
+  assert.ok(ready);
+  const desktop = { action: 'send', requestId: 'review-send:desktop:one-draft', params: { text: 'The blue side leads.' } };
+  const phone = { ...desktop, requestId: 'review-send:phone:one-draft', params: { text: 'Blue is ahead.' } };
+  const first = f.request(path, headers, desktop);
+  await started;
+  const competing = f.request(REMOTE_PREFIX + path, { ...f.remote, 'X-CSRF-Token': csrfToken }, phone);
+  const repeat = f.request(path, headers, desktop);
+  release();
+  const [accepted, duplicate, same] = await Promise.all([first, competing, repeat]);
+  assert.equal(accepted.status, 200); assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.data.code, 'review_used'); assert.deepEqual(same.data, accepted.data);
+  const edited = await f.request(path, headers, { ...desktop, params: { text: 'A different edit.' } });
+  assert.equal(edited.status, 409);
+  const current = await f.request('/api/accounts', f.local);
+  const draft = current.data.instances[0].controls.recent.find(c => c.requestId === 'one-draft');
+  assert.equal(draft.state, 'cancelled'); assert.equal(draft.result, undefined);
+  f.assertDeliveryState(0, [{ id: 'primary', body: desktop }]);
+});
+
+test('losing the helper acknowledgement never hands a reviewed send to the helper twice', async t => {
+  const f = await fixture(t, 'Blue leads.', () => { throw Object.assign(Error('Lost acknowledgement'), { status: 503 }); });
+  f.profiles[0].chat.messages = [f.row('question', viewer, 'Who leads?', 500)];
+  const path = '/api/accounts/primary/command', headers = { ...f.local, 'X-CSRF-Token': csrfToken };
+  assert.equal((await f.request(path, headers, draftBody('lost-ack'))).status, 200);
+  const polled = await f.request('/api/accounts', f.local);
+  assert.equal(polled.data.instances[0].controls.recent.find(c => c.requestId === 'lost-ack').state, 'completed');
+  const command = { requestId: 'review-send:desktop:lost-ack', action: 'send', params: { text: 'Blue leads.' } };
+  assert.equal((await f.request(path, headers, command)).status, 503);
+  assert.equal((await f.request(path, headers, command)).status, 503);
+  const duplicate = await f.request(path, headers, { ...command, requestId: 'review-send:phone:lost-ack' });
+  assert.equal(duplicate.data.code, 'review_used');
+  f.assertDeliveryState(0, [{ id: 'primary', body: command }]);
 });
 
 test('the reviewed route answers a viewer asking for advice and leaves passing commentary alone', async t => {

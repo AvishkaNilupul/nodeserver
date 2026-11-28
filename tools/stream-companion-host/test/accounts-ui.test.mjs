@@ -23,6 +23,132 @@ class Node {
 function view() { const nodes = new Map(); return createAccountsView({ getElementById: id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); }, createElement: tag => new Node(tag) }); }
 const visible = v => Object.values(v.nodes).map(node => node.textContent).join('\n');
 
+const sharedReview = (rid, text = 'The blue team leads.', time = at) => command({ requestId: rid, action: 'draft', params: { mode: 'reply' } },
+  { id: 'review:' + rid, createdAt: time, state: 'completed', result: { text, account: 'example_account', channel: 'example_channel', targetAuthor: 'viewer', streamId: '1234' } });
+
+test('a second tab or reload recovers the current reviewed draft through reads and leaves manual edits alone', async () => {
+  const row = instance(), data = snapshot({ instances: [row] }), calls = [];
+  const newTab = () => controller(async (url, options) => { calls.push(options.method); return reply(data); }, { basePath: '/admin/stream-companion' });
+  const openTab = newTab(); await openTab.refresh(); openTab.edit('primary', 'text', 'My own wording');
+  row.controls.recent = [sharedReview('remote-draft')];
+  const reopened = newTab(); await reopened.refresh(); await openTab.refresh();
+  assert.equal(reopened.form('primary').text, 'The blue team leads.');
+  assert.equal(reopened.form('primary').draftRoom.requestId, 'remote-draft');
+  assert.equal(openTab.form('primary').text, 'My own wording');
+  assert.equal(openTab.form('primary').draftResult.text, 'The blue team leads.');
+  reopened.edit('primary', 'text', ''); await reopened.refresh();
+  assert.equal(reopened.form('primary').text, '');
+  row.controls.recent.unshift(sharedReview('newer-draft', 'Blue leads by two.', at + 1));
+  await reopened.refresh(); await openTab.refresh();
+  assert.equal(openTab.form('primary').draftResult.text, 'Blue leads by two.');
+  assert.equal(openTab.form('primary').text, 'My own wording');
+  assert.deepEqual([...new Set(calls)], ['GET']);
+});
+
+test('a later reviewed send from another tab retires the old composer and a reload cannot restore it', async () => {
+  const row = instance(), data = snapshot({ instances: [row] });
+  const c = controller(async (_, options) => {
+    if (options.method === 'GET') return reply(data);
+    const draft = sharedReview(JSON.parse(options.body).requestId);
+    row.controls.recent = [draft]; return reply({ ok: true, command: draft });
+  });
+  await c.refresh(); await c.command('primary', 'draft', { mode: 'reply' });
+  assert.equal(c.form('primary').text, 'The blue team leads.');
+  row.controls.recent.unshift(command({ requestId: 'review-send:peer:request-1', action: 'send' }, { createdAt: at + 1, state: 'completed' }));
+  await c.refresh();
+  assert.equal(c.form('primary').text, '');
+  const reopened = controller(async () => reply(data)); await reopened.refresh();
+  assert.equal(reopened.form('primary').text, '');
+});
+
+test('a stale status snapshot cannot erase a valid editable draft', async () => {
+  let data = snapshot();
+  const c = controller(async (_, options) => {
+    if (options.method === 'GET') return reply(data);
+    const draft = sharedReview(JSON.parse(options.body).requestId);
+    data.instances[0].controls.recent = [draft]; return reply({ ok: true, command: draft });
+  });
+  await c.refresh(); await c.command('primary', 'draft', { mode: 'reply' });
+  const current = data;
+  data = snapshot({ updatedAt: at - 14000 }); await c.refresh();
+  assert.equal(c.canCommand('primary', 'send'), false);
+  assert.equal(c.form('primary').text, 'The blue team leads.');
+  data = current; await c.refresh();
+  assert.equal(c.form('primary').text, 'The blue team leads.');
+  assert.equal(c.canCommand('primary', 'send'), true);
+});
+
+test('a lost or delayed command acknowledgment leaves an already observed terminal receipt intact', async () => {
+  for (const lost of [true, false]) {
+    const response = deferred(), data = snapshot(), row = data.instances[0];
+    let breakReads = false;
+    const c = controller(async (_, options) => {
+      if (options.method === 'GET') { if (breakReads) throw Error('offline'); return reply(data); }
+      const body = JSON.parse(options.body);
+      row.controls.recent = [sharedReview(body.requestId)];
+      await response.promise;
+      if (lost) throw Error('connection lost');
+      return reply({ ok: true, command: command(body, { state: 'running' }) });
+    });
+    await c.refresh(); const click = c.command('primary', 'draft', { mode: 'reply' });
+    await c.refresh();
+    assert.equal(c.getState().operations.primary.command.state, 'completed');
+    breakReads = true; response.resolve(); await click;
+    assert.equal(c.getState().operations.primary.command.state, 'completed');
+    assert.equal(c.getState().error, '');
+  }
+});
+
+test('a recent older snapshot cannot roll back a newer account switch', async () => {
+  const row = instance(), first = snapshot({ updatedAt: at - 500, instances: [row] });
+  row.controls.recent = [sharedReview('prior')];
+  const current = snapshot({ updatedAt: at, instances: [instance({ channel: 'second_room' })] });
+  let data = current;
+  const c = controller(async () => reply(data)); await c.refresh();
+  data = first; await c.refresh();
+  assert.equal(c.getState().data.instances[0].channel, 'second_room');
+  assert.equal(c.form('primary').text, '');
+});
+
+test('a competing Send conflict is final and the operator sees the review was already used', async () => {
+  const row = instance(), data = snapshot({ instances: [row] }), posts = [];
+  row.controls.recent = [sharedReview('shared-review')];
+  const c = controller(async (_, options) => {
+    if (options.method === 'GET') return reply(data);
+    posts.push(JSON.parse(options.body));
+    return { status: 409, ...reply({ code: 'review_used' }, false) };
+  });
+  await c.refresh();
+  assert.equal(await c.command('primary', 'send', { text: c.form('primary').text }), false);
+  assert.equal(c.getState().operations.primary.command.state, 'failed');
+  assert.match(c.getState().operations.primary.command.error, /already has a send request/);
+  assert.equal(c.canCommand('primary', 'send'), false);
+  await c.refresh(); assert.equal(posts.length, 1);
+});
+
+test('a superseded edit remains held while a newer shared preview expires independently', async () => {
+  const row = instance(), data = snapshot({ instances: [row] });
+  const c = controller(async () => reply(data));
+  const old = sharedReview('old'), newer = sharedReview('new', 'The orange team leads.', at + 1);
+  row.controls.recent = [old]; await c.refresh();
+  c.edit('primary', 'text', 'My edited earlier draft');
+  row.controls.recent.unshift(newer); await c.refresh();
+  assert.equal(c.form('primary').draftResult.text, newer.result.text);
+  assert.equal(c.form('primary').text, 'My edited earlier draft');
+  assert.equal(c.canCommand('primary', 'send'), false);
+  newer.state = 'cancelled'; await c.refresh();
+  assert.equal(c.form('primary').draftResult.title, 'Draft expired');
+  assert.equal(c.form('primary').text, 'My edited earlier draft');
+});
+
+test('an acknowledgment from an earlier host cannot restore a review missing from fresh account status', async () => {
+  const c = controller(async (_, options) => options.method === 'GET' ? reply(snapshot())
+    : reply({ ok: true, command: sharedReview(JSON.parse(options.body).requestId) }));
+  await c.refresh(); await c.command('primary', 'draft', { mode: 'reply' });
+  assert.equal(c.form('primary').text, '');
+  assert.equal(c.form('primary').draftRoom, undefined);
+});
+
 test('a quiet chat explains the missing viewer and immediately releases the draft button', async () => {
   const reason = 'There is no recent viewer message to reply to in this channel.';
   const c = controller(async (_, options) => options.method === 'GET' ? reply(snapshot()) : { status: 409, ...reply({ error: reason }, false) });

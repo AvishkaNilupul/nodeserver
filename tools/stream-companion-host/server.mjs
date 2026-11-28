@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { timingSafeEqual, randomBytes, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { HostStore } from './lib/store.mjs';
-import { createAccountManager } from './lib/accounts.mjs';
+import { createAccountManager, validateCommand } from './lib/accounts.mjs';
 import { createChannelDirectory } from './lib/channels.mjs';
 import { createBrowserLauncher, loadBrowserProfiles } from './lib/browser-launcher.mjs';
 import { createClipController } from './lib/clips.mjs';
@@ -206,12 +206,17 @@ export function createHostServer({ store, clients, accounts = createAccountManag
           // The gateway forwards opaque IDs. The review reference survives an
           // edit of the text without extending the helper's typed Send command.
           const reviewId = /^review-send:[a-z0-9_-]{1,40}:([a-z0-9_:-]{1,100})$/i.exec(body.requestId)?.[1];
+          const command = validateCommand(body);
           const value = await accountSnapshot({ fresh: true });
           const instance = value.instances.find(i => i.id === id);
-          const controls = instance && operatorDrafts?.decorate(instance, value.instances).controls;
-          if (!reviewId || !controls?.recent?.some(c => c.action === 'draft' && c.requestId === reviewId && c.state === 'completed'
-            && c.result?.targetAuthor && typeof c.result.text === 'string' && c.result.text.length > 0)) {
-            return send(res, 409, { code: 'review_expired', error: 'The viewer conversation changed. Request a fresh draft before sending.' });
+          try {
+            const claim = reviewId && instance && operatorDrafts?.claimSend(instance, value.instances, reviewId, command);
+            if (!claim) return send(res, 409, { code: 'review_expired', error: 'The viewer conversation changed. Request a fresh draft before sending.' });
+            claim.outcome ??= Promise.resolve().then(() => accounts.command(id, command));
+            return send(res, 200, await claim.outcome);
+          } catch (e) {
+            if (e.code === 'review_used') return send(res, 409, { code: e.code, error: e.message });
+            throw e;
           }
         }
         const result = await accounts.command(id, body);

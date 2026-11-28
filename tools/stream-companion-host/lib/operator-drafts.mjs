@@ -273,9 +273,25 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
       recent: [...(instance.controls?.recent || []), ...commands].sort((a, b) => b.createdAt - a.createdAt) } };
   }
 
+  // A request can be repeated by a browser after losing the HTTP response.
+  // Keep the result with the bounded draft receipt, including uncertain outcomes.
+  function claimSend(instance, peers, reviewId, body) {
+    const job = history(instance.id).find(j => j.command.requestId === reviewId);
+    if (!job) return null;
+    if (job.submission) {
+      if (job.submission.requestId === body.requestId && job.submission.text === body.params.text) return job.submission;
+      throw Object.assign(failure('This draft already has a send request. Check its delivery status before requesting another draft.'), { code: 'review_used' });
+    }
+    reconcile(job, instance, companionsFor(peers));
+    if (job.command.state !== 'completed' || !job.command.result?.text || !job.command.result.targetAuthor) return null;
+    job.submission = { requestId: body.requestId, text: body.params.text, outcome: null };
+    finish(job, 'cancelled', 'This draft has been used. Check the separate send request for delivery status.');
+    return job.submission;
+  }
+
   function stop() {
     closed = true;
     for (const id of profiles) invalidate(id);
   }
-  return { request, decorate, invalidate, stop };
+  return { request, decorate, invalidate, claimSend, stop };
 }

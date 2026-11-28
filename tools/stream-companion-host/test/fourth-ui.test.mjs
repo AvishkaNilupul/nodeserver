@@ -59,12 +59,16 @@ test('fourth account module boot polls central settings while held and publishes
   const saved = new Map(['document', 'location', 'fetch', 'setInterval', 'clearInterval', 'addEventListener', 'removeEventListener'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   t.after(() => { for (const [key, descriptor] of saved) if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; });
   const document = doc(), calls = [], data = director({ updatedAt: new Date().toISOString() });
-  Object.assign(globalThis, { document, location: { pathname: '/accounts/fourth' }, fetch: async (path, options) => { calls.push({ path, options }); return response(data); },
+  Object.assign(globalThis, { document, location: { pathname: '/accounts/fourth' }, fetch: async (path, options) => {
+    calls.push({ path, options });
+    return response(path === '/api/director/history/fourth/0' ? { history: [], nextBeforeId: null } : data);
+  },
     setInterval: () => 1, clearInterval() {}, addEventListener() {}, removeEventListener() {} });
   const module = await import(new URL(`../public/messages.js?fourth-bootstrap-${Date.now()}`, import.meta.url));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(accountFromPath('/accounts/fourth'), 'fourth'); assert.equal(accountFromPath('/admin/stream-companion/accounts/fourth', '/admin/stream-companion'), 'fourth');
-  assert.equal(module.savedDirectorProfile('fourth').id, 'fourth'); assert.equal(calls.length, 1); assert.equal(calls[0].path, '/api/director'); assert.equal(calls[0].options.method, 'GET');
+  assert.equal(module.savedDirectorProfile('fourth').id, 'fourth');
+  assert.deepEqual(calls.map(call => [call.path, call.options.method]), [['/api/director', 'GET'], ['/api/director/history/fourth/0', 'GET']]);
   assert.match(document.getElementById('central-message-settings').textContent, /Replies to mentions/);
 });
 
@@ -77,7 +81,7 @@ test('fourth missing browser import and filtered history remain explicit without
   await c.refresh(); const view = createMessagesView(doc(), c); renderMessages(view, c.getState(), c, at);
   assert.match(view.profiles.get('fourth').detail.textContent, /Saved messages: received\. Browser history: waiting/);
   assert.match(view.nodes['director-readiness'].textContent, /Waiting for every companion history/);
-  c.choose('historyAccount', 'fourth'); await c.loadHistory(); renderMessages(view, c.getState(), c, at);
+  c.choose('historyAccount', 'fourth'); await new Promise(resolve => setImmediate(resolve)); renderMessages(view, c.getState(), c, at);
   assert.equal(calls.at(-1).path, '/api/director/history/fourth/0'); assert.ok(calls.every(call => call.options.method === 'GET'));
   assert.match(view.nodes['director-history'].textContent, /fourth_account/); assert.match(view.nodes['director-history'].textContent, /Delivery uncertain · no retry/); assert.doesNotMatch(view.nodes['director-history'].textContent, /primary history|Delivery confirmed/);
 });

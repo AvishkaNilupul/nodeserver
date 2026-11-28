@@ -58,11 +58,11 @@ export function directorFresh(state, now = Date.now()) {
   return state.network === 'online' && Number.isFinite(at) && at <= now + 5000 && now - at <= FRESH_MS;
 }
 
-export function createDirectorController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, basePath = '', publishProfiles = false } = {}) {
+export function createDirectorController({ fetchImpl = globalThis.fetch, now = Date.now, onState = () => {}, requestId = () => globalThis.crypto.randomUUID(), setIntervalImpl = globalThis.setInterval, clearIntervalImpl = globalThis.clearInterval, basePath = '', publishProfiles = false, historyAccount = 'all' } = {}) {
   basePath = controllerBasePath(basePath);
   const state = { basePath, data: null, network: 'loading', bank: null, editRevision: 0, dirty: false, baseRevision: null, conflict: false,
-    mutation: null, feedback: '', error: '', tab: 'bank', kindFilter: 'all', bankAccount: 'all', historyAccount: 'all', older: [], nextBeforeId: null, historyLoading: false, historyError: '' };
-  let flight = null, timer = null, historyGeneration = 0;
+    mutation: null, feedback: '', error: '', tab: 'bank', kindFilter: 'all', bankAccount: 'all', historyAccount, historyHead: null, older: [], nextBeforeId: null, historyLoading: false, historyError: '', historyHeadError: '' };
+  let flight = null, timer = null, historyGeneration = 0, headFlight = null, paged = false;
   const emit = () => onState(state);
   async function read(path, options = {}) {
     const response = await fetchImpl(controllerPath(basePath, path), { method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(6000), ...options });
@@ -78,7 +78,16 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
     const operation = state.mutation;
     const requestConfirmed = operation?.kind === 'bank' && data.lastMutation?.requestId === operation.requestId && data.lastMutation.revision > operation.expectedRevision;
     const desiredStateConfirmed = operation?.kind === 'bank' && data.revision > operation.expectedRevision && bankString(data.bank) === operation.submittedBank;
-    if (requestConfirmed || desiredStateConfirmed) {
+    if (operation?.kind === 'bank' && Number.isSafeInteger(operation.ackRevision) && data.revision > operation.ackRevision && !desiredStateConfirmed) {
+      state.mutation = null; state.error = '';
+      if (state.editRevision === operation.editRevision) {
+        state.dirty = false; state.bank = bankPayload(data.bank); state.baseRevision = data.revision; state.conflict = false;
+        state.feedback = 'Your save finished. A newer version was saved elsewhere and is shown here.';
+      } else {
+        state.conflict = true;
+        state.feedback = 'Your save finished. Another tab saved a newer version while you were editing. Your unsaved edits are kept.';
+      }
+    } else if (requestConfirmed || desiredStateConfirmed) {
       state.baseRevision = data.revision; state.conflict = false;
       if (state.editRevision === operation.editRevision) { state.bank = bankPayload(data.bank); state.dirty = false; }
       state.mutation = null; state.error = ''; state.feedback = requestConfirmed ? 'Message bank saved. No account was started and no message was sent.' : 'The current saved bank matches your reviewed changes. No request was retried.';
@@ -91,6 +100,34 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
       }
     }
   }
+  function updateHistoryHead(page) {
+    if (!Array.isArray(page.history) || !(page.nextBeforeId == null || Number.isSafeInteger(page.nextBeforeId))) throw Error('invalid history');
+    if (paged && state.historyHead?.length) {
+      const ids = new Set(page.history.map(row => row.id));
+      if (state.historyHead.some(row => ids.has(row.id))) {
+        // Keep the boundary between the live head and any older pages already read.
+        const archived = new Map(state.older.map(row => [row.id, row]));
+        for (const row of state.historyHead) if (!ids.has(row.id)) archived.set(row.id, row);
+        state.older = [...archived.values()];
+      } else {
+        // A whole page arrived while offline. The new head's cursor can reach the gap.
+        historyGeneration++; paged = false; state.older = []; state.historyLoading = false; state.historyError = '';
+      }
+    }
+    state.historyHead = page.history;
+    if (!paged) state.nextBeforeId = page.nextBeforeId ?? null;
+    state.historyHeadError = '';
+  }
+  function refreshAccountHistory() {
+    if (headFlight) return headFlight;
+    const generation = historyGeneration, id = state.historyAccount;
+    const pending = read(`/api/director/history/${id}/0`).then(page => {
+      if (generation === historyGeneration) updateHistoryHead(page);
+    }).catch(() => {
+      if (generation === historyGeneration) state.historyHeadError = 'Account history could not be refreshed.';
+    }).finally(() => { if (headFlight === pending) headFlight = null; emit(); });
+    headFlight = pending; return pending;
+  }
   const refresh = () => {
     if (flight) return flight;
     flight = (async () => {
@@ -101,7 +138,8 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
         if (publishProfiles) savedDirectorState = state;
         if (!directorFresh(state, now())) state.network = 'stale';
         reconcile(data);
-        if (state.historyAccount === 'all' && !state.older.length) state.nextBeforeId = data.nextBeforeId ?? null;
+        if (state.historyAccount === 'all') updateHistoryHead(data);
+        else if (state.network === 'online') await refreshAccountHistory();
       } catch (error) { state.network = requestNetwork(error); }
       finally { flight = null; emit(); }
       return state.data;
@@ -147,8 +185,11 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
   async function mutate(path, body, operation) {
     state.mutation = { ...operation, requestId: body.requestId, transport: true }; state.error = ''; emit();
     try {
-      await read(path, { method: 'POST', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify(body) });
-      if (state.mutation?.requestId === body.requestId) state.mutation.transport = false;
+      const ack = await read(path, { method: 'POST', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify(body) });
+      if (state.mutation?.requestId === body.requestId) {
+        state.mutation.transport = false;
+        if (operation.kind === 'bank' && ack?.ok === true && ack.requestId === body.requestId && ack.revision === body.expectedRevision + 1) state.mutation.ackRevision = ack.revision;
+      }
       if (flight) await flight;
       await refresh();
       if (state.mutation?.requestId === body.requestId) { state.mutation.unknown = true; state.feedback = 'Request accepted. Waiting for fresh status to confirm its result.'; emit(); }
@@ -157,13 +198,15 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
       if (state.mutation?.requestId === body.requestId) {
         if (error.status >= 400 && error.status < 500 && error.status !== 408) {
           state.mutation = null;
-          if (operation.kind === 'bank' && error.status === 409) state.conflict = true;
-          state.error = operation.kind === 'cancel' ? 'The message could not be cancelled. Review its current state; no cancellation was retried.' : error.status === 409 ? 'The bank changed elsewhere. Your edits are kept; load the saved bank before editing again.' : 'The change was not accepted. Check your entries and refresh status.';
+          const refreshRequired = ['controller_refresh_required', 'csrf_required'].includes(error.code);
+          if (operation.kind === 'bank' && error.status === 409 && !refreshRequired) state.conflict = true;
+          state.error = refreshRequired ? 'The controller connection needed to refresh. Your edits are kept. Review the current status before trying again.' : operation.kind === 'cancel' ? 'The message could not be cancelled. Review its current state; no cancellation was retried.' : error.status === 409 ? 'The bank changed elsewhere. Your edits are kept; load the saved bank before editing again.' : 'The change was not accepted. Check your entries and refresh status.';
         } else {
           state.mutation.transport = false; state.mutation.unknown = true;
           state.error = 'The request outcome is unconfirmed. Checking status; it will not be sent again automatically.';
         }
       }
+      if (flight) await flight;
       await refresh(); emit(); return false;
     }
   }
@@ -182,14 +225,19 @@ export function createDirectorController({ fetchImpl = globalThis.fetch, now = D
     else if (field === 'kindFilter' && ['all', ...MESSAGE_KINDS].includes(value)) state.kindFilter = value;
     else if (['bankAccount', 'historyAccount'].includes(field) && ['all', ...ACCOUNT_IDS].includes(value)) {
       state[field] = value;
-      if (field === 'historyAccount') { historyGeneration++; state.older = []; state.nextBeforeId = value === 'all' ? state.data?.nextBeforeId ?? null : 0; state.historyError = ''; state.historyLoading = false; }
+      if (field === 'historyAccount') {
+        historyGeneration++; headFlight = null; paged = false; state.historyHead = null; state.older = [];
+        state.nextBeforeId = null; state.historyError = ''; state.historyHeadError = ''; state.historyLoading = false;
+        if (value === 'all' && state.data) updateHistoryHead(state.data);
+        else if (value !== 'all' && directorFresh(state, now())) void refreshAccountHistory();
+      }
     }
     emit();
   }
   async function loadHistory() {
     if (!directorFresh(state, now()) || state.historyLoading || state.nextBeforeId === null) return false;
     const generation = historyGeneration, accountId = state.historyAccount, beforeId = state.nextBeforeId;
-    state.historyLoading = true; state.historyError = ''; emit();
+    paged = true; state.historyLoading = true; state.historyError = ''; emit();
     try {
       const data = await read(`/api/director/history/${accountId}/${beforeId}`);
       if (generation !== historyGeneration) return false;
@@ -227,7 +275,8 @@ export function timelineRow(document, row, { plan = false, canCancel = false, ca
   return node;
 }
 export function historyRows(state, accountId = 'all') {
-  const byId = new Map([...rows(state.older), ...rows(state.data?.history)].map(row => [row.id, row]));
+  const head = Object.hasOwn(state, 'historyHead') ? state.historyHead : state.data?.history;
+  const byId = new Map([...rows(state.older), ...rows(head)].map(row => [row.id, row]));
   return [...byId.values()].filter(row => accountId === 'all' || row.accountId === accountId).sort((a, b) => stamp(b.at) - stamp(a.at) || Number(b.id) - Number(a.id));
 }
 export function accountSummary(data, accountId) {
@@ -331,9 +380,10 @@ export function renderMessages(view, state, controller, now = Date.now()) {
   const plans = rows(state.data?.plans).filter(plan => state.historyAccount === 'all' || plan.accountId === state.historyAccount);
   nodes['outgoing-count'].textContent = `${plans.length} shown`; nodes['director-outgoing'].replaceChildren(...(plans.length ? plans.map(plan => timelineRow(document, plan, { plan: true, canCancel: current && !state.mutation, cancel: controller.cancel })) : [element(document, 'li', 'No pending central messages.', 'empty')]));
   const history = historyRows(state, state.historyAccount); nodes['director-history-count'].textContent = `${history.length} shown`;
-  nodes['director-history'].replaceChildren(...(history.length ? history.map(row => timelineRow(document, row)) : [element(document, 'li', 'No delivery records for this account.', 'empty')]));
+  const historyEmpty = state.historyHead && !state.historyHeadError ? 'No delivery records for this account.' : 'Waiting for delivery history.';
+  nodes['director-history'].replaceChildren(...(history.length ? history.map(row => timelineRow(document, row)) : [element(document, 'li', historyEmpty, 'empty')]));
   nodes['history-more'].disabled = !current || state.historyLoading || state.nextBeforeId === null; nodes['history-more'].textContent = state.historyLoading ? 'Loading older messages…' : 'Load older messages';
-  nodes['history-feedback'].textContent = state.historyError || (!state.historyLoading && state.nextBeforeId === null ? 'No older retained messages.' : '');
+  nodes['history-feedback'].textContent = state.historyHeadError || state.historyError || (state.historyHead && !state.historyLoading && state.nextBeforeId === null ? 'No older retained messages.' : '');
   nodes['messages-refreshed'].textContent = state.data ? `Host refreshed ${clock(state.data.updatedAt)}` : 'Waiting for status';
 }
 
@@ -344,16 +394,16 @@ export function renderAccountDirector(document, state, accountId, now = Date.now
   const current = directorFresh(state, now);
   summary.textContent = state.data ? accountSummary(state.data, accountId) : 'Waiting for central message settings.';
   const profile = rows(state.data?.profiles).find(profile => profile.id === accountId);
-  notice.textContent = !current ? connectionMessage(state.network, state.basePath, !!state.data) || 'Central message status is unverified.' : profile?.ready === false ? safe(profile.reason) || 'Waiting for this account’s imported history.' : 'These settings and assignments are managed in the shared message bank.';
+  notice.textContent = !current ? connectionMessage(state.network, state.basePath, !!state.data) || 'Central message status is unverified.' : state.historyHeadError || (profile?.ready === false ? safe(profile.reason) || 'Waiting for this account’s imported history.' : 'These settings and assignments are managed in the shared message bank.');
   const history = historyRows(state, accountId); count.textContent = `${history.length} central records`;
-  list.replaceChildren(...(history.length ? history.map(row => timelineRow(document, row)) : [element(document, 'li', current ? 'No central delivery records for this account.' : 'Waiting for central delivery history.', 'empty')]));
+  list.replaceChildren(...(history.length ? history.map(row => timelineRow(document, row)) : [element(document, 'li', current && state.historyHead && !state.historyHeadError ? 'No central delivery records for this account.' : 'Waiting for central delivery history.', 'empty')]));
 }
 
 if (globalThis.document) {
   const document = globalThis.document, fullPage = document.querySelector('[data-messages-app]');
   const basePath = basePathFromModule(import.meta.url), match = new RegExp(`^${basePath}/accounts/(primary|test|third|fourth)/?$`).exec(globalThis.location.pathname), overview = globalThis.location.pathname === `${basePath}/accounts`;
   if (fullPage || match || overview) {
-    let view; const controller = createDirectorController({ basePath, publishProfiles: true, onState: state => { if (fullPage) renderMessages(view, state, controller); else if (match) renderAccountDirector(document, state, match[1]); } });
+    let view; const controller = createDirectorController({ basePath, publishProfiles: true, historyAccount: match?.[1] || 'all', onState: state => { if (fullPage) renderMessages(view, state, controller); else if (match) renderAccountDirector(document, state, match[1]); } });
     if (fullPage) { view = createMessagesView(document, controller); configureControllerMount(document, basePath); }
     bindControllerLifecycle(controller); controller.start();
   }

@@ -7,11 +7,14 @@ const session = require('express-session');
 const { existsSync, readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { isBuiltin } = require('node:module');
 
 const BASE = '/admin/stream-companion';
 const ORIGIN = 'https://controller.example';
 const REMOTE_TOKEN = 'gateway-remote-pairing-fixture-token-123456';
 const UPSTREAM_TOKEN = 'fixture-private-upstream-csrf-token';
+const hostSource = resolve(__dirname, '../tools/stream-companion-host/server.mjs');
+const macHostAvailable = existsSync(hostSource) && isBuiltin('node:sqlite');
 const settingsPath = require.resolve('../utils/settings');
 const originalSettings = require.cache[settingsPath];
 let requireTwoFa = false;
@@ -72,7 +75,7 @@ async function fixture(t, options = {}) {
   const controller = require('../routes/twitchControllerRoutes');
   app.use(BASE, controller.bodyParser);
   app.use(express.json({ limit: '100kb' }));
-  app.use(session({ secret: 'ephemeral-test-session-secret-only', resave: false, saveUninitialized: false,
+  app.use(session({ secret: 'ephemeral-test-session-secret-only', resave: false, saveUninitialized: false, store: options.sessionStore,
     cookie: { httpOnly: true, sameSite: 'strict' } }));
   app.post('/__fixture/session', (req, res) => {
     req.session.admin = { id: randomUUID(), role: req.body.role || 'superadmin', tfa: req.body.tfa !== false };
@@ -183,7 +186,7 @@ test('an interrupted central bank save remains unconfirmed and is never replayed
   assert.equal(f.seen.filter(x => x.method === 'POST').length, 1);
 });
 
-test('real Mac director bank edits survive the protected site gateway without activating profiles', async t => {
+test('real Mac director bank edits survive the protected site gateway without activating profiles', { skip: !macHostAvailable }, async t => {
   const { HostStore } = await import(pathToFileURL(resolve(__dirname, '../tools/stream-companion-host/lib/store.mjs')));
   const { createHostServer } = await import(pathToFileURL(resolve(__dirname, '../tools/stream-companion-host/server.mjs')));
   const clients = ['primary', 'test', 'third'].map((id, index) => ({ id, account: `fixture_account_${index}`, token: `fixture-client-token-${id}-1234567890123456789` }));
@@ -239,6 +242,86 @@ test('the gateway gives each authenticated session its own nonce and never expos
   assert.equal((await post(a, '/api/control', { paused: true }, aNonce)).status, 200);
   assert.equal(f.seen.at(-1).headers['x-csrf-token'], UPSTREAM_TOKEN);
   assert.notEqual(f.seen.at(-1).headers['x-csrf-token'], aNonce);
+});
+
+test('simultaneous first reads from one signed-in browser return the same usable controller nonce', async t => {
+  const waiting = [];
+  const f = await fixture(t, { upstream: (record, res) => {
+    if (record.method === 'POST') return respond(res, 200, { ok: true });
+    waiting.push(res);
+    if (waiting.length === 2) for (const response of waiting) respond(response, 200, { csrfToken: UPSTREAM_TOKEN });
+  } });
+  const client = await f.client();
+  const nonces = await Promise.all(['/api/accounts', '/api/director'].map(path => nonce(client, path)));
+  assert.equal(nonces[0], nonces[1]);
+  assert.equal((await post(client, '/api/accounts/primary/command', command('draft', { mode: 'reply' }), nonces[0])).status, 200);
+  assert.equal(f.seen.filter(r => r.method === 'POST').length, 1);
+});
+
+test('a delayed status response from before a Mac restart cannot replace the newly observed host nonce', async t => {
+  let releaseOld, signalOld;
+  const oldStarted = new Promise(resolve => { signalOld = resolve; });
+  const rotated = 'rotated-private-upstream-csrf-fixture';
+  const f = await fixture(t, { upstream: (record, res) => {
+    if (record.method === 'POST') return respond(res, record.headers['x-csrf-token'] === rotated ? 200 : 403, { ok: true });
+    if (record.path.endsWith('/api/status')) {
+      releaseOld = () => respond(res, 200, { csrfToken: UPSTREAM_TOKEN }); signalOld();
+    } else respond(res, 200, { csrfToken: rotated });
+  } });
+  const client = await f.client();
+  const old = client.request('/api/status'); await oldStarted;
+  const csrf = await nonce(client, '/api/accounts'); releaseOld();
+  const superseded = await old;
+  assert.equal(superseded.status, 503);
+  assert.equal(superseded.data.code, 'controller_refresh_required');
+  const result = await post(client, '/api/accounts/primary/command', command('draft', { mode: 'reply' }), csrf);
+  assert.equal(result.status, 200);
+  assert.equal(f.seen.at(-1).headers['x-csrf-token'], rotated);
+  assert.equal(f.seen.filter(r => r.method === 'POST').length, 1);
+});
+
+test('an existing signed-in tab survives a gateway worker restart and a failed cold refresh never forwards the action', async t => {
+  const store = new session.MemoryStore();
+  const first = await fixture(t, { sessionStore: store }), client = await first.client();
+  const token = await nonce(client);
+  const fresh = await fixture(t, { sessionStore: store }), body = command('draft', { mode: 'reply' });
+  const headers = { Cookie: client.cookie, Origin: ORIGIN, 'Sec-Fetch-Site': 'same-origin', 'X-CSRF-Token': token };
+  const act = () => request(fresh.port, BASE + '/api/accounts/test/command', { method: 'POST', body, headers });
+  fresh.setHandler((_req, res) => res.destroy());
+  const failed = await act();
+  assert.equal(failed.status, 503);
+  assert.equal(failed.data.code, 'mac_unavailable');
+  assert.deepEqual(fresh.seen.map(r => r.method), ['GET']);
+  fresh.setHandler((record, res) => respond(res, 200, record.method === 'GET' ? { csrfToken: UPSTREAM_TOKEN } : { ok: true }));
+  assert.equal((await act()).status, 200);
+  assert.deepEqual(fresh.seen.map(r => r.method), ['GET', 'GET', 'POST']);
+  assert.deepEqual(fresh.seen.at(-1).body, body);
+  assert.equal(fresh.seen.at(-1).headers['x-csrf-token'], UPSTREAM_TOKEN);
+});
+
+test('a full four-profile snapshot fits through the accounts route', async t => {
+  const { createAccountManager } = await import('../tools/stream-companion-host/lib/accounts.mjs');
+  const ids = ['primary', 'test', 'third', 'fourth'];
+  const text = '今日の配信を楽しく振り返っています。'.repeat(17).slice(0, 300);
+  const at = Date.now(), room = 'fixture_channel';
+  const manager = createAccountManager({ now: () => at,
+    readFileImpl: async () => JSON.stringify({ extensionId: 'a'.repeat(32), pairingToken: REMOTE_TOKEN }),
+    fetchImpl: async url => {
+      const account = 'fixture_' + new URL(url).port;
+      const messages = Array.from({ length: 60 }, (_, i) => ({ id: 'message-' + i, author: 'fixture_viewer', channel: room, at: at - i, text }));
+      const sent = Array.from({ length: 50 }, (_, i) => ({ account, channel: room, at: at - i, text, delivery: 'confirmed', messageId: 'sent-' + i }));
+      return Response.json({ ok: true, account, channel: room, authorized: true, connected: true, chat: { messages }, sent });
+    }
+  });
+  const data = { ...await manager.snapshot(), csrfToken: UPSTREAM_TOKEN };
+  assert.ok(Buffer.byteLength(JSON.stringify(data)) > 262144);
+  const f = await fixture(t, { upstream: (_req, res) => respond(res, 200, data) }), client = await f.client();
+  const response = await client.request('/api/accounts');
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.data.instances.map(i => [i.id, i.chat.messages.length, i.sent.length]), ids.map(id => [id, 60, 50]));
+  assert.doesNotMatch(response.text, new RegExp(UPSTREAM_TOKEN));
+  f.setHandler((_req, res) => respond(res, 200, { csrfToken: UPSTREAM_TOKEN, padding: 'x'.repeat(2 * 1024 * 1024) }));
+  assert.equal((await client.request('/api/accounts')).status, 503);
 });
 
 test('site navigation uses fresh document style nonces while preserving the controller policy and body', async t => {
@@ -442,9 +525,8 @@ test('the request bound applies to original bytes including padded or chunked JS
 });
 
 
-const hostSource = resolve(__dirname, '../tools/stream-companion-host/server.mjs');
 test('real prefixed Mac host and production gateway complete authenticated page/status/control roundtrips without helper calls',
-  { skip: Number(process.versions.node.split('.')[0]) < 22 || !existsSync(hostSource) }, async t => {
+  { skip: !macHostAvailable }, async t => {
     const { createHostServer } = await import(pathToFileURL(hostSource).href);
     const commandCalls = [], browserCalls = []; let paused = true, pauseCalls = 0;
     const clients = [{ id: 'fixture-client', account: 'fixture_account', token: 'p'.repeat(48) }];

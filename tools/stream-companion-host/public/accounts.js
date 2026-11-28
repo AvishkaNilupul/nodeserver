@@ -49,6 +49,9 @@ function sameDraftRoom(draft, instance) {
     && instance.account?.toLowerCase() === draft.account && instance.channel?.toLowerCase() === draft.channel
     && (!draft.streamId || instance.streamContext?.streamId === draft.streamId);
 }
+function requestedReviewSend(receipts, id) {
+  return receipts.some(c => c?.action === 'send' && /^review-send:[a-z0-9_-]{1,40}:(.+)$/i.exec(c.requestId)?.[1] === id);
+}
 function quickFailure(message) { return Object.assign(Error(message), { quickPublic: true }); }
 function commandParams(action, params = {}) {
   if (action === 'start' && validChannel(params.channel) && validMode(params.chatMode) && validSource(params.replySource) && typeof params.autoResume === 'boolean') return { channel: params.channel.toLowerCase(), chatMode: params.chatMode, replySource: params.replySource, autoResume: params.autoResume };
@@ -69,6 +72,26 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
   const startVersions = { primary: 0, test: 0, third: 0, fourth: 0 };
   const emit = () => onState(state);
   const formFor = id => state.forms[id] ||= { initialized: false, channel: '', chatMode: 'mentions', replySource: 'local', autoResume: false, text: '', textRevision: 0, dirty: {} };
+  function applyDraft(form, instance, command, mode, fillComposer) {
+    const result = command.result;
+    if (result?.suggested === false) {
+      form.draftResult = { title: 'No reply suggested', text: result.reason };
+      return;
+    }
+    const draft = result?.text ?? result?.summary;
+    if (typeof draft !== 'string') return;
+    const summary = mode === 'summary';
+    const room = !summary && result.targetAuthor ? { account: result.account, channel: result.channel, streamId: result.streamId, requestId: command.requestId } : null;
+    if (room && !sameDraftRoom(room, instance)) {
+      form.draftResult = { title: 'Chat changed', text: 'Request a fresh draft for the current chat.' };
+      return;
+    }
+    const title = room ? `Draft for @${result.targetAuthor} in #${room.channel}` : summary ? 'Chat summary' : 'Draft reply';
+    form.draftResult = { title, text: draft, room };
+    if (!summary && fillComposer && validMessage(draft)) {
+      form.text = draft; form.textRevision++; form.draftRoom = room && { ...room, original: draft };
+    }
+  }
   function reconcile() {
     for (const instance of list(state.data?.instances)) {
       if (!IDS.has(instance?.id)) continue;
@@ -80,49 +103,49 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (central) { form.chatMode = central.chatMode; form.replySource = central.replySource; }
       form.initialized ||= !!instance.settings;
       const receipts = [instance.controls?.pending, ...list(instance.controls?.recent)];
-      if (form.draftResult?.room && !sameDraftRoom(form.draftResult.room, instance)) {
-        form.draftResult = { title: 'Chat changed', text: 'Request a fresh draft for the current chat.' };
+      const latest = receipts.filter(Boolean).sort((a, b) => timestamp(b.createdAt) - timestamp(a.createdAt))[0];
+      const reviewed = latest?.action === 'draft' && latest.params?.mode === 'reply' && latest.id === 'review:' + latest.requestId;
+      const reviewIssue = room => {
+        if (!sameDraftRoom(room, instance)) return 'Chat changed';
+        if (requestedReviewSend(receipts, room.requestId)) return 'Send already requested';
+        if (reviewed && latest.requestId !== room.requestId || receipts.find(c => c?.requestId === room.requestId)?.state !== 'completed') return 'Draft expired';
+      };
+      const room = form.draftRoom;
+      const composerIssue = room && !room.expired && reviewIssue(room);
+      const previewIssue = form.draftResult?.room && reviewIssue(form.draftResult.room);
+      const issue = previewIssue || composerIssue;
+      if (issue) {
+        form.draftResult = { title: issue, text: issue === 'Send already requested' ? 'Check the message delivery status.' : 'Clear the message to write a new one, or request a fresh draft.' };
       }
-      if (form.draftRoom && !form.draftRoom.expired) {
-        const changed = !sameDraftRoom(form.draftRoom, instance);
-        const receipt = receipts.find(c => c?.requestId === form.draftRoom.requestId);
-        if (changed || receipt?.state !== 'completed') {
-          form.draftResult = { title: changed ? 'Chat changed' : 'Draft expired', text: 'Clear the message to write a new one, or request a fresh draft.' };
-          if (form.text === form.draftRoom.original) { form.text = ''; form.textRevision++; delete form.draftRoom; }
-          else form.draftRoom.expired = true;
-        }
+      if (composerIssue) {
+        if (form.text === room.original) { form.text = ''; form.textRevision++; delete form.draftRoom; }
+        else room.expired = true;
       }
       const operation = state.operations[instance.id];
-      if (!operation) continue;
-      const match = receipts.find(command => command?.requestId === operation.requestId);
-      if (match) { if (operation.command.state === 'unknown' && TERMINAL.has(match.state)) state.error = ''; operation.command = match; }
-      if (operation.draftApplied && match?.state === 'cancelled' && form.draftResult?.room) {
-        form.draftResult = { title: 'Draft expired', text: 'Request a fresh reply for the current conversation.' };
-      }
-      if (!operation.transport && active(operation.command, now()) === false && !TERMINAL.has(operation.command.state)) {
-        operation.command = { ...operation.command, state: 'expired', error: 'No confirmed outcome before the request expired. The request will not be retried.' };
-      }
-      if (operation.action === 'draft' && operation.command.state === 'completed' && !operation.draftApplied) {
-        operation.draftApplied = true;
-        const result = operation.command.result;
-        if (result?.suggested === false) {
-          form.draftResult = { title: 'No reply suggested', text: result.reason };
-          continue;
+      if (operation) {
+        const match = receipts.find(c => c?.requestId === operation.requestId && c.action === operation.action);
+        if (match) {
+          if (operation.command.state === 'unknown' && TERMINAL.has(match.state)) state.error = '';
+          operation.command = match; operation.observed = true;
         }
-        const draft = result?.text ?? result?.summary;
-        if (typeof draft === 'string') {
-          const summary = operation.params?.mode === 'summary';
-          const room = !summary && result.targetAuthor ? { account: result.account, channel: result.channel, streamId: result.streamId } : null;
-          if (room && !sameDraftRoom(room, instance)) {
-            form.draftResult = { title: 'Chat changed', text: 'Request a fresh draft for the current chat.' };
-            continue;
-          }
-          const title = room ? `Draft for @${result.targetAuthor} in #${room.channel}` : summary ? 'Chat summary' : 'Draft reply';
-          form.draftResult = { title, text: draft, room };
-          if (!summary && validMessage(draft) && form.textRevision === operation.textRevision) {
-            form.text = draft; form.textRevision++; form.draftRoom = room && { ...room, original: draft, requestId: operation.requestId };
+        if (!operation.transport && active(operation.command, now()) === false && !TERMINAL.has(operation.command.state)) {
+          operation.command = { ...operation.command, state: 'expired', error: 'No confirmed outcome before the request expired. The request will not be retried.' };
+        }
+        if (operation.action === 'draft' && operation.command.state === 'completed' && !operation.draftApplied
+          && (!operation.command.result?.targetAuthor || match?.state === 'completed')) {
+          operation.draftApplied = true;
+          form.lastReviewId = operation.requestId;
+          if (!requestedReviewSend(receipts, operation.requestId) && !(reviewed && latest.requestId !== operation.requestId && latest.createdAt >= operation.command.createdAt)) {
+            applyDraft(form, instance, operation.command, operation.params.mode, form.textRevision === operation.textRevision);
           }
         }
+      }
+      // Reopen the latest live review from a fresh host receipt. Edits and a
+      // deliberately cleared composer belong to this tab. Status reads never send.
+      if (reviewed && latest.state === 'completed' && latest.requestId !== form.lastReviewId
+        && (!operation || !operation.transport && TERMINAL.has(operation.command.state) && latest.createdAt >= operation.command.createdAt)) {
+        form.lastReviewId = latest.requestId;
+        applyDraft(form, instance, latest, 'reply', !form.dirty.text && !form.text);
       }
     }
   }
@@ -134,9 +157,10 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         if (!response.ok) throw responseError(response);
         const data = await response.json();
         if (!data || !Array.isArray(data.instances) || !Number.isFinite(timestamp(data.updatedAt))) throw Error('invalid');
+        if (fresh(data.updatedAt, HOST_FRESH_MS, now()) && fresh(state.data?.updatedAt, HOST_FRESH_MS, now()) && timestamp(data.updatedAt) < timestamp(state.data.updatedAt)) return;
         state.data = data;
         state.network = fresh(data.updatedAt, HOST_FRESH_MS, now()) ? 'online' : 'stale';
-        reconcile();
+        if (state.network === 'online') reconcile();
       } catch (error) { state.network = requestNetwork(error); }
       finally { flight = null; emit(); }
     })();
@@ -277,9 +301,11 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       const response = await fetchImpl(controllerPath(basePath, `/api/accounts/${id}/command`), { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify({ requestId: rid, action, params: exactParams }) });
       if (tiedReview && response.status === 409) {
         const detail = await response.json();
-        if (detail.code === 'review_expired' && state.operations[id] === operation) {
+        if (['review_expired', 'review_used'].includes(detail.code) && state.operations[id] === operation && !operation.observed) {
           tiedReview.expired = true;
-          operation.command = { ...operation.command, state: 'failed', error: 'The conversation changed. Request a fresh draft before sending.' };
+          operation.command = { ...operation.command, state: 'failed', error: detail.code === 'review_used'
+            ? 'This draft already has a send request. Check its delivery status before requesting another draft.'
+            : 'The conversation changed. Request a fresh draft before sending.' };
           return false;
         }
       }
@@ -299,10 +325,14 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (!response.ok) throw responseError(response);
       const result = await response.json();
       if (result?.ok !== true || result.command?.requestId !== rid || result.command?.action !== action || typeof result.command?.state !== 'string') throw Error('invalid');
-      if (state.operations[id] === operation) { operation.command = result.command; accepted = true; }
-    } catch (error) {
       if (state.operations[id] === operation) {
-        operation.command.state = 'unknown';
+        if (!operation.observed || !TERMINAL.has(operation.command.state) && TERMINAL.has(result.command.state)) operation.command = result.command;
+        accepted = true;
+      }
+    } catch (error) {
+      if (state.operations[id] === operation && operation.observed) accepted = true;
+      else if (state.operations[id] === operation) {
+        operation.command = { ...operation.command, state: 'unknown' };
         const network = requestNetwork(error);
         if (network !== 'offline') state.network = network;
         state.error = network === 'offline' ? 'The request outcome is unconfirmed. Checking account status; it will not be sent again automatically. Stop remains available.' : `${connectionMessage(network, basePath)} The request outcome is unconfirmed.`;

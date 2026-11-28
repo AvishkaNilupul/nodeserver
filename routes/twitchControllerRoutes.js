@@ -1,12 +1,14 @@
 const express = require("express");
 const http = require("node:http");
-const { randomBytes, timingSafeEqual } = require("node:crypto");
+const { createHmac, timingSafeEqual } = require("node:crypto");
 const auth = require("../middleware/auth");
 const { renderControllerPage } = require("../utils/twitchControllerShell");
 
 const MOUNT = "/admin/stream-companion";
 const MAX_BODY = 65536;
 const MAX_RESPONSE = 262144;
+// This one read aggregates four bounded helper snapshots plus director history and review receipts.
+const MAX_ACCOUNTS_RESPONSE = 2 * 1024 * 1024;
 const LOCAL_ORIGIN = "http://127.0.0.1:8795";
 const TOKEN = /^[A-Za-z0-9_-]{32,128}$/;
 const STATIC = new Map([
@@ -167,6 +169,7 @@ function redact(value, secrets) {
 // never cross this boundary. A lost POST response is never retried here.
 function upstreamRequest({ port, timeoutMs, remoteToken, path, method, body, csrf }) {
   return new Promise((resolve, reject) => {
+    const limit = method === "GET" && path === "/api/accounts" ? MAX_ACCOUNTS_RESPONSE : MAX_RESPONSE;
     const headers = { Host: "127.0.0.1:8795", Origin: LOCAL_ORIGIN, "Sec-Fetch-Site": "same-origin",
       Authorization: `Bearer ${remoteToken}`, Accept: "application/json, text/html, text/javascript, text/css" };
     const data = method === "POST" ? JSON.stringify(body) : null;
@@ -180,7 +183,7 @@ function upstreamRequest({ port, timeoutMs, remoteToken, path, method, body, csr
       const chunks = []; let size = 0;
       response.on("data", (chunk) => {
         size += chunk.length;
-        if (size > MAX_RESPONSE) { request.destroy(new Error("Response limit")); return; }
+        if (size > limit) { request.destroy(new Error("Response limit")); return; }
         chunks.push(chunk);
       });
       response.on("aborted", () => done(new Error("Response interrupted")));
@@ -197,6 +200,11 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
   const origin = publicOrigin(configuredOrigin);
   const configured = !!origin && TOKEN.test(remoteToken || "") && Number.isInteger(upstreamPort)
     && upstreamPort >= 1 && upstreamPort <= 65535 && Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= 10000;
+  let issuedRead = 0, lastObservedRead = 0, hostCsrf = null;
+  function observeHostNonce(order, token) {
+    if (order > lastObservedRead) { lastObservedRead = order; hostCsrf = token; }
+    return token === hostCsrf;
+  }
   const router = express.Router({ caseSensitive: true, strict: true });
   router.use(guards.requireSuperadmin, guards.enforce2fa);
   router.use(bodyParser);
@@ -215,10 +223,13 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
     if (req.method !== (mutation ? "POST" : "GET") || req.get("upgrade")) return errorResponse(res, 405, "method_not_allowed", "This controller method is not supported.");
     if (!configured) return unavailable(req, res, false);
     if ((isData || mutation) && !apiOrigin(req, origin, mutation)) return errorResponse(res, 403, "origin_required", "Open the controller on this server to use its controls.");
-    if (!req.session) return errorResponse(res, 503, "session_unavailable", "Sign in again to use the controller.");
+    if (!req.session || typeof req.sessionID !== "string" || !req.sessionID) return errorResponse(res, 503, "session_unavailable", "Sign in again to use the controller.");
+    // Express loads a separate copy of the same session for each parallel poll.
+    // Give those reads one token without writing back stale copies to the site session store.
+    const browserCsrf = TOKEN.test(req.session.companionCsrf || "") ? req.session.companionCsrf
+      : createHmac("sha256", remoteToken).update("twitch-controller-csrf\0").update(req.sessionID).digest("base64url");
     if (mutation) {
-      if (!TOKEN.test(req.session.companionCsrf || "") || !equal(req.get("x-csrf-token"), req.session.companionCsrf)
-          || !TOKEN.test(req.session.companionUpstreamCsrf || "")) return errorResponse(res, 403, "csrf_required", "Refresh the controller before using its controls.");
+      if (!equal(req.get("x-csrf-token"), browserCsrf)) return errorResponse(res, 403, "csrf_required", "Refresh the controller before using its controls.");
       if (!req.is("application/json")) return errorResponse(res, 415, "json_required", "JSON required.");
       let valid = false;
       try {
@@ -229,23 +240,35 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
       } catch { /* Invalid bodies are rejected before contacting the Mac. */ }
       if (!valid) return errorResponse(res, 400, "invalid_control", "Choose one supported controller action and its exact settings.");
     }
+    let actionForwarded = false;
     try {
-      const upstream = await upstreamRequest({ port: upstreamPort, timeoutMs, remoteToken, path: suffix,
-        method: req.method, body: req.body, csrf: req.session.companionUpstreamCsrf });
+      const deadline = Date.now() + timeoutMs;
+      if (mutation && !hostCsrf) {
+        // A reloaded web worker has no Mac nonce yet. Recover it with one status
+        // read before forwarding the explicit action, within the original deadline.
+        const order = ++issuedRead;
+        const status = await upstreamRequest({ port: upstreamPort, timeoutMs, remoteToken, method: "GET", path: "/api/status" });
+        const token = status.status === 200 && String(status.headers["content-type"] || "").includes("application/json") && JSON.parse(status.body).csrfToken;
+        if (!TOKEN.test(token || "") || Date.now() >= deadline || res.destroyed) return unavailable(req, res, false);
+        observeHostNonce(order, token);
+      }
+      const order = isData ? ++issuedRead : 0, forwardedCsrf = hostCsrf;
+      actionForwarded = mutation;
+      const upstream = await upstreamRequest({ port: upstreamPort, timeoutMs: Math.max(1, deadline - Date.now()), remoteToken, path: suffix,
+        method: req.method, body: req.body, csrf: forwardedCsrf });
       if (upstream.status >= 300 && upstream.status < 400 || upstream.status < 200 || upstream.status >= 500) return unavailable(req, res, mutation);
       if (isData || mutation) {
         if (!String(upstream.headers["content-type"] || "").includes("application/json")) return unavailable(req, res, mutation);
         let value;
         try { value = JSON.parse(upstream.body.toString("utf8")); } catch { return unavailable(req, res, mutation); }
         if (!object(value)) return unavailable(req, res, mutation);
-        const secrets = [remoteToken, req.session.companionUpstreamCsrf];
+        const secrets = [remoteToken, req.session.companionUpstreamCsrf, forwardedCsrf, hostCsrf];
         if (isData && upstream.status === 200) {
           if (!TOKEN.test(value.csrfToken || "")) return unavailable(req, res, false);
-          req.session.companionUpstreamCsrf = value.csrfToken;
+          if (!observeHostNonce(order, value.csrfToken)) return errorResponse(res, 503, "controller_refresh_required", "The Mac controller restarted during this read. Refresh its status.");
           secrets.push(value.csrfToken);
           value = redact(value, secrets);
-          if (!TOKEN.test(req.session.companionCsrf || "")) req.session.companionCsrf = randomBytes(32).toString("base64url");
-          value.csrfToken = req.session.companionCsrf;
+          value.csrfToken = browserCsrf;
         } else {
           if ([401, 403].includes(upstream.status)) return errorResponse(res, mutation ? 409 : 503, "controller_refresh_required", "The private controller connection needs to refresh. Check status before taking another action.");
           value = redact(value, secrets);
@@ -254,14 +277,14 @@ function createRouter({ publicOrigin: configuredOrigin, remoteToken, upstreamPor
       }
       if (upstream.status !== 200 || !String(upstream.headers["content-type"] || "").startsWith(STATIC.get(suffix))) return unavailable(req, res, false);
       for (const name of ["content-security-policy", "permissions-policy"]) if (upstream.headers[name]) res.set(name, upstream.headers[name]);
-      const text = redact(upstream.body.toString("utf8"), [remoteToken, req.session.companionUpstreamCsrf]);
+      const text = redact(upstream.body.toString("utf8"), [remoteToken, req.session.companionUpstreamCsrf, forwardedCsrf, hostCsrf]);
       if (STATIC.get(suffix) === "text/html") {
         const page = renderControllerPage(text, upstream.headers["content-security-policy"]);
         res.set("Content-Security-Policy", page.csp);
         return res.status(200).type("html").send(page.html);
       }
       return res.status(200).type(STATIC.get(suffix)).send(text);
-    } catch { return unavailable(req, res, mutation); }
+    } catch { return unavailable(req, res, actionForwarded); }
   });
   return router;
 }
