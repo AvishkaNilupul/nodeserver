@@ -5,18 +5,24 @@ import { preferLowWatchQuality } from '../extension/watch-quality.js';
 import { WatchSession } from '../extension/watch.js';
 
 const url = 'https://www.twitch.tv/watch_fixture';
-function fixture(t, { labels = ['Auto', '1080p60 (Source)', '360p', '160p', 'Audio Only'], delayed = false, address = url } = {}) {
+function fixture(t, { labels = ['Auto', '1080p60 (Source)', '360p', '160p', 'Audio Only'], delayed = false, portal = false, address = url } = {}) {
   const dom = new JSDOM('<input id="chat"><div data-a-target="video-player"><video></video><button data-a-target="player-settings-button">Settings</button></div>', { url: address, runScripts: 'outside-only' });
   t.after(() => dom.window.close());
   const w = dom.window, doc = w.document, p = doc.querySelector('[data-a-target="video-player"]'), gear = p.querySelector('button');
-  const video = p.querySelector('video'), clicks = [], menu = () => p.querySelector('[data-a-target="player-settings-menu"]');
+  const host = portal ? doc.body : p;
+  const video = p.querySelector('video'), clicks = [], menu = () => host.querySelector('[data-a-target="player-settings-menu"]');
   w.HTMLElement.prototype.getClientRects = function () { return this.closest('[hidden]') ? [] : [{}]; };
   for (const [k, v] of Object.entries({ paused: false, ended: false, videoHeight: 1080 })) Object.defineProperty(video, k, { configurable: true, writable: true, value: v });
   video.play = video.pause = video.click = () => assert.fail('The player transport must remain untouched');
   gear.onclick = () => {
     clicks.push('gear');
-    if (menu()) return menu().remove();
-    const panel = doc.createElement('div'); panel.dataset.aTarget = 'player-settings-menu'; p.append(panel);
+    if (menu()) return (menu().closest('[role="menu"]') || menu()).remove();
+    const panel = doc.createElement('div'); panel.dataset.aTarget = 'player-settings-menu';
+    if (portal) {
+      const shell = doc.createElement('div'); shell.setAttribute('role', 'menu');
+      shell.setAttribute('aria-labelledby', 'active-settings-menu-header'); shell.append(panel);
+      w.setTimeout(() => host.append(shell), 5);
+    } else host.append(panel);
     const quality = doc.createElement('button'); quality.dataset.aTarget = 'player-settings-menu-item-quality'; panel.append(quality);
     quality.onclick = () => {
       clicks.push('quality');
@@ -27,7 +33,11 @@ function fixture(t, { labels = ['Auto', '1080p60 (Source)', '360p', '160p', 'Aud
           const radio = doc.createElement('input'), label = doc.createElement('label');
           radio.type = 'radio'; radio.id = 'quality-' + i; radio.name = 'quality'; radio.checked = !!selected; radio.disabled = !!disabled;
           radio.dataset.aTarget = 'player-settings-submenu-quality-option'; label.htmlFor = radio.id; label.textContent = text;
-          radio.onclick = () => clicks.push(text); panel.append(radio, label);
+          radio.onclick = () => clicks.push(text);
+          if (portal) {
+            const row = doc.createElement('div'); row.dataset.aTarget = radio.dataset.aTarget;
+            delete radio.dataset.aTarget; row.append(radio, label); panel.append(row);
+          } else panel.append(radio, label);
         }
       };
       if (delayed) w.setTimeout(render, 5); else render();
@@ -42,6 +52,26 @@ test('standalone selector uses the lowest enabled native picture, preserves chat
   assert.equal(await f.choose(url), 160);
   assert.deepEqual(f.clicks, ['gear', 'quality', '160p30AV1', 'gear']);
   assert.equal(f.menu(), null); assert.equal(f.doc.querySelector('#chat').value, '');
+});
+
+test('native portal outside the player opens asynchronously, chooses the child radio, and closes', async t => {
+  const f = fixture(t, { portal: true, delayed: true, labels: ['Auto', '1080p60(Source)', '720p60', '480p30', '360p30', '160p30'] });
+  assert.equal(await f.choose(url), 160);
+  assert.deepEqual(f.clicks, ['gear', 'quality', '160p30', 'gear']);
+  assert.equal(f.menu(), null);
+  assert.equal(f.doc.querySelector('[role="menu"]'), null);
+});
+
+test('a pre-existing portal or an unlinked competing gear is left untouched', async t => {
+  const f = fixture(t, { portal: true });
+  f.gear.click(); await new Promise(resolve => setTimeout(resolve, 10));
+  const existing = f.menu();
+  assert.ok(existing);
+  assert.equal(await f.choose(url), 0); assert.equal(f.menu(), existing);
+  assert.deepEqual(f.clicks, ['gear']);
+  const g = fixture(t, { portal: true });
+  g.doc.body.insertAdjacentHTML('beforeend','<div data-a-target="video-player"><button data-a-target="player-settings-button"></button></div>');
+  assert.equal(await g.choose(url), 0); assert.deepEqual(g.clicks, []);
 });
 
 test('a source-only player and a player already on the lowest rendition keep their setting', async t => {

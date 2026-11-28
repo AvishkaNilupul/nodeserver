@@ -10,12 +10,37 @@ export async function preferLowWatchQuality(expectedUrl, session) {
     && expected.pathname === location.pathname && expected.search === location.search && (expected.hash === location.hash || !expected.hash && location.hash === '#companion-watch') && enteredHash === location.hash;
   if (!samePage() || expected.username || expected.password || !/^[a-z0-9_]{3,25}$/i.test(channel) || reserved.test(channel)) return 0;
 
-  const player = document.querySelector('[data-a-target="video-player"], [data-test-selector="video-player"]');
-  const find = target => player?.querySelector(`[data-a-target="${target}"]`);
-  const gear = find('player-settings-button');
-  const menu = () => find('player-settings-menu');
+  const playerSelector = '[data-a-target="video-player"], [data-test-selector="video-player"]';
+  const gearSelector = '[data-a-target="player-settings-button"]';
+  const player = document.querySelector(playerSelector);
+  const gear = player?.querySelector(gearSelector);
   const previousFocus = document.activeElement;
-  if (!gear || gear.matches(':disabled,[aria-disabled="true"],[aria-expanded="true"]') || menu() || previousFocus?.matches('input,textarea,[contenteditable="true"],[role="textbox"]')) return 0;
+  const visible = el => el.getClientRects().length > 0 &&
+    (!el.checkVisibility || el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+  // Twitch mounts this popover beside the page root. Capture the single new
+  // settings menu created by this gear, then retain that exact node or shell.
+  const menuSelector = '[data-a-target="player-settings-menu"], [role="menu"][aria-labelledby~="active-settings-menu-header"]';
+  const menus = () => [...new Set([...document.querySelectorAll(menuSelector)].filter(visible)
+    .map(el => el.closest('[role="menu"][aria-labelledby~="active-settings-menu-header"]') || el))];
+  if (!gear || gear.matches(':disabled,[aria-disabled="true"],[aria-expanded="true"]') || menus().length
+    || previousFocus?.matches('input,textarea,[contenteditable="true"],[role="textbox"]')) return 0;
+  const linkedMenu = () => (gear.getAttribute('aria-controls') || '').split(/\s+/).filter(Boolean)
+    .map(id => document.getElementById(id)).filter(Boolean);
+  const onlyGear = () => [...document.querySelectorAll(gearSelector)].every(el => el === gear || !visible(el));
+  if (!onlyGear() && !gear.hasAttribute('aria-controls')) return 0;
+  let ownedMenu;
+  const menu = () => {
+    if (ownedMenu) return ownedMenu.isConnected && visible(ownedMenu) ? ownedMenu : null;
+    const candidates = menus();
+    if (candidates.length !== 1) return null;
+    const candidate = candidates[0], owner = candidate.closest(playerSelector);
+    if (owner && owner !== player) return null;
+    const linked = linkedMenu();
+    if (!player.contains(candidate) && !(linked.length ? linked.some(el => el === candidate ||
+      el.contains(candidate) || candidate.contains(el)) : onlyGear())) return null;
+    ownedMenu = candidate;
+    return ownedMenu;
+  };
 
   const video = [...player.querySelectorAll('video')].find(v => v.videoHeight && !v.paused && !v.ended && !v.error && v.getClientRects().length
     && (!v.checkVisibility || v.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })));
@@ -38,17 +63,18 @@ export async function preferLowWatchQuality(expectedUrl, session) {
     return new Promise(resolve => {
       const finish = () => { observer.disconnect(); clearTimeout(timer); resolve(read()); };
       const observer = new MutationObserver(() => { if (!canChange() || read()) finish(); });
-      const timer = setTimeout(finish, 400);
-      observer.observe(player, { childList: true, subtree: true, attributes: true });
+      const timer = setTimeout(finish, 900);
+      observer.observe(ownedMenu || document.body, { childList: true, subtree: true, attributes: true,
+        attributeFilter: ['data-a-target', 'aria-expanded', 'hidden'] });
     });
   };
   document.addEventListener('pointerdown', interrupt, true);
   document.addEventListener('keydown', interrupt, true);
   try {
-    if (!await currentSession() || !canChange() || menu()) return 0;
+    if (!await currentSession() || !canChange() || menus().length) return 0;
     gear.click();
     opened = true;
-    const quality = await waitFor(() => find('player-settings-menu-item-quality'));
+    const quality = await waitFor(() => menu()?.querySelector('[data-a-target="player-settings-menu-item-quality"]'));
     if (!quality || !await currentSession() || !canChange()) return 0;
     quality.click();
     const selector = '[data-a-target="player-settings-submenu-quality-option"]';
@@ -57,7 +83,7 @@ export async function preferLowWatchQuality(expectedUrl, session) {
     for (const node of menu().querySelectorAll(selector)) {
       const control = node.matches('input') ? node : node.querySelector('input') || node;
       const label = control.labels?.[0] || node.closest('label') || node;
-      const text = (label.textContent || node.getAttribute('aria-label') || '').trim();
+      const text = label.textContent?.trim() || node.textContent?.trim() || node.getAttribute('aria-label')?.trim() || '';
       const match = /^(\d{2,4})p(?:\s*(\d{2,3}))?(?!\d)/i.exec(text);
       if (!match || !label.getClientRects().length || control.matches(':disabled,[aria-disabled="true"]')
         || node.closest('[aria-disabled="true"],[hidden]')) continue;
