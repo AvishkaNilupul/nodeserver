@@ -14,7 +14,7 @@ const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const ASSET_RE = /\.(js|css|png|jpg|jpeg|gif|svg|webp|ico|map|woff2?|ttf|json)$/i;
 // High-frequency internal endpoints that would drown the log without recording a
 // meaningful change. Matched as a path prefix.
-const SKIP_PREFIXES = ["/auto-farm/tick"];
+const SKIP_PREFIXES = ["/auto-farm/tick", "/api/tiktok-farm/worker/"];
 
 // A tiny, redaction-safe summary of the body: top-level keys with scalar sizes,
 // so we know WHAT KIND of action ran without storing payloads. logEvent's own
