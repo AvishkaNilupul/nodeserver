@@ -13,7 +13,8 @@ function fixture() {
   const twitch = {
     status: () => ({ ...raw, coordination: { paused: true } }),
     disconnect() { raw.connected = false; raw.channel = ''; },
-    async connect(a, c, { beforeConnect }) {
+    async connect(a, c, { beforeConnect, recoverHistory }) {
+      assert.equal(recoverHistory, true);
       beforeConnect(); assert.deepEqual([a, c], [account, channel]); connects++; raw.channel = c;
     }
   };

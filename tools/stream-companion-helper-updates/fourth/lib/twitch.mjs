@@ -39,7 +39,7 @@ export function reconnectUrl(raw) {
 export class TwitchChat {
   constructor({ credentials = {}, history = [], coordinator = null, saveCredentials = async () => {}, saveHistory = async () => {}, fetchImpl = blockedUsTransport.fetch, WebSocketImpl = blockedUsTransport.WebSocket, transport = blockedUsTransport, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, sendHolds = new ChatSendHolds({ now }) } = {}) {
     Object.assign(this, { credentials, history, coordinator, saveCredentials, saveHistory, usaTransport: transport, fetch: fetchImpl, WebSocket: WebSocketImpl, now, setTimer, clearTimer, sendHolds });
-    this.messages = []; this.events = []; this.eventFeed = { status: 'unavailable' }; this.eventFeedTask = null; this.eventFeedPending = false;
+    this.messages = []; this.recoveredMessages = []; this.events = []; this.eventFeed = { status: 'unavailable' }; this.eventFeedTask = null; this.eventFeedPending = false;
     this.connected = false; this.error = ''; this.generation = 0; this.validatedAt = null;
     this.sockets = new Set(); this.timers = new Map(); this.chain = Promise.resolve();
     this.channelCache = new Map();
@@ -337,8 +337,14 @@ export class TwitchChat {
     return structuredClone(result);
   }
 
-  disconnect() {
-    this.generation++; this.connected = false; this.channel = ''; this.broadcasterId = ''; this.messages = [];
+  disconnect({ preserveRecent = false } = {}) {
+    if (!preserveRecent) {
+      this.interruptedChat = null;
+    } else if (this.connected && this.channel) {
+      this.interruptedChat = { account: this.credentials.account, userId: this.credentials.userId,
+        channel: this.channel, broadcasterId: this.broadcasterId, messages: mergeMessages(this.recoveredMessages, this.messages, this.now()) };
+    }
+    this.generation++; this.connected = false; this.channel = ''; this.broadcasterId = ''; this.messages = []; this.recoveredMessages = [];
     this.events = []; this.eventFeed = { status: 'unavailable' }; this.eventFeedTask = null; this.eventFeedPending = false;
     this.pendingAuth = null;
     this.usaTransport.invalidate();
@@ -349,9 +355,11 @@ export class TwitchChat {
     this.sockets.clear();
   }
 
-  async connect(account, channel, { beforeConnect = () => {} } = {}) {
+  async connect(account, channel, { beforeConnect = () => {}, recoverHistory = false } = {}) {
     if (!login(account) || !login(channel)) throw new Error('Enter one account and one channel login.');
-    this.disconnect(); this.error = ''; this.recoverable = true;
+    const recent = this.interruptedChat;
+    this.disconnect({ preserveRecent: recoverHistory && recent?.account === account && recent.channel === channel });
+    this.error = ''; this.recoverable = true;
     const generation = this.generation;
     try {
     await this.ensureIdentity(account);
@@ -390,7 +398,11 @@ export class TwitchChat {
     timer?.unref?.(); this.timers.set(socket, timer);
   }
 
-  fail(message, recoverable = false) { this.disconnect(); this.error = message; this.recoverable = recoverable; }
+  fail(message, recoverable = false) {
+    this.disconnect({ preserveRecent: recoverable });
+    this.error = message;
+    this.recoverable = recoverable;
+  }
 
   async subscribeEvents(sessionId, generation) {
     if (generation !== this.generation || !this.connected) return;
@@ -441,6 +453,14 @@ export class TwitchChat {
           }
           if (generation !== this.generation) return;
           if (previous) { this.sockets.delete(previous); this.clearTimer(this.timers.get(previous)); this.timers.delete(previous); previous.close(); }
+          // The operator can still read confirmed messages after a reconnect. Keep
+          // that history separate from the current subscription used for reply decisions.
+          const recent = this.interruptedChat;
+          if (recent && recent.channel === this.channel && recent.broadcasterId === this.broadcasterId
+              && recent.account === this.credentials.account && recent.userId === this.credentials.userId) {
+            this.recoveredMessages = mergeMessages(recent.messages, [], this.now());
+          }
+          this.interruptedChat = null;
           this.connected = true; this.error = '';
           if (!previous) this.eventFeedTask = this.subscribeEvents(session.id, generation);
         } else if (type === 'notification') {
@@ -502,9 +522,9 @@ export class TwitchChat {
     } catch {}
   }
 
-  status() {
+  status({ includeRecovered = false } = {}) {
     return { authorized: !!this.credentials.accessToken, account: this.credentials.account || '', channel: this.channel || '', connected: this.connected, error: this.error, recoverable: this.recoverable !== false,
-      sendHold: this.sendHold(), messages: mergeMessages(this.messages, [], this.now()), events: mergeNativeEvents(this.events, [], this.now()), eventFeed: { ...this.eventFeed }, sent: this.history.filter(x => x.at > this.now() - 3_600_000),
+      sendHold: this.sendHold(), messages: mergeMessages(includeRecovered ? this.recoveredMessages : [], this.messages, this.now()), events: mergeNativeEvents(this.events, [], this.now()), eventFeed: { ...this.eventFeed }, sent: this.history.filter(x => x.at > this.now() - 3_600_000),
       ...(this.coordinator ? { coordination: this.coordinator.snapshot(this.channel || '') } : {}) };
   }
 

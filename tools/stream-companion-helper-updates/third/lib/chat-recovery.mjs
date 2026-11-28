@@ -101,7 +101,7 @@ export class ChatRecovery {
       const next = () => this.report.lastAttemptAt + Math.min(60_000, 5000 * 2 ** (this.attempts - 1));
       this.setState('retrying', 'Reconnecting to Twitch chat.');
       try {
-        await this.twitch.connect(target.account, target.channel, { beforeConnect: check });
+        await this.twitch.connect(target.account, target.channel, { beforeConnect: check, recoverHistory: true });
         check();
         this.setState('retrying', 'Waiting for Twitch to confirm the chat subscription.', next());
       } catch {

@@ -203,7 +203,8 @@ export class LocalControl {
   }
   messages(raw) {
     return (Array.isArray(raw) ? raw : []).slice(-60).filter(object).map(x => ({ id: this.text(x.id, 160),
-      author: login(x.author) ? x.author : '', channel: login(x.channel) ? x.channel : '', text: this.text(x.text, 500), at: stamp(x.at) }));
+      author: login(x.author) ? x.author : '', channel: login(x.channel) ? x.channel : '', text: this.text(x.text, 500), at: stamp(x.at),
+      ...(typeof x.replyParentId === 'string' && /^[A-Za-z0-9:_-]{1,150}$/.test(x.replyParentId) ? { replyParentId: this.text(x.replyParentId, 150) } : {}) }));
   }
   sent(raw) {
     return (Array.isArray(raw) ? raw : []).slice(-50).filter(object).map(x => ({ at: stamp(x.at), account: login(x.account) ? x.account : '', channel: login(x.channel) ? x.channel : '',
@@ -226,7 +227,7 @@ export class LocalControl {
   }
   status() {
     this.expire();
-    const raw = this.twitch?.status?.() || {}, state = this.browserState;
+    const raw = this.twitch?.status?.({ includeRecovered: true }) || {}, state = this.browserState;
     const sendHold = this.twitch?.sendHold?.(raw.account, state.settings?.allowedChannel || raw.channel);
     return { ok: true, updatedAt: new Date(this.now()).toISOString(), account: login(raw.account) ? raw.account : '', authorized: raw.authorized === true,
       connected: !this.stopped && raw.connected === true, channel: login(raw.channel) ? raw.channel : '', error: this.storageError ? 'Local control safety state could not be saved; sending is held.' : this.diagnostic(raw.error),

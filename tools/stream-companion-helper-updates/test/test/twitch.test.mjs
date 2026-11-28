@@ -546,3 +546,54 @@ test('transient subscription HTTP503 keeps its existing recoverable classificati
   assert.equal(h.client.status().connected, false); assert.equal(h.client.status().recoverable, true);
   assert.equal(h.client.status().error, 'Twitch chat connection interrupted.');
 });
+
+test('recoverable chat reconnect restores bounded same-room messages after confirmation and rejects replays', async t => {
+  const h = harness(t);
+  const socket = await h.connect();
+  const notify = (ws, messageId, parent = '') => h.emit(ws, 'notification', { event: {
+    broadcaster_user_id: '456', message_id: messageId, chatter_user_login: 'viewer', message: { text: 'chat check' },
+    ...(parent ? { reply: { parent_message_id: parent } } : {})
+  } }, { subscription_type: 'channel.chat.message' });
+  await notify(socket, 'expired');
+  h.advance(15 * 60_000 + 1);
+  await notify(socket, 'parent');
+  await notify(socket, 'child', 'parent');
+  socket.close();
+  assert.deepEqual(h.client.status().messages, []);
+  const options = { recoverHistory: true };
+  await h.client.connect('companion_test', 'friend_channel', options);
+  assert.deepEqual(h.client.status().messages, []);
+  // Failure of a first recovery attempt must not lose the earlier receive window.
+  Socket.all.at(-1).close();
+  await h.client.connect('companion_test', 'friend_channel', options);
+  const replacement = Socket.all.at(-1);
+  await h.emit(replacement, 'session_welcome', { session: { id: 'recovery', keepalive_timeout_seconds: 10 } });
+  await notify(replacement, 'child', 'parent');
+  await notify(replacement, 'after');
+  const entries = h.client.status({ includeRecovered: true }).messages;
+  assert.deepEqual(h.client.status().messages.map(m => m.id), ['child', 'after']);
+  assert.deepEqual(entries.map(m => m.id), ['parent', 'child', 'after']);
+  assert.equal(entries[1].replyParentId, 'parent');
+});
+
+test('explicit stop, a new Start, revocation and room changes drop interrupted chat', async t => {
+  let login = 'friend_channel', broadcasterId = '456';
+  const h = harness(t, async url => url.includes('/users?') ? response({ data: [{ id: broadcasterId, login }] }) : null);
+  const options = { recoverHistory: true };
+  for (const change of ['stop', 'new start', 'revocation', 'different room', 'reassigned login', 'expired messages']) {
+    login = 'friend_channel'; broadcasterId = '456';
+    const socket = await h.connect();
+    await h.emit(socket, 'notification', { event: { broadcaster_user_id: '456', message_id: 'old',
+      chatter_user_login: 'viewer', message: { text: 'old' } } }, { subscription_type: 'channel.chat.message' });
+    socket.close();
+    if (change === 'stop') h.client.disconnect();
+    if (change === 'revocation') h.client.fail('Authorization revoked.');
+    if (change === 'different room') login = 'different_room';
+    if (change === 'reassigned login') broadcasterId = '777';
+    if (change === 'expired messages') h.advance(15 * 60_000 + 1);
+    await h.client.connect('companion_test', login, change === 'new start' ? {} : options);
+    await h.emit(Socket.all.at(-1), 'session_welcome', { session: { id: change } });
+    assert.deepEqual(h.client.status({ includeRecovered: true }).messages, [], change);
+    h.client.disconnect();
+  }
+});

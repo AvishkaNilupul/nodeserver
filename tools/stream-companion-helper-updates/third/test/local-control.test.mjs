@@ -247,3 +247,17 @@ test('native subscription feed status is typed and unavailable after Stop or dis
   connected = true; status = 'unexpected'; assert.deepEqual(f.c.status().eventFeed, { status: 'unavailable' });
   status = 'enabled'; f.c.stopped = true; assert.deepEqual(f.c.status().eventFeed, { status: 'unavailable' });
 });
+
+
+test('operator snapshot includes retained receive history and validated native parent IDs', () => {
+  const f = fixture();
+  f.twitch.status = options => ({ account: 'sample_account', channel: 'sample_channel', connected: true,
+    authorized: true, messages: options?.includeRecovered ? [
+      { id: 'sample', author: 'viewer', text: 'Reply', at: START, replyParentId: 'parent-1' },
+      { id: 'bad', author: 'viewer', text: 'Reply', at: START, replyParentId: 'invalid\nnewline' }
+    ] : [], sent: [] });
+  const messages = f.c.status().chat.messages;
+  assert.deepEqual(messages.map(m => m.id), ['sample', 'bad']);
+  assert.equal(messages[0].replyParentId, 'parent-1');
+  assert.equal(messages[1].replyParentId, undefined);
+});
