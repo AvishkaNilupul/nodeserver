@@ -34,7 +34,34 @@ function streamId(instance) {
   return stream?.isLive && stream.channel === instance.channel && messageId(stream.streamId) ? stream.streamId : '';
 }
 
-const mentions = m => [...m.text.matchAll(/(?:^|[^a-z0-9_])@([a-z0-9_]{3,25})(?![a-z0-9_])/gi)].map(match => match[1].toLowerCase());
+const roomAddresses = new Set(['chat', 'everyone', 'everybody', 'folks', 'guys', 'all', 'anyone', 'anybody', 'friends']);
+// A name before punctuation can be a conversational cue instead ("Actually, did you…?").
+const discourseCues = new Set(['actually', 'again', 'also', 'alright', 'anyway', 'anyways', 'basically', 'but', 'cool', 'dang', 'first', 'honestly', 'huh', 'instead', 'later', 'like', 'lol', 'look', 'man', 'maybe', 'next', 'nice', 'now', 'okay', 'otherwise', 'please', 'quick', 'really', 'right', 'seriously', 'so', 'sorry', 'sure', 'thanks', 'then', 'though', 'today', 'tomorrow', 'tonight', 'wait', 'well', 'wow', 'yeah', 'yesterday']);
+const leadingAddress = /^(?:(hey|hi|hello|yo)[,，]?\s+)?([a-z0-9_]{3,25})(?=\s*[,，:：]|\s+(?:(?:what|which|where|who|why|when|how)\b|(?:can|could|did|do|would|are|have)\s+you\b))/i;
+const trailingAddress = /[,，]\s*([a-z0-9_]{3,25})\s*[?？!！.]*$/i;
+const personalQuestion = /\b(?:did|do|can|could|would|will|are|were|have|had|should)\s+you\b|\b(?:what|which|how|where)\b[^,，:：?]{0,50}\byour\b/i;
+const pairedAddress = /^(?:hey\s+)?([a-z0-9_]{3,25})(?:\s+and\s+|\s*[,，&]\s*)([a-z0-9_]{3,25})\s*[,，:：]/i;
+function roomNames(instance, companions) {
+  const names = new Set([...companions, instance.channel]);
+  for (const m of instance.chat.messages) if (m.channel === instance.channel && login(m.author)) names.add(m.author);
+  return names;
+}
+function addressees(text, names) {
+  const found = new Set([...text.matchAll(/(?:^|[^a-z0-9_])@([a-z0-9_]{3,25})(?![a-z0-9_])/gi)].map(match => match[1].toLowerCase()));
+  const line = text.trim(), first = leadingAddress.exec(line), last = trailingAddress.exec(line);
+  const lead = first?.[2].toLowerCase(), tail = last?.[1].toLowerCase();
+  const pair = pairedAddress.exec(line);
+  if (pair) {
+    const group = pair.slice(1).map(name => name.toLowerCase());
+    if (group.every(name => names.has(name) && !roomAddresses.has(name))) group.forEach(name => found.add(name));
+  }
+  // A greeting identifies its recipient even on first sight. For a bare, unseen
+  // name require both address punctuation and a question clearly directed at "you".
+  if (lead && !roomAddresses.has(lead) && (names.has(lead) || first[1] ||
+    !discourseCues.has(lead) && /^\s*[,，:：]/.test(line.slice(first[0].length)) && personalQuestion.test(line))) found.add(lead);
+  if (tail && !roomAddresses.has(tail) && (names.has(tail) || !discourseCues.has(tail) && personalQuestion.test(line))) found.add(tail);
+  return [...found];
+}
 
 // A room-wide remark needs an actual opening for a reply. Direct mentions and
 // verified native replies have their own evidence of conversational intent.
@@ -69,6 +96,7 @@ function personalInsult(text) {
 
 function selectConversation(instance, companions, time) {
   const { account, channel } = instance;
+  const names = roomNames(instance, companions);
   const incoming = instance.chat.messages.filter(m => m.channel === channel && messageId(m.id) && login(m.author)
     && !companions.has(m.author) && !bots.has(m.author) && !m.author.endsWith('bot') && !m.isBot && !m.bot
     && m.at >= time - historyAge && m.at <= time && safeText(m.text) && !personalInsult(m.text)).sort((a, b) => a.at - b.at);
@@ -86,7 +114,7 @@ function selectConversation(instance, companions, time) {
       const parent = own.get(m.replyParentId) || byId.get(m.replyParentId);
       if (!parent || parent.at > m.at || visited.has(m.replyParentId)) return null;
       if (parent.author === account) return [parent, ...path];
-      if (parent.author !== m.author || path.length >= 5) return null;
+      if (parent.author !== m.author || path.length >= 5 || addressees(parent.text, names).some(name => name !== account)) return null;
       visited.add(parent.id);
       path.unshift(parent);
       m = parent;
@@ -97,9 +125,9 @@ function selectConversation(instance, companions, time) {
   const lastOpening = new Map(), answered = new Set();
   let selected;
   for (const m of incoming) {
-    const addressees = mentions(m), path = ancestry(m);
-    if (!path || addressees.some(name => name !== account)) continue;
-    const direct = addressees.includes(account) || path.some(parent => parent.author === account || mentions(parent).includes(account));
+    const recipients = addressees(m.text, names), path = ancestry(m);
+    if (!path || recipients.some(name => name !== account)) continue;
+    const direct = recipients.includes(account) || path.some(parent => parent.author === account || addressees(parent.text, names).includes(account));
     const ask = invitesReply(m.text);
     const previous = lastOpening.get(m.author);
     const recent = previous && m.at - previous.m.at <= 60_000 ? previous : null;
@@ -123,7 +151,7 @@ function selectConversation(instance, companions, time) {
   if (!selected) throw Object.assign(failure('There is no recent viewer question, request, or direct conversation to reply to in this channel.'), { code: 'no_conversation' });
   const { m: target, path, ownReply } = selected;
   const earlier = incoming.slice(0, incoming.indexOf(target)).filter(m => m.at >= target.at - targetAge
-    && m.author === target.author && !m.replyParentId && mentions(m).every(name => name === account)).slice(-4);
+    && m.author === target.author && !m.replyParentId && addressees(m.text, names).every(name => name === account)).slice(-4);
   const contextRows = [...earlier, ...path];
   if (ownReply) contextRows.push(ownReply);
   const messages = [...new Set(contextRows)].sort((a, b) => a.at - b.at).map(m => ({ author: m.author, text: m.text }));
@@ -134,18 +162,18 @@ function selectConversation(instance, companions, time) {
       ? { title: safeText(stream.title) ? stream.title : '', category: safeText(stream.gameName) ? stream.gameName : '' } : null } };
 }
 
-function hasNewerFollowUp(job, instance, time) {
+function hasNewerFollowUp(job, instance, names, time) {
   const messages = instance.chat.messages;
   const originalIndex = messages.findIndex(m => m.id === job.targetId && m.channel === job.channel && m.author === job.targetAuthor);
   return messages.some((m, index) => {
     if (m.author !== job.targetAuthor || m.channel !== job.channel || m.id === job.targetId || !messageId(m.id)
       || m.at < job.targetAt || m.at === job.targetAt && index <= originalIndex || m.at > time
       || m.isBot || m.bot || !safeText(m.text) || personalInsult(m.text)) return false;
-    const addressees = mentions(m);
-    if (addressees.some(name => name !== job.account)) return false;
+    const recipients = addressees(m.text, names);
+    if (recipients.some(name => name !== job.account)) return false;
     const follows = invitesReply(m.text) || continuesTurn(m.text, job.directed);
     if (m.replyParentId) return job.thread.has(m.replyParentId) && (job.directed || follows);
-    if (addressees.includes(job.account) || m.at - job.targetAt <= 60_000 && follows) return true;
+    if (recipients.includes(job.account) || m.at - job.targetAt <= 60_000 && follows) return true;
     return instance.sent.some(s => s.delivery === 'confirmed' && s.account === job.account && s.channel === job.channel
       && s.replyTo === job.targetAuthor && s.at > job.targetAt && s.at <= m.at && m.at - s.at <= 90_000 && safeText(s.text) && invitesReply(s.text));
   });
@@ -187,8 +215,16 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     if (unavailable(instance, now()) || instance.account !== account || instance.channel !== channel || stop || instance.controls?.pending
       || !companions || companions.has(targetAuthor) || job.streamId && job.streamId !== streamId(instance) || !targetPresent || now() - targetAt > targetAge) {
       finish(job, 'cancelled', 'The account, channel, or viewer conversation changed. Request a fresh draft.');
-    } else if (hasNewerFollowUp(job, instance, now())) {
-      finish(job, 'cancelled', 'A newer message from @' + targetAuthor + ' changed the conversation. Request a fresh draft.');
+    } else {
+      const names = roomNames(instance, companions);
+      // A previously unseen plain name may become identifiable while the draft is open.
+      const foreign = instance.chat.messages.some(m => m.channel === channel && m.author === targetAuthor && job.thread.has(m.id)
+        && addressees(m.text, names).some(name => name !== account));
+      if (foreign) {
+        finish(job, 'cancelled', 'The viewer addressed another person. Request a fresh draft.');
+      } else if (hasNewerFollowUp(job, instance, names, now())) {
+        finish(job, 'cancelled', 'A newer message from @' + targetAuthor + ' changed the conversation. Request a fresh draft.');
+      }
     }
   }
 
@@ -212,7 +248,8 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
       const instance = instances.find(i => i.id === job.id);
       reconcile(job, instance, companionsFor(instances));
       if (job.command.state !== 'running') return;
-      finish(job, 'completed', '', { text, reason: 'Draft reply to @' + job.targetAuthor + '.', account: job.account, channel: job.channel, targetAuthor: job.targetAuthor, ...(job.streamId ? { streamId: job.streamId } : {}) });
+      finish(job, 'completed', '', { text, reason: 'Draft reply to @' + job.targetAuthor + '.', account: job.account, channel: job.channel, targetAuthor: job.targetAuthor,
+        target: { id: job.targetId, author: job.targetAuthor, text: job.targetText, at: job.targetAt }, ...(job.streamId ? { streamId: job.streamId } : {}) });
     } catch (error) {
       if (job.command.state !== 'running') return;
       if (error?.code === 'no_reply') {

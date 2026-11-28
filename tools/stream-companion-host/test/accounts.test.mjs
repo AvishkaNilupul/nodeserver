@@ -219,3 +219,26 @@ test('native alert status is typed, never leaks details and cannot stay enabled 
     assert.equal(JSON.stringify(value).includes('RAW_PRIVATE'), false);
   }
 });
+
+test('recovery telemetry is optional, bounded, and redacted in account snapshots', async () => {
+  const raw = status();
+  const f = fixture(() => Response.json(raw));
+  const read = async () => (await f.manager.snapshot({ fresh: true })).instances[0].recovery;
+  assert.equal(await read(), null);
+  raw.recovery = { state: 'waiting', lastAttemptAt: NOW - 5000, nextAttemptAt: NOW + 12000,
+    reason: 'Waiting for ' + configs['primary.json'].pairingToken, providerToken: 'ignored' };
+  assert.deepEqual(await read(), { state: 'waiting', lastAttemptAt: NOW - 5000, nextAttemptAt: NOW + 12000, reason: 'Waiting for [redacted]' });
+  raw.recovery = { state: 'recovered', lastAttemptAt: NOW + 6e6, nextAttemptAt: NOW + 1, reason: 'Connected' };
+  assert.deepEqual(await read(), { state: 'recovered', lastAttemptAt: 0, nextAttemptAt: 0, reason: 'Connected' });
+  raw.recovery.state = 'unrecognized';
+  assert.equal(await read(), null);
+});
+
+
+test('incoming chat preserves the whole supported source line for a reviewed draft', async () => {
+  const original = 'What do you think of ' + 'the checkpoint map '.repeat(26).slice(0, 478) + '?';
+  const f = fixture(() => { const s = status(); s.chat.messages[0].text = original; return Response.json(s); });
+  const row = (await f.manager.snapshot()).instances[0];
+  assert.equal(original.length, 500);
+  assert.equal(row.chat.messages[0].text, original);
+});

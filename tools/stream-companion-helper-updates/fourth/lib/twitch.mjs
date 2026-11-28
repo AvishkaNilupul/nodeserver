@@ -405,7 +405,14 @@ export class TwitchChat {
   }
 
   openSocket(url, generation, previous = null) {
-    const socket = new this.WebSocket(reconnectUrl(url));
+    let socket;
+    try { socket = new this.WebSocket(reconnectUrl(url)); }
+    catch (error) {
+      // Losing the US browser lease before a socket can be queued is
+      // temporary. Leave provider and authorization refusals terminal.
+      if (error?.code === 'usa_transport_held' && error.notSubmitted === true) error.retryable = true;
+      throw error;
+    }
     this.sockets.add(socket); this.armTimeout(socket, 15_000, generation);
     let timeout = 15_000, transferring = false, welcomed = false;
     socket.addEventListener('message', event => {

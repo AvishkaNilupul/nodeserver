@@ -1,3 +1,4 @@
+import { ChatRecovery } from './lib/chat-recovery.mjs';
 import http from 'node:http';
 import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { timingSafeEqual } from 'node:crypto';
@@ -28,8 +29,10 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
     const run = () => { if (expected !== generation) throw new Error('Operation cancelled by disconnect.'); return fn(); };
     const result = serial.then(run, run); serial = result.catch(() => {}); return result;
   };
+  let recovery;
   const control = suppliedControl || new LocalControl({ twitch, now, intentFile, secrets: [config.pairingToken, config.apiKey, config.extensionId],
-    onIntent: () => { generation++; } });
+    onIntent: () => { generation++; recovery?.reset(); } });
+  recovery = new ChatRecovery({ control, twitch, locked, now });
   const clips = suppliedClips || new ViewerClips({ twitch, control, now, file: clipFile });
   const director = new DirectorAdapter({ twitch, control, config, generateImpl, now });
   const server = http.createServer(async (req, res) => {
@@ -54,9 +57,13 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
       }
       if (req.url === '/api/clips/create') return respond(res, 200, clips.create(input));
       if (req.url === '/api/clips/authorization') return respond(res, 200, await clips.authorization(input));
-      if (req.url === '/api/control/status') return respond(res, 200, control.status());
+      if (req.url === '/api/control/status') return respond(res, 200, { ...control.status(), recovery: recovery.status() });
       if (req.url === '/api/control/command') return respond(res, 200, control.command(input));
-      if (req.url === '/api/control/bridge') return respond(res, 200, control.bridge(input));
+      if (req.url === '/api/control/bridge') {
+        const reply = control.bridge(input);
+        recovery.heartbeat(input);
+        return respond(res, 200, reply);
+      }
       if (req.url === '/api/director/import') return respond(res, 200, await director.import(input));
       if (req.url === '/api/director/sync') return respond(res, 200, await director.sync(input));
       if (req.url === '/api/director/draft' || req.url === '/api/compose') return respond(res, 200, await director.draft(input));
@@ -66,7 +73,7 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
       // Pause must interrupt slow authorization/connection work, not wait for it.
       if (req.url === '/api/twitch/disconnect') {
         const result = control.disconnect(input);
-        if (result.disarmOnly) { generation++; twitch.disconnect(); }
+        if (result.disarmOnly) { generation++; recovery.reset(); twitch.disconnect(); }
         return respond(res, 200, result);
       }
       const actions = {
@@ -76,6 +83,10 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
           let intent;
           if (input.explicitStart === true) intent = control.nativeStart(input);
           else control.guard(input, { action: 'start' });
+          if (recovery.owns(input)) {
+            const current = twitch.status();
+            return { connected: current.connected === true, connecting: !current.connected && !!current.channel, recovery: recovery.status() };
+          }
           const permitted = intent ? { ...input, controlGeneration: intent.generation } : input;
           let result;
           try {
@@ -100,7 +111,7 @@ export function createHelper({ config, twitch = new TwitchChat(), generateImpl =
   });
   server.control = control; server.clips = clips;
   server.requestTimeout = 45_000; server.headersTimeout = 10_000;
-  server.on('close', () => { clips.close(); twitch.disconnect(); });
+  server.on('close', () => { recovery.reset(); clips.close(); twitch.disconnect(); });
   return server;
 }
 

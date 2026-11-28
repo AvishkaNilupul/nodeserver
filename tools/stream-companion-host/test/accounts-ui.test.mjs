@@ -45,6 +45,37 @@ test('a second tab or reload recovers the current reviewed draft through reads a
   assert.deepEqual([...new Set(calls)], ['GET']);
 });
 
+test('the exact original line and time appear beside a retained draft on both account pages', async () => {
+  for (const basePath of ['', '/admin/stream-companion']) {
+    const row = instance(), reviewed = sharedReview('remote-draft');
+    const original = 'Which one was <blue> & which was green?';
+    reviewed.result.target = { id: 'target-12', author: 'viewer', text: original, at: at - 8000 };
+    row.controls.recent = [reviewed];
+    const c = controller(async () => reply(snapshot({ instances: [row] })), { basePath });
+    await c.refresh();
+    const v = view();
+    renderAccounts(v, c.getState(), { id: 'primary', now: at });
+    const box = v.nodes['draft-result'];
+    assert.equal(box.children.find(n => n.tagName === 'blockquote').textContent, original);
+    assert.ok(box.textContent.includes('Original message from @viewer'));
+    assert.ok(box.textContent.includes(new Date(at - 8000).toLocaleTimeString()));
+    assert.equal(c.form('primary').text, reviewed.result.text);
+  }
+});
+
+test('legacy receipts show that the source is unavailable without guessing a message by that author', async () => {
+  const row = instance();
+  row.controls.recent = [sharedReview('old-receipt')];
+  row.chat.messages = [{ id: 'unrelated', author: 'viewer', text: 'Other question?', at }];
+  const c = controller(async () => reply(snapshot({ instances: [row] })));
+  await c.refresh();
+  const v = view();
+  renderAccounts(v, c.getState(), { id: 'primary', now: at });
+  assert.match(v.nodes['draft-result'].textContent, /Original message unavailable/);
+  assert.doesNotMatch(v.nodes['draft-result'].textContent, /Other question/);
+  assert.equal(c.form('primary').text, 'The blue team leads.');
+});
+
 test('a later reviewed send from another tab retires the old composer and a reload cannot restore it', async () => {
   const row = instance(), data = snapshot({ instances: [row] });
   const c = controller(async (_, options) => {
@@ -427,4 +458,24 @@ test('the third profile has a fixed path, separate card and separate detail iden
   assert.equal(v.nodes['page-eyebrow'].textContent, 'Third profile'); assert.equal(v.nodes['page-title'].textContent, 'Third companion');
   assert.match(v.nodes['page-description'].textContent, /third_account/);
   assert.equal(v.nodes['accounts-overview'].hidden, true); assert.equal(v.nodes['account-detail'].hidden, false);
+});
+
+test('account view shows receive retries separately from playback and expires a stale countdown', () => {
+  const data = snapshot({ instances: [instance({ connected: false, recovery: { state: 'waiting', reason: 'Socket closed.',
+    lastAttemptAt: at - 7000, nextAttemptAt: at + 12000 }, watch: { enabled: true, status: 'playing', checkedAt: at, channel: 'example_channel' } })] });
+  const state = { data, network: 'online', operations: {}, forms: {} }, v = view();
+  renderAccounts(v, state, { id: 'primary', now: at });
+  const checks = v.nodes['status-checks'];
+  assert.match(checks.textContent, /Disconnected/);
+  assert.match(checks.textContent, /Playing/);
+  assert.match(checks.textContent, /Waiting to retry.*Socket closed.*7s ago.*Next retry in 12s/);
+  state.network = 'offline';
+  renderAccounts(v, state, { id: 'primary', now: at + 15000 });
+  assert.match(checks.textContent, /Last reported.*Waiting to retry/);
+  assert.doesNotMatch(checks.textContent, /Next retry|Retry due/);
+  state.network = 'online';
+  data.instances[0].recovery.state = 'recovered';
+  renderAccounts(v, state, { id: 'primary', now: at });
+  assert.match(checks.textContent, /Chat recoveryReconnected/);
+  assert.doesNotMatch(checks.textContent, /Next retry/);
 });

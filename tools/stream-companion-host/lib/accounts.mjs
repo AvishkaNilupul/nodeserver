@@ -96,12 +96,25 @@ function cleanCommand(raw, clean) {
     createdAt: number(timestamp(raw.createdAt)), expiresAt: number(timestamp(raw.expiresAt)), ...(result ? { result } : {}), error: clean(raw.error) };
 }
 
+const RECOVERY_STATES = new Set(['idle', 'retrying', 'waiting', 'held', 'recovered']);
+
+function recoveryStatus(raw, now, clean) {
+  if (!record(raw) || !RECOVERY_STATES.has(raw.state)) return null;
+  const validTime = (value, latest) => Number.isSafeInteger(value) && value > 0 && value <= latest ? value : 0;
+  return {
+    state: raw.state,
+    lastAttemptAt: validTime(raw.lastAttemptAt, now + 5000),
+    nextAttemptAt: raw.state === 'waiting' ? validTime(raw.nextAttemptAt, now + 305000) : 0,
+    reason: clean(raw.reason, 220)
+  };
+}
+
 function empty(source, time, error) {
   return { id: source.id, name: source.name, available: false, checkedAt: new Date(time).toISOString(), account: '', authorized: false, connected: false, channel: '', error,
     settings: { allowedChannel: '', paused: true, autoReply: false, autoResume: false, chatMode: 'mentions', replySource: 'local' },
     browser: { online: false, lastSeenAt: null }, watch: { enabled: false, status: 'unknown', channel: '', checkedAt: 0, error: '' },
     activity: { state: 'waiting', reason: error, at: 0 }, streamContext: null, chat: { messages: [], digest: { messages: 0, people: 0, topics: [] } },
-    sent: [], eventFeed: { status: 'unavailable' }, drops: { enabled: false }, coordination: { available: false, paused: false, reason: '' }, permissions: { playbackAccess: false }, controls: { pending: null, recent: [] } };
+    sent: [], recovery: null, eventFeed: { status: 'unavailable' }, drops: { enabled: false }, coordination: { available: false, paused: false, reason: '' }, permissions: { playbackAccess: false }, controls: { pending: null, recent: [] } };
 }
 
 function project(source, raw, time, clean) {
@@ -110,7 +123,7 @@ function project(source, raw, time, clean) {
   const base = empty(source, time, ''), s = record(raw.settings) ? raw.settings : {}, b = record(raw.browser) ? raw.browser : {}, w = record(raw.watch) ? raw.watch : {};
   const lastSeen = timestamp(b.lastSeenAt), online = b.online === true && Number.isFinite(lastSeen) && lastSeen <= time + 5000 && lastSeen >= time - 45000;
   const messages = (Array.isArray(raw.chat?.messages) ? raw.chat.messages : []).filter(m => record(m) && login(m.author) && typeof m.text === 'string' && Number.isFinite(m.at) && m.at <= time + 5000 && m.at >= time - 900000)
-    .slice(-100).map(m => ({ id: clean(m.id, 160), author: m.author, text: clean(m.text), at: m.at, channel: login(m.channel) || login(raw.channel),
+    .slice(-100).map(m => ({ id: clean(m.id, 160), author: m.author, text: clean(m.text, 500), at: m.at, channel: login(m.channel) || login(raw.channel),
       ...(typeof m.replyParentId === 'string' && /^[a-zA-Z0-9:_-]{1,160}$/.test(m.replyParentId) ? { replyParentId: clean(m.replyParentId, 160) } : {}),
       ...(m.isBot === true ? { isBot: true } : {}) }));
   const sent = (Array.isArray(raw.sent) ? raw.sent : []).filter(m => record(m) && login(m.account) && login(m.channel) && Number.isFinite(m.at) && m.at <= time + 5000 && m.at >= time - 14 * 86400000 && typeof m.text === 'string')
@@ -141,6 +154,7 @@ function project(source, raw, time, clean) {
     watch: { enabled: w.enabled === true, status: ['playing', 'paused', 'buffering', 'stalled', 'ad', 'advertisement', 'offline', 'ended', 'checking', 'commercial', 'error'].includes(w.status) ? w.status : 'unknown', channel: login(w.channel), checkedAt: number(w.checkedAt), error: clean(w.error) },
     activity: { state: clean(activity.state, 40), reason: clean(activity.reason), at: number(activity.at) }, streamContext,
     chat: { messages, digest: { messages: messages.length, people: new Set(messages.map(m => m.author)).size, topics: [] } }, sent, drops,
+    recovery: recoveryStatus(raw.recovery, time, clean),
     eventFeed: { status: raw.connected && raw.eventFeed?.status === 'enabled' ? 'enabled' : 'unavailable' },
     coordination: { available: coordination.available === true, paused: coordination.paused === true, reason: clean(coordination.reason) },
     permissions: { playbackAccess: raw.permissions?.playbackAccess === true }, controls: { pending: pending[0] || null, recent } };

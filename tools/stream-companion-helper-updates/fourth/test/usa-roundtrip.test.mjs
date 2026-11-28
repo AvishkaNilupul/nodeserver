@@ -133,3 +133,77 @@ test('lost successful BEGIN response never dispatches the operation or retries B
   assert.equal(h.operations.filter(row => row.action === 'begin' && row.id === lost).length, 1);
   assert.equal(h.calls.filter(row => row.url !== TRACE_URL).length, 0);
 });
+
+test('paired heartbeat restores a 1006 receive socket under the posting hold without a new Start', async t => {
+  const h = harness(t);
+  h.twitch.coordinator = { snapshot: () => ({ available: true, paused: true }) };
+  const { createHelper } = await import('../server.mjs');
+  const http = await import('node:http');
+  const server = createHelper({ config: { extensionId: 'fixture-browser', pairingToken: 'fixture-pair' }, twitch: h.twitch, usaTransport: h.helper });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const post = (path, body) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: server.address().port, method: 'POST', path,
+      headers: { Host: '127.0.0.1:8797', Origin: 'chrome-extension://fixture-browser', Authorization: 'Bearer fixture-pair', 'Content-Type': 'application/json' } }, res => {
+      let data = ''; res.on('data', part => { data += part; }); res.on('end', () => {
+        if (res.statusCode !== 200) return reject(Error(data)); resolve(JSON.parse(data));
+      });
+    });
+    req.on('error', reject); req.end(JSON.stringify(body));
+  });
+  const pump = async check => {
+    for (let n = 0; n < 200 && !check(); n++) await h.tick();
+    assert.ok(check(), 'Synthetic USA relay did not settle');
+  };
+  const welcome = (socket, name) => socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+    metadata: { message_type: 'session_welcome' }, payload: { session: { id: name, keepalive_timeout_seconds: 10 } }
+  }) }));
+  const account = credentials.account, channel = 'friend_channel', sessionId = 'receive-browser-session';
+  const state = { account, settings: { allowedChannel: channel, paused: false, autoReply: true, autoResume: false, revision: 2 },
+    watch: { channel, enabled: true, status: 'playing' } };
+  const { intent } = await post('/api/control/bridge', { sessionId });
+  const binding = { controlGeneration: intent.generation, controlSessionId: sessionId };
+  const heartbeat = () => post('/api/control/bridge', { sessionId, controlGeneration: intent.generation, state });
+  await h.tick();
+  const connected = h.twitch.connect(account, channel); await pump(() => h.sockets.length === 1); await connected;
+  welcome(h.sockets[0], 'first-session'); await pump(() => h.twitch.eventFeed.status === 'enabled');
+  await heartbeat();
+  h.sockets[0].readyState = 3;
+  h.sockets[0].dispatchEvent(Object.assign(new Event('close'), { code: 1006, wasClean: false }));
+  await pump(() => !h.twitch.connected);
+  assert.equal(h.helper.status().lastSocketClose.code, 1006);
+  const statusReader = h.helper.status;
+  await pump(() => statusReader().state === 'ready');
+  for (const invalidProof of [{ checkedAt: Date.now() - 60_000 }, { country: 'CA' }]) {
+    h.helper.status = () => ({ ...statusReader(), ...invalidProof });
+    await heartbeat(); await h.tick();
+    assert.equal((await post('/api/control/status', {})).recovery.state, 'held');
+    assert.equal(h.sockets.length, 1);
+  }
+  h.helper.status = statusReader;
+  await heartbeat(); await pump(() => h.sockets.length === 2);
+  const legacyAlarm = await post('/api/twitch/connect', { account, channel, ...binding });
+  assert.equal(legacyAlarm.connecting, true);
+  await heartbeat();
+  welcome(h.sockets[1], 'second-session'); await pump(() => h.twitch.eventFeed.status === 'enabled');
+  await heartbeat();
+  const status = await post('/api/control/status', {});
+  assert.equal(status.connected, true); assert.equal(status.coordination.paused, true);
+  assert.equal(status.recovery.state, 'recovered'); assert.ok(status.recovery.lastAttemptAt > 0);
+  assert.equal(status.recovery.nextAttemptAt, 0); assert.equal(h.sockets.length, 2);
+  assert.equal(h.calls.filter(x => x.url.endsWith('/chat/messages')).length, 0);
+});
+
+test('losing the US lease between a successful lookup and receive socket creation is recoverable', async t => {
+  const h = harness(t);
+  h.twitch.ensureIdentity = async () => {};
+  h.twitch.api = async () => ({ data: [{ login: 'friend_channel', id: '456' }] });
+  // The preceding lookup succeeded, but there is no longer a paired relay
+  // lease at the WebSocket constructor. No provider operation can be queued.
+  await assert.rejects(h.twitch.connect(credentials.account, 'friend_channel'), { code: 'usa_transport_held' });
+  assert.equal(h.sockets.length, 0); assert.equal(h.calls.length, 0);
+  assert.equal(h.twitch.status().recoverable, true);
+  await h.tick(); await h.tick(); await h.twitch.connect(credentials.account, 'friend_channel');
+  for (let n = 0; n < 30 && h.sockets.length === 0; n++) await h.tick();
+  assert.equal(h.sockets.length, 1);
+});

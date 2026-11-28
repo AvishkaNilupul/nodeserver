@@ -110,6 +110,7 @@ test('local and paired account pages draft corrected scores and dispatch only an
     } while (Date.now() < deadline);
     assert.equal(command.state, 'completed', command.error);
     assert.equal(command.result.targetAuthor, viewer);
+    assert.deepEqual(command.result.target, { id: target.id, author: viewer, text: target.text, at: target.at });
     assert.equal(command.result.account, client.account);
     assert.match(command.result.text, new RegExp(`\\b${score}\\b`));
     assert.doesNotMatch(command.result.text, /\b(?:8|11)\b/);

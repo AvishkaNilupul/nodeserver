@@ -104,6 +104,35 @@ test('native model honors vetted requests across languages and reads compact sco
     assert.match(noResult, /don.t have that result/i);
   });
 
+test('native drafts abstain from reporting the player’s progress and preserve grounded facts and corrections',
+  { skip: process.env.COMPANION_QA_DEVICE_MODEL !== '1' }, async t => {
+    const ask = (text, messages = [], stream = { category: 'Deadlock', title: 'Retro achievements tonight' }) =>
+      generateOperatorDraft({ ...context, stream, target: { author: 'viewer', text }, messages }, { selectedConversation: true });
+    const other = { author: 'viewer', text: 'I beat that challenge yesterday.' };
+    for (const target of ['I had to tune out earlier, did you beat the retro achievement challenge?',
+      'Has the streamer finally unlocked the achievement?', 'Which boss are you on?',
+      'How did your run go?', 'So, you cleared the final puzzle?', 'Are you done with the challenge?',
+      'Is the achievement unlocked already?', 'How far into the run are you?', 'Finished yet?',
+      '¿Ya completaste el desafío?', 'What rank did the match end on?']) {
+      await assert.rejects(ask(target, [other]), errorCode('no_reply'), target);
+    }
+    const noScore = await ask('Who won round 2?', [
+      { author: 'viewer', text: 'I hope Red won.' }, { author: 'operator', text: 'Red won 4–2.' }
+    ], { title: 'Day 2, Round 12' });
+    assert.match(noScore, /don.t have that result/i);
+    const facts = { author: 'viewer', text: 'The pine route crosses one bridge. The quarry route crosses three bridges.' };
+    const question = 'Which route crosses three bridges?';
+    const answer = await ask(question, [facts]);
+    assert.match(answer, /quarry/i);
+    assert.doesNotMatch(answer, /I.d try/i);
+    const correction = await ask('No, the other route. How many bridges does it cross?', [
+      facts, { author: 'viewer', text: question }, { author: 'operator', text: 'The quarry route crosses three bridges.' }
+    ]);
+    assert.match(correction, /(?:one|1|single) bridge/i);
+    assert.doesNotMatch(correction, /three bridges/i);
+    t.diagnostic(JSON.stringify({ unsupportedPlayerQuestions: 11, noScore, answer, correction }));
+  });
+
 test('propagates unavailable model and handles malformed or excessive output without revealing it', async () => {
   await assert.rejects(generateOperatorDraft(context, { spawnImpl: fixture('process.exit(69)') }), errorCode('model_unavailable'));
   for (const raw of ['invalid response containing the fixture secret', 'x'.repeat(2500)]) {

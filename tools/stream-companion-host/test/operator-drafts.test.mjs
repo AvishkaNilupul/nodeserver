@@ -55,10 +55,61 @@ test('all four accounts receive independent review jobs and only the confirmed n
   await nextTurn();
   for (const account of f.instances) {
     assert.deepEqual(f.status('draft-1', account).result, { text: 'Yeah, just before the red post.', reason: 'Draft reply to @viewerone.',
-      account: account.account, channel, targetAuthor: 'viewerone', streamId: '123' });
+      account: account.account, channel, targetAuthor: 'viewerone', streamId: '123',
+      target: { id: 'related', author: 'viewerone', text: 'So brake before the crest?', at: start - 4000 } });
     assert.equal(f.service.decorate(account).controls.pending, null);
     assert.equal(account.settings.replySource, 'local');
   }
+});
+
+test('plain names address one participant on all four profiles and cannot leak through a native parent', async t => {
+  const f = fixture(t);
+  for (const a of f.instances) {
+    a.chat.messages = [msg('presence', 'cedar', '!points', 16_000),
+      msg('question', 'viewerone', 'Cedar, which route did you take?', 15_000),
+      msg('again', 'viewerone', 'And the other checkpoint?', 14_000, { replyParentId: 'question' }),
+      msg('colon', 'viewertwo', 'CEDAR: which bridge?', 13_000),
+      msg('greet', 'viewertwo', 'hey Cedar which bridge?', 12_000),
+      msg('tail', 'viewertwo', 'Which one, Cedar?', 11_000),
+      msg('host', 'viewerone', 'RallyRoom, which route?', 10_000),
+      msg('pair', 'viewerone', 'Mainhost and Cedar, which route?', 8000),
+      msg('cold', 'viewerone', 'Maple, which route did you take?', 7000)];
+    await assert.rejects(f.service.request(a.id, body()), { code: 'no_conversation' });
+  }
+  assert.equal(f.calls.length, 0);
+  for (const a of f.instances) a.chat.messages.push(msg('direct', 'viewerone', 'Hey MainHost, blue looks good.'));
+  await f.service.request('primary', body());
+  assert.equal(f.contexts[0].target.text, 'Hey MainHost, blue looks good.');
+  assert.deepEqual(f.contexts[0].messages, []);
+  for (const id of ids.slice(1)) await assert.rejects(f.service.request(id, body()), { code: 'no_conversation' });
+});
+
+test('room calls, third-person references and names from another channel stay eligible', async t => {
+  for (const text of ['chat, which route?', 'Where is Cedar playing?', 'Cedar is playing on which route?', 'Actually, which route did you take?', 'OtherRoom, which route?']) {
+    const f = fixture(t);
+    f.account.chat.messages = [msg('known', 'cedar', '!points', 1000), msg('room-word', 'chat', '!points', 1000),
+      msg('foreign', 'otherroom', '!points', 1000, { channel: 'elsewhere' }), msg('target', 'viewerone', text)];
+    await f.service.request('primary', body());
+    assert.equal(f.contexts[0].target.text, text);
+  }
+});
+
+test('a separate named turn from the target author leaves a retained draft and its exact source intact', async t => {
+  const f = fixture(t);
+  const text = 'Which turn comes after the crest?';
+  f.account.chat.messages = [msg('known', 'cedar', 'nice', 3000), msg('source', 'viewerone', text, 2000)];
+  await f.service.request('primary', body());
+  f.calls[0].resolve('The left hairpin.'); await nextTurn();
+  f.account.chat.messages.push(msg('aside', 'viewerone', 'Cedar: which gear did you use?'));
+  assert.equal(f.status().state, 'completed');
+  assert.deepEqual(f.status().result.target, { id: 'source', author: 'viewerone', text, at: start - 2000 });
+  // A newly identified addressee must also withdraw a previously selected draft.
+  const second = fixture(t);
+  second.account.chat.messages = [msg('unknown', 'viewerone', 'Cedar: which gear?')];
+  await second.service.request('primary', body());
+  second.account.chat.messages.push(msg('first-seen', 'cedar', '!points'));
+  assert.equal(second.status().state, 'cancelled');
+  assert.equal(second.status().result, undefined);
 });
 
 test('an unthreaded follow-up to a mention wins over newer chatter, with only the same viewer as context', async t => {

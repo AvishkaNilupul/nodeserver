@@ -87,7 +87,10 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       return;
     }
     const title = room ? `Draft for @${result.targetAuthor} in #${room.channel}` : summary ? 'Chat summary' : 'Draft reply';
-    form.draftResult = { title, text: draft, room };
+    const target = result.target;
+    const source = room && target?.author === result.targetAuthor && typeof target.text === 'string'
+      && Number.isFinite(target.at) && target.at > 0 ? target : null;
+    form.draftResult = { title, text: draft, room, source };
     if (!summary && fillComposer && validMessage(draft)) {
       form.text = draft; form.textRevision++; form.draftRoom = room && { ...room, original: draft };
     }
@@ -598,6 +601,24 @@ function renderQuick(view, state, now, canCommand) {
     return row;
   }));
 }
+const RECOVERY_LABELS = { idle: 'Idle', retrying: 'Reconnecting', waiting: 'Waiting to retry', held: 'On hold', recovered: 'Reconnected' };
+
+function chatRecovery(instance, current, now) {
+  const recovery = instance?.recovery;
+  if (!recovery || !Object.hasOwn(RECOVERY_LABELS, recovery.state)) return null;
+  const title = RECOVERY_LABELS[recovery.state];
+  const details = [];
+  if (recovery.reason) details.push(recovery.reason);
+  if (recovery.lastAttemptAt > 0) details.push(`Last attempt · ${age(recovery.lastAttemptAt, now)}`);
+  if (current && recovery.state === 'waiting' && recovery.nextAttemptAt > 0) {
+    const seconds = Math.ceil((recovery.nextAttemptAt - now) / 1000);
+    details.push(seconds > 0 ? `Next retry in ${seconds}s` : 'Retry due');
+  }
+  if (!current) details.push('Waiting for a fresh status.');
+  const tone = current && recovery.state === 'recovered' ? 'good' : current && recovery.state !== 'idle' ? 'warn' : 'muted';
+  return { title: current ? title : `Last reported · ${title}`, detail: details.join(' · '), tone };
+}
+
 function renderCards(view, state, now) {
   const cards = [];
   for (const id of IDS) {
@@ -608,6 +629,8 @@ function renderCards(view, state, now) {
     heading.append(title, pill(view, session.title, session.tone));
     const details = view.el('dl', undefined, 'card-details');
     details.append(pair(view, 'Channel', instance?.channel ? `#${instance.channel}` : 'No channel'), pair(view, 'Playback', playing.title), pair(view, 'Chat connection', stale ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected'), pair(view, 'Browser bridge', stale ? 'Unverified' : bridgeFresh(instance, now) ? 'Current' : 'Unavailable'), pair(view, 'Sub & gift alerts', stale ? 'Unverified' : instance?.connected && instance?.eventFeed?.status === 'enabled' ? 'Listening' : 'Unavailable'));
+    const recovery = chatRecovery(instance, !stale, now);
+    if (recovery && !instance.connected && !instance.settings?.paused) details.append(pair(view, 'Chat recovery', recovery.title));
     const reason = view.el('p', stale ? 'Showing last known account data. Waiting for a fresh host response.' : bridgeReason(instance, now) || text(instance?.activity?.reason, 'Ready for account controls.'), 'card-reason');
     const link = view.el('a', 'Open account controls', 'open-account'); link.setAttribute('href', controllerPath(state.basePath || '', `/accounts/${id}`));
     card.append(heading, details, reason, link); cards.push(card);
@@ -698,7 +721,21 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n['auto-resume'].checked = form.autoResume === true;
   n['text-count'].textContent = `${(form.text || '').length} / 300`;
   n['draft-result'].hidden = !form.draftResult;
-  n['draft-result'].replaceChildren(...(form.draftResult ? [view.el('strong', form.draftResult.title), view.el('p', form.draftResult.text, 'message-body')] : []));
+  const review = form.draftResult;
+  if (review) {
+    const content = [view.el('strong', review.title)];
+    if (review.source) {
+      const source = review.source;
+      content.push(view.el('p', `Original message from @${source.author} · ${new Date(source.at).toLocaleTimeString()}`, 'message-detail'),
+        view.el('blockquote', source.text, 'message-body'), view.el('strong', 'Suggested reply'));
+    } else if (review.room) {
+      content.push(view.el('p', 'Original message unavailable for this draft.', 'message-detail'));
+    }
+    content.push(view.el('p', review.text, 'message-body'));
+    n['draft-result'].replaceChildren(...content);
+  } else {
+    n['draft-result'].replaceChildren();
+  }
   n.start.disabled = !canCommand(id, 'start') || !validChannel(form.channel);
   n.stop.disabled = !preparation && !canCommand(id, 'stop'); n.watch.disabled = !canCommand(id, 'watch'); n['save-settings'].disabled = !canCommand(id, 'settings');
   n.draft.disabled = !canCommand(id, 'draft'); n.summary.disabled = !canCommand(id, 'draft'); n.send.disabled = !canCommand(id, 'send') || !validMessage(form.text);
@@ -711,6 +748,8 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   n['settings-current'].textContent = !instance?.browser?.lastSeenAt ? 'Settings unverified. Waiting for the browser’s first check-in.' : settings ? `${currentBridge ? 'Current session' : 'Last reported settings'}: ${settings.chatMode === 'participate' ? 'Occasional participation' : 'Mentions'} · ${settings.replySource === 'ai' ? 'AI replies' : 'Bank replies'} · recovery ${settings.autoResume ? 'on' : 'off'} · ${settings.autoReply ? 'automatic replies on' : 'automatic replies off'}` : 'Current settings unavailable.';
   const video = playback(instance, now, !online);
   n['status-checks'].replaceChildren(check(view, 'Chat connection', !online ? 'Unverified' : instance?.connected ? 'Connected' : 'Disconnected', instance?.channel ? `#${instance.channel}` : 'No current chat channel', online && instance?.connected ? 'good' : 'warn'), check(view, 'Video playback', video.title, video.detail, video.tone), check(view, 'Browser bridge', !online ? 'Unverified' : currentBridge ? 'Current' : 'Unavailable', `Last check-in: ${age(instance?.browser?.lastSeenAt, now)}`, currentBridge ? 'good' : 'warn'), check(view, 'Playback access', !online ? 'Unverified' : instance?.permissions?.playbackAccess === true ? 'Granted' : 'Required', !online ? 'Waiting for a fresh host response.' : instance?.permissions?.playbackAccess === true ? 'Permission is separate from playback.' : 'Grant in the extension fallback controls.', online && instance?.permissions?.playbackAccess === true ? 'good' : 'warn'));
+  const recovery = chatRecovery(instance, online, now);
+  if (recovery) n['status-checks'].append(check(view, 'Chat recovery', recovery.title, recovery.detail, recovery.tone));
   renderOperation(view, state, instance, id, now); renderBroadcast(view, instance, now, online && currentBridge); renderMessages(view, instance, now); renderDrops(view, instance, now);
 }
 
