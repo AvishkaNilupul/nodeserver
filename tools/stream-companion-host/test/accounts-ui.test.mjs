@@ -505,3 +505,15 @@ test('account view shows receive retries separately from playback and expires a 
   assert.match(checks.textContent, /Chat recoveryReconnected/);
   assert.doesNotMatch(checks.textContent, /Next retry/);
 });
+
+test('local and relayed account pages identify the reviewed draft provider', async () => {
+  for (const basePath of ['', '/admin/stream-companion']) {
+    for (const [draftProvider, expected] of [['gemini', /Google Gemini.*account names replaced/], ['local', /on-device model/], ['unavailable', /provider is unavailable/]]) {
+      const c = controller(async () => reply(snapshot({ draftProvider })), { basePath });
+      await c.refresh();
+      const v = view();
+      renderAccounts(v, c.getState(), { id: 'primary', now: at });
+      assert.match(v.nodes['draft-provider'].textContent, expected);
+    }
+  }
+});

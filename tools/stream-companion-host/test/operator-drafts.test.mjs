@@ -19,9 +19,9 @@ function fixture(t, options = {}) {
     chat: { messages: [msg('first', 'viewerone', 'Was the left turn tighter?')] }, sent: []
   }));
   const calls = [], contexts = [];
-  const generate = (context, { signal }) => {
+  const generate = (context, { signal, knownLogins }) => {
     contexts.push(context);
-    return new Promise((resolve, reject) => calls.push({ resolve, reject, signal }));
+    return new Promise((resolve, reject) => calls.push({ resolve, reject, signal, knownLogins }));
   };
   const service = createOperatorDrafts({ snapshot: async () => ({ instances }), generate, now: () => time, companionLogins: logins, ...options });
   t.after(() => service.stop());
@@ -92,6 +92,66 @@ test('room calls, third-person references and names from another channel stay el
     await f.service.request('primary', body());
     assert.equal(f.contexts[0].target.text, text);
   }
+});
+
+test('a room greeting or farewell is eligible on its own, with the original viewer message bound to the review', async t => {
+  for (const text of ['hello chat!', 'Hey, everyone!', 'Good evening folks.', 'headed out have a great night everyone~']) {
+    const f = fixture(t);
+    f.account.chat.messages = [msg('old', 'viewerone', 'I broke my phone.', 8000), msg('source', 'viewerone', text)];
+    await f.service.request('primary', body());
+    assert.deepEqual(f.contexts[0].target, { author: 'viewerone', text });
+    assert.deepEqual(f.contexts[0].messages, []);
+    f.calls[0].resolve('Hi there!'); await nextTurn();
+    assert.deepEqual(f.status().result.target, { id: 'source', author: 'viewerone', text, at: start });
+  }
+});
+
+test('social openings stay with the room and cannot crowd out a viewer question or direct turn', async t => {
+  const f = fixture(t);
+  f.account.chat.messages = [msg('stranger', 'viewerone', 'hello Cedar!'), msg('mention', 'viewertwo', 'bye @somebodyelse'),
+    msg('third-party', 'anotherfan', 'hello everyone!', 0, { replyParentId: 'unknown' }), msg('bot', 'nightbot', 'hello chat!'),
+    msg('emote', 'viewertwo', 'hey hey hey'), msg('quote', 'anotherfan', 'he said hello chat!')];
+  await assert.rejects(f.service.request('primary', body()), { code: 'no_conversation' });
+  f.account.chat.messages = [msg('question', 'viewerone', 'Which way is the checkpoint?', 3000), msg('social', 'anotherfan', 'hello chat!')];
+  await f.service.request('primary', body());
+  assert.equal(f.contexts[0].target.text, 'Which way is the checkpoint?');
+});
+
+test('a group greeting gets one reviewer and expires when that viewer says goodnight', async t => {
+  const f = fixture(t);
+  for (const a of f.instances) a.chat.messages = [msg('hello', 'viewerone', 'hi chat!', 3000)];
+  await f.service.request('primary', body());
+  await assert.rejects(f.service.request('third', body('same-greeting')), { code: 'no_conversation' });
+  f.calls[0].resolve('Hey!'); await nextTurn();
+  f.account.chat.messages.push(msg('farewell', 'viewerone', 'goodnight chat!'));
+  assert.equal(f.status().state, 'cancelled');
+  await f.service.request('primary', body('goodnight'));
+  assert.deepEqual(f.contexts[1].target, { author: 'viewerone', text: 'goodnight chat!' });
+  assert.deepEqual(f.contexts[1].messages, []);
+});
+
+test('the generator gets the same viewer’s question-form setup and separate local room-name metadata', async t => {
+  const f = fixture(t);
+  const setup = 'Did you know Addison says "adds 2 seconds" but adds 2 minutes?';
+  const target = 'Is it an "Add"-ison joke?';
+  f.account.chat.messages = [msg('setup', 'viewerone', setup, 28_000), msg('other', 'bystander', 'Do you like this?', 11_000),
+    msg('private', 'viewerone', '@bystander did you see that?', 3000), msg('cmd', 'viewerone', '!points', 1000),
+    msg('target', 'viewerone', target), msg('else', 'elsewhereuser', 'Hi', 0, { channel: 'otherroom' })];
+  await f.service.request('primary', body());
+  assert.deepEqual(f.contexts[0].target, { author: 'viewerone', text: target });
+  assert.deepEqual(f.contexts[0].messages, [{ author: 'viewerone', text: setup }]);
+  assert.deepEqual(Object.keys(f.contexts[0]).sort(), ['account', 'channel', 'messages', 'stream', 'target']);
+  assert.deepEqual(new Set(f.calls[0].knownLogins), new Set([...logins, channel, 'viewerone', 'bystander']));
+});
+
+test('a provider rate limit leaves a failed empty draft and keeps diagnostics private', async t => {
+  const f = fixture(t);
+  await f.service.request('primary', body());
+  f.calls[0].reject(Object.assign(Error('secret provider diagnostics'), { code: 'model_rate_limited' })); await nextTurn();
+  assert.equal(f.status().state, 'failed');
+  assert.match(f.status().error, /rate limit|quota/i);
+  assert.doesNotMatch(f.status().error, /secret/);
+  assert.equal(f.status().result, undefined);
 });
 
 test('a separate named turn from the target author leaves a retained draft and its exact source intact', async t => {

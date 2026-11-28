@@ -13,6 +13,12 @@ const ordinal = id => ({ primary: 'main', test: 'second', third: 'third', fourth
 const ACTIONS = new Set(['start', 'stop', 'watch', 'settings', 'draft', 'send', 'drops-enable', 'drops-disable', 'drops-check']);
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'expired']);
 const ACTION_LABELS = { start: 'Start companion', stop: 'Stop companion', watch: 'Open stream', settings: 'Save settings', draft: 'Create draft', send: 'Send reviewed message', 'drops-enable': 'Enable drop claims', 'drops-disable': 'Disable drop claims', 'drops-check': 'Check drops' };
+const DRAFT_PROVIDER_LABELS = {
+  gemini: 'Draft reply sends the selected chat excerpt to Google Gemini 3.1 Flash-Lite, with account names replaced.',
+  local: 'Draft reply uses the on-device model.',
+  helper: 'Draft reply uses the browser helper.',
+  unavailable: 'The reviewed draft provider is unavailable. Check the Gemini key on the host.'
+};
 const STATE_LABELS = { queued: 'Queued', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', expired: 'Expired', submitting: 'Submitting', unknown: 'Awaiting outcome' };
 const text = (value, fallback = '—') => typeof value === 'string' && value ? value : fallback;
 const list = value => Array.isArray(value) ? value : [];
@@ -523,7 +529,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     stop() { if (timer !== null) clearIntervalImpl(timer); timer = null; } };
 }
 
-const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed','quick-channel','quick-channel-status','quick-channel-detail','quick-refresh','quick-lookup','quick-find','quick-account-primary','quick-account-test','quick-account-both','quick-account-third','quick-account-fourth','quick-account-all','quick-primary-label','quick-test-label','quick-third-label','quick-fourth-label','quick-start','quick-stop','quick-error','quick-message','quick-outcomes','quick-outcome-heading'];
+const NODE_IDS = ['page-eyebrow','page-title','page-description','network-status','connection-notice','access-actions','command-error','accounts-overview','account-cards','account-detail','account-reason','session-state','channel','chat-mode','reply-source','auto-resume','start','stop','watch','save-settings','settings-current','status-checks','operation-state','operation-detail','broadcast','draft','summary','draft-provider','draft-result','message-text','text-count','send','chat-count','chat-digest','incoming-chat','sent-count','delivery-history','drops-state','drops-detail','drops-enable','drops-disable','drops-check','command-history','last-refreshed','quick-channel','quick-channel-status','quick-channel-detail','quick-refresh','quick-lookup','quick-find','quick-account-primary','quick-account-test','quick-account-both','quick-account-third','quick-account-fourth','quick-account-all','quick-primary-label','quick-test-label','quick-third-label','quick-fourth-label','quick-start','quick-stop','quick-error','quick-message','quick-outcomes','quick-outcome-heading'];
 export function createAccountsView(document) {
   const nodes = Object.fromEntries(NODE_IDS.map(id => [id, document.getElementById(id)]));
   function el(tag, content, className) { const node = document.createElement(tag); if (content !== undefined) node.textContent = String(content); if (className) node.className = className; return node; }
@@ -731,6 +737,7 @@ export function renderAccounts(view, state, { id = null, now = Date.now(), canCo
   for (const [node, key] of [['channel', 'channel'], ['chat-mode', 'chatMode'], ['reply-source', 'replySource'], ['message-text', 'text']]) if (n[node].value !== form[key]) n[node].value = form[key];
   n['auto-resume'].checked = form.autoResume === true;
   n['text-count'].textContent = `${(form.text || '').length} / 300`;
+  n['draft-provider'].textContent = label(DRAFT_PROVIDER_LABELS, state.data?.draftProvider, '');
   n['draft-result'].hidden = !form.draftResult;
   const review = form.draftResult;
   if (review) {

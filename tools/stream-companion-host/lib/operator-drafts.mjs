@@ -9,7 +9,8 @@ const failure = (message, status = 409) => Object.assign(new Error(message), { s
 const targetAge = 120_000, historyAge = 300_000, jobTimeout = 30_000, retention = 300_000;
 const modelErrors = {
   invalid_draft: 'The model returned an unusable draft. Request another draft.',
-  model_unavailable: 'The on-device draft model is unavailable.',
+  model_unavailable: 'The configured draft model is unavailable.',
+  model_rate_limited: 'The draft provider reached a rate limit or quota. Check its limits before requesting another draft.',
   model_timeout: 'Draft generation timed out. Request another draft.'
 };
 const safeText = value => typeof value === 'string' && !!value.trim() && value.length <= 500
@@ -66,6 +67,9 @@ function addressees(text, names) {
 // A room-wide remark needs an actual opening for a reply. Direct mentions and
 // verified native replies have their own evidence of conversational intent.
 const questionMark = /[?¿؟՞፧⁇⁈⁉﹖？]/u;
+// Requiring an explicit room addressee keeps an isolated "hi" or "bye Cedar"
+// out of the review queue. These turns rank below questions and direct replies.
+const roomSalutation = /^(?:hi|hello|hey|hiya|yo|bye|goodbye|later|good\s*(?:morning|afternoon|evening|night)|see (?:you|ya)|(?:(?:heading|headed) out[\s,.!]+)?have a (?:good|great|nice) (?:day|night))[\s,，!]+(?:chat|everyone|everybody|folks|guys|all|friends|y['’]?all)[\s.!！~]*$/iu;
 const requestForms = [
   /^(?:any(?:one|body)\s+(?:know|remember|have|up for)|any\s+(?:tips|ideas|advice|recommendations))\b/iu,
   /^(?:(?:please\s+)?(?:tell|show|teach|remind|help)\s+(?:me|us)|(?:please|pls)\s+(?:explain|help|show|share)|walk (?:me|us) through|recommend (?:a|an|some))\b/iu,
@@ -128,6 +132,10 @@ function selectConversation(instance, companions, time) {
     const recipients = addressees(m.text, names), path = ancestry(m);
     if (!path || recipients.some(name => name !== account)) continue;
     const direct = recipients.includes(account) || path.some(parent => parent.author === account || addressees(parent.text, names).includes(account));
+    if (!direct && roomSalutation.test(m.text.trim())) {
+      if (m.at >= time - targetAge && (!selected || selected.priority === -1)) selected = { m, path: [], priority: -1 };
+      continue;
+    }
     const ask = invitesReply(m.text);
     const previous = lastOpening.get(m.author);
     const recent = previous && m.at - previous.m.at <= 60_000 ? previous : null;
@@ -148,16 +156,16 @@ function selectConversation(instance, companions, time) {
       selected = { m, path: branch, priority, ownReply };
     }
   }
-  if (!selected) throw Object.assign(failure('There is no recent viewer question, request, or direct conversation to reply to in this channel.'), { code: 'no_conversation' });
+  if (!selected) throw Object.assign(failure('There is no recent viewer question, room greeting, or conversation to reply to in this channel.'), { code: 'no_conversation' });
   const { m: target, path, ownReply } = selected;
-  const earlier = incoming.slice(0, incoming.indexOf(target)).filter(m => m.at >= target.at - targetAge
+  const earlier = selected.priority === -1 ? [] : incoming.slice(0, incoming.indexOf(target)).filter(m => m.at >= target.at - targetAge
     && m.author === target.author && !m.replyParentId && addressees(m.text, names).every(name => name === account)).slice(-4);
   const contextRows = [...earlier, ...path];
   if (ownReply) contextRows.push(ownReply);
   const messages = [...new Set(contextRows)].sort((a, b) => a.at - b.at).map(m => ({ author: m.author, text: m.text }));
   const stream = instance.streamContext;
   const thread = new Set([target.id, target.replyParentId, ...path.map(m => m.id)].filter(messageId));
-  return { target, thread, directed: selected.priority === 1, context: { account, channel, target: { author: target.author, text: target.text }, messages,
+  return { target, thread, directed: selected.priority === 1, knownLogins: [...names], context: { account, channel, target: { author: target.author, text: target.text }, messages,
     stream: stream?.isLive && stream.channel === channel && fresh(stream.checkedAt, time, 120_000)
       ? { title: safeText(stream.title) ? stream.title : '', category: safeText(stream.gameName) ? stream.gameName : '' } : null } };
 }
@@ -171,7 +179,8 @@ function hasNewerFollowUp(job, instance, names, time) {
       || m.isBot || m.bot || !safeText(m.text) || personalInsult(m.text)) return false;
     const recipients = addressees(m.text, names);
     if (recipients.some(name => name !== job.account)) return false;
-    const follows = invitesReply(m.text) || continuesTurn(m.text, job.directed);
+    const follows = invitesReply(m.text) || continuesTurn(m.text, job.directed)
+      || roomSalutation.test(job.targetText.trim()) && roomSalutation.test(m.text.trim());
     if (m.replyParentId) return job.thread.has(m.replyParentId) && (job.directed || follows);
     if (recipients.includes(job.account) || m.at - job.targetAt <= 60_000 && follows) return true;
     return instance.sent.some(s => s.delivery === 'confirmed' && s.account === job.account && s.channel === job.channel
@@ -234,9 +243,9 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     return new Set([...configured, ...instances.map(i => i.account).filter(login)]);
   }
 
-  async function generateDraft(job, context) {
+  async function generateDraft(job, context, knownLogins) {
     try {
-      const raw = await generate(context, { signal: job.controller.signal, selectedConversation: true });
+      const raw = await generate(context, { signal: job.controller.signal, selectedConversation: true, knownLogins });
       if (job.command.state !== 'running') return;
       let text;
       try { text = validateReply(raw); } catch { /* Report validation failures without including model text. */ }
@@ -257,7 +266,7 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
         finish(job, 'completed', '', { suggested: false, reason: 'No reply suggested. The conversation does not call for a response.' });
       } else {
         finish(job, 'failed', Object.hasOwn(modelErrors, error?.code)
-          ? modelErrors[error.code] : 'The draft could not be generated. Refresh the account and check the on-device model.');
+          ? modelErrors[error.code] : 'The draft could not be generated. Check the draft provider and request a fresh draft.');
       }
     }
   }
@@ -314,7 +323,7 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     if (instance.controls?.recent?.some(c => c.requestId === body.requestId)) throw failure('That request ID was already used for an account operation.');
     if (entries.length >= 30) throw failure('Too many recent draft requests. Wait before requesting another draft.', 429);
     if (!companions) throw failure('Companion identities are unavailable. Refresh the account list before drafting.');
-    const { target, thread, directed, context } = selectConversation(instance, companions, now());
+    const { target, thread, directed, knownLogins, context } = selectConversation(instance, companions, now());
     const broadcast = streamId(instance);
     // No await between checking the other accounts and registering this job.
     const owner = reviewOwner(instance, broadcast, target.id, instances, companions, sequence);
@@ -329,7 +338,7 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     job.timer = setTimeout(() => { if (job.command.state === 'running') finish(job, 'expired', modelErrors.model_timeout); }, jobTimeout);
     job.timer.unref();
     jobs.set(id, [job, ...entries]);
-    void generateDraft(job, context);
+    void generateDraft(job, context, knownLogins);
     return { ok: true, command };
   }
 

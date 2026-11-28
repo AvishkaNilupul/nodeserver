@@ -30,7 +30,9 @@ Pages show independent chat, video, browser check-in and permission status; curr
 
 The extension stays installed as the browser/watch engine and checks in without keeping a dashboard tab open. The regular alarm provides a fallback for worker termination, following [Chrome's service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle/). The Mac, Chrome profiles and actual Twitch players still need to be awake and available. No recurring window-focus job is added.
 
-On an Apple Intelligence Mac with the Foundation Models SDK, run `npm run build:operator-draft` in the host directory. **Draft reply** looks for a recent viewer question or an ongoing conversation with the account and asks the on-device model for a reply. The page names the viewer and channel above the editable text. If a room has only passing remarks, the page explains why it has no suggestion. **Send reviewed message** submits the text after review. The saved automatic reply source is a separate setting.
+**Draft reply** selects a recent viewer question, room greeting or ongoing conversation and shows the original message alongside an editable suggestion. **Send reviewed message** submits the operator's text. Automatic chat uses its own saved reply source.
+
+For Gemini drafts, store the Google Gemini API key as plain text in `private/gemini-draft.key` with permissions `0600`, then restart the host. The account page shows the active provider. This sends a short excerpt with participant handles replaced to Gemini 3.1 Flash-Lite. Use a free-tier Google AI Studio project for free-tier quotas. If the configured provider is unavailable, the operator sees the error. On an Apple Intelligence Mac without a Gemini key, `npm run build:operator-draft` builds the on-device provider.
 
 For a native subscription, gift or Bits event, the director holds an already submitted stock reaction for the rest of that broadcast across all profiles. A held reaction stays silent.
 

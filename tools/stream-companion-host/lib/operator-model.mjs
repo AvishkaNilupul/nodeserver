@@ -12,7 +12,7 @@ const noReply = () => fail('no_reply', 'There’s nothing useful to reply to her
 
 // A small model can describe the exchange even when asked for the words to
 // send. Keep that commentary out of the editable reply.
-function isCommentary(text) {
+export function isDraftCommentary(text) {
   return /^(?:no[_ -]reply\b|no (?:reply|action|response) (?:is )?(?:required|needed|necessary)\b|(?:suggested|draft|possible|operator(?:'s)?) (?:reply|response)\b|(?:reply|response|analysis|summary|action|operator)\s*:)/i.test(text)
     || /^(?:acknowledged|acknowledges?|acknowledging|recognizes?|recognizing|responds? to|responding to|summarizes?|summarizing)\s+(?:(?:the|their|this|that|your)\s+)?(?:comment|message|viewer|user|question|sentiment|observation|opinion|concern)\b/i.test(text)
     || /^(?:(?:the|this|that|their)\s+)?(?:message|comment|statement|question|viewer|user|speaker)\s+(?:contains|expresses|asks|states|suggests|is asking|is expressing|is making|does not|doesn't|indicates|appears)\b/i.test(text)
@@ -98,7 +98,7 @@ export async function generateOperatorDraft(context, { signal, spawnImpl = spawn
         const reply = validateReply(result.text);
         // Also withhold plain-domain links that would autolink in a chat client.
         if (/(?:[\p{L}0-9-]+\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,63})\b|\b[a-z][a-z0-9+.-]*:\/\//iu.test(reply)) throw new Error();
-        if (isCommentary(reply)) return finish(noReply());
+        if (isDraftCommentary(reply)) return finish(noReply());
         finish(null, reply);
       } catch {
         finish(fail('invalid_draft', 'The model returned no usable single-line draft.'));

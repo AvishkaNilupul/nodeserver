@@ -9,7 +9,7 @@ import { createBrowserLauncher, loadBrowserProfiles } from './lib/browser-launch
 import { createClipController } from './lib/clips.mjs';
 import { createStatusLogger } from './lib/status-log.mjs';
 import { createOperatorDrafts } from './lib/operator-drafts.mjs';
-import { generateOperatorDraft } from './lib/operator-model.mjs';
+import { loadReviewedDraftProvider } from './lib/reviewed-provider.mjs';
 
 const equal = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || '')); return x.length === y.length && timingSafeEqual(x, y); };
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -50,7 +50,7 @@ async function bodyJSON(req) {
   return value;
 }
 
-export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), browserLauncher = createBrowserLauncher(), clips, generateDraft, port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
+export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), browserLauncher = createBrowserLauncher(), clips, generateDraft, draftProviderName, port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
   if (!store || !Array.isArray(clients) || !clients.length) throw Error('Host store and clients required.');
   for (const c of clients) if (typeof c.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(c.token) || store.client(c.id).account !== c.account) throw Error('Invalid coordination client pairing.');
   if (new Set(clients.map(c => c.token)).size !== clients.length) throw Error('Coordination clients require separate tokens.');
@@ -155,7 +155,7 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
         if (!sameOrigin(req)) return send(res, 403, { error: 'Open the local account pages to view status.' });
         const value = await accountSnapshot();
-        return send(res, 200, { ...value, instances: value.instances.map(instance => ({ ...(operatorDrafts ? operatorDrafts.decorate(instance, value.instances) : instance),
+        return send(res, 200, { ...value, draftProvider: draftProviderName || (generateDraft ? 'local' : 'helper'), instances: value.instances.map(instance => ({ ...(operatorDrafts ? operatorDrafts.decorate(instance, value.instances) : instance),
           browser: { ...instance.browser, canOpen: browserLauncher.available(instance.id) === true } })), csrfToken });
       }
       if (path === '/api/clips') {
@@ -261,8 +261,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const statusLog = createStatusLogger();
   const accounts = createAccountManager({ onSnapshot: value => statusLog.observe(value) });
   const clips = createClipController({ db: store.db, accounts, isPaused: () => store.paused });
+  const provider = await loadReviewedDraftProvider();
   const server = createHostServer({ store, clients: config.clients, remoteToken, browserLauncher, accounts, clips,
-    generateDraft: process.platform === 'darwin' ? generateOperatorDraft : undefined });
+    generateDraft: provider.generate, draftProviderName: provider.name });
   server.once('close', async () => { await clips.close(); statusLog.lifecycle('stopped'); store.close(); });
   server.listen(8795, '127.0.0.1', () => { statusLog.lifecycle('started'); clips.start(); console.log('Stream Companion Host 1.0.0 listening on http://127.0.0.1:8795'); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => server.close());
