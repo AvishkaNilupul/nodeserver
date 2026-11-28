@@ -15,6 +15,10 @@ test("Arcade Studio guards all resources and binds public controls to the curren
   const origin = "https://studio.example.test";
   let upstreamToken = randomBytes(32).toString("base64url");
   let controls = 0, reads = 0;
+  const codes = { aviskarex: "417", wiznims: "906" };
+  let mainLive = false, friendLive = false, friendFail = false;
+  const mainState = () => ({ channel: "aviskarex", state: mainLive ? "live" : "idle", mode: mainLive ? "live" : null,
+    can_stop: mainLive, csrf: upstreamToken });
   const renderer = http.createServer((req, res) => {
     assert.equal(req.headers.cookie, undefined);
     assert.equal(req.headers.authorization, undefined);
@@ -29,18 +33,43 @@ test("Arcade Studio guards all resources and binds public controls to the curren
         const body = JSON.parse(Buffer.concat(chunks));
         assert.deepEqual(body, req.url === "/api/stop" ? {} : { mode: "test", duration: 90 });
         controls++;
-        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ state: "idle", csrf: upstreamToken }));
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(mainState()));
       });
       return;
     }
     reads++;
-    if (req.url === "/api/status") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ state: "idle", csrf: upstreamToken }));
+    if (req.url === "/api/status") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(mainState()));
     if (req.url === "/api/frame") return res.writeHead(200, { "content-type": "image/jpeg" }).end(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
     if (req.url === "/") return res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end('<script src="./studio.js"></script>');
     if (req.url === "/images/word.webp") return res.writeHead(200, { "content-type": "image/webp" }).end("image");
     res.writeHead(404).end();
   });
   const port = await listen(renderer);
+  // Both mock services deliberately share a renderer nonce to exercise channel binding.
+  const received = [];
+  let friendKey = false;
+  const friendState = () => ({ channel: "wiznims", csrf: upstreamToken, key_ready: friendKey,
+    state: friendLive ? "live" : "idle", mode: friendLive ? "test" : null, can_stop: friendLive });
+  const friend = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (req.method === "GET") return res.end(JSON.stringify(friendState()));
+    assert.equal(req.headers["x-studio-token"], upstreamToken);
+    assert.equal(req.headers.origin, "http://" + req.headers.host);
+    const chunks = [];
+    req.on("data", chunk => chunks.push(chunk));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks)); received.push(req.url);
+      if (req.url === "/api/provision") {
+        if (friendKey) { res.statusCode = 409; return res.end(JSON.stringify({ error: "Already provisioned." })); }
+        friendKey = true;
+      } else if (req.url === "/api/start") {
+        assert.deepEqual(body, { mode: "test", duration: 90 });
+        if (friendFail) { res.statusCode = 409; return res.end(JSON.stringify({ error: "Encoder is busy." })); }
+      }
+      return res.end(JSON.stringify(friendState()));
+    });
+  });
+  const friendPort = await listen(friend);
   const app = express();
   app.use(MOUNT, bodyParser);
   app.use(express.json());
@@ -50,11 +79,11 @@ test("Arcade Studio guards all resources and binds public controls to the curren
     req.session.admin = { role: req.params.kind === "admin" ? "admin" : "superadmin", tfa: req.params.kind !== "unenrolled" };
     res.sendStatus(204);
   });
-  app.use(MOUNT, createRouter({ port, origin }));
+  app.use(MOUNT, createRouter({ ports: { aviskarex: port, wiznims: friendPort }, origin, confirmations: () => codes }));
   const site = http.createServer(app);
   const base = "http://127.0.0.1:" + await listen(site);
   t.after(() => {
-    for (const server of [renderer, site]) { server.closeAllConnections(); server.close(); }
+    for (const server of [renderer, friend, site]) { server.closeAllConnections(); server.close(); }
   });
   t.mock.method(require("../utils/settings"), "getRequire2fa", () => true);
   const login = async kind => (await fetch(base + "/test-login/" + kind, { method: "POST" })).headers.get("set-cookie").split(";")[0];
@@ -66,7 +95,7 @@ test("Arcade Studio guards all resources and binds public controls to the curren
     method: "POST", headers: { Cookie: cookie, Origin: origin, "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json",
       "X-Studio-Token": token, ...changes }, body: JSON.stringify(body),
   });
-  for (const path of ["/", "/studio.js", "/images/word.webp", "/api/status", "/api/frame?t=123"]) {
+  for (const path of ["/", "/studio.js", "/images/word.webp", "/api/status", "/api/frame?t=123", "/wiznims/", "/api/channels", "/wiznims/api/status"]) {
     assert.equal((await get(path)).status, 401);
   }
   const signedOut = await get("/", null, { Accept: "text/html" });
@@ -78,7 +107,7 @@ test("Arcade Studio guards all resources and binds public controls to the curren
 
   assert.equal((await get("", owner)).headers.get("location"), MOUNT + "/");
   const page = await get("/", owner, { Accept: "text/html" });
-  assert.match(await page.text(), /\.\/studio.js/);
+  assert.match(await page.text(), /arcade-studio\/studio.js/);
   assert.match(page.headers.get("cache-control"), /no-store/);
   assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
   const frame = await get("/api/frame?t=12345", owner, { "Sec-Fetch-Site": "same-origin" });
@@ -99,11 +128,53 @@ test("Arcade Studio guards all resources and binds public controls to the curren
   assert.equal((await action("/api/start", token, {}, owner, { mode: "test", duration: 90, channel: "other" })).status, 400);
   assert.equal((await action("/api/stop", token, {}, owner, { padding: "x".repeat(530) })).status, 413);
   assert.equal(controls, 0);
-  const mockStart = await action("/api/start", token, {}, owner, { mode: "test", duration: 90 });
+  const settings = { mode: "test", duration: 90 };
+  const single = (path, token, body) => action(path, token, {}, owner, body);
+  const batch = rows => single("/api/start-selected", "", { channels: rows, ...settings });
+  const list = await (await get("/api/channels", owner)).json();
+  assert.deepEqual(list.channels.map(c => c.channel), ["aviskarex", "wiznims"]);
+  const friendToken = list.channels[1].csrf;
+  assert.notEqual(friendToken, token);
+  assert.equal(list.channels[0].key_ready, true);
+  assert.equal(list.channels[1].key_ready, false);
+  assert.equal((await single("/api/start", token, settings)).status, 403);
+  assert.equal((await single("/aviskarex/api/start", token, { ...settings, confirmationCode: codes.wiznims })).status, 403);
+  assert.equal((await single("/wiznims/api/start", token, { ...settings, confirmationCode: codes.wiznims })).status, 403);
+  assert.equal((await single("/wiznims/api/start", friendToken, { ...settings, confirmationCode: codes.wiznims })).status, 409);
+  assert.equal((await single("/aviskarex/api/provision", token, {})).status, 404);
+  const setup = { streamKey: "live_975369828_" + "x".repeat(30) };
+  assert.equal((await single("/wiznims/api/provision", token, setup)).status, 403);
+  assert.equal((await single("/wiznims/api/provision", friendToken, { streamKey: "invalid" })).status, 400);
+  assert.equal((await single("/wiznims/api/provision", friendToken, setup)).status, 200);
+  assert.equal((await single("/wiznims/api/provision", friendToken, setup)).status, 409);
+  const mainRow = { channel: "aviskarex", csrf: token, confirmationCode: codes.aviskarex };
+  const friendRow = { channel: "wiznims", csrf: friendToken, confirmationCode: codes.wiznims };
+  assert.equal((await batch([mainRow, { ...friendRow, confirmationCode: codes.aviskarex }])).status, 403);
+  assert.equal((await batch([friendRow, { ...mainRow, csrf: friendToken }])).status, 403);
+  assert.equal((await batch([mainRow, mainRow])).status, 400);
+  assert.equal(controls, 0);
+  assert.equal(received.filter(path => path === "/api/start").length, 0);
+  // Already running test on WizNims; a new main encoder requires only its own code.
+  friendLive = true;
+  const existing = await batch([mainRow, { channel: "wiznims", csrf: friendToken }]);
+  assert.deepEqual((await existing.json()).results.map(r => r.outcome), ["started", "already_running"]);
+  assert.equal(received.filter(path => path === "/api/start").length, 0);
+  mainLive = true;
+  assert.equal((await batch([mainRow])).status, 409);
+  mainLive = false; friendLive = false;
+  assert.equal((await batch([mainRow, { channel: "wiznims", csrf: friendToken }])).status, 403);
+  assert.equal(controls, 1);
+  const both = await batch([mainRow, friendRow]);
+  assert.deepEqual((await both.json()).results.map(r => r.outcome), ["started", "started"]);
+  friendFail = true;
+  const partial = await batch([mainRow, friendRow]);
+  assert.equal(partial.status, 207);
+  assert.deepEqual((await partial.json()).results.map(r => r.outcome), ["started", "failed"]);
+  const mockStart = await single("/api/start", token, { ...settings, confirmationCode: codes.aviskarex });
   assert.equal(mockStart.status, 200);
   assert.equal((await mockStart.json()).csrf, token);
   assert.equal((await action("/api/stop", token)).status, 200);
   upstreamToken = randomBytes(32).toString("base64url");
   assert.equal((await action("/api/stop", token)).status, 403);
-  assert.equal(controls, 2);
+  assert.equal(controls, 5);
 });

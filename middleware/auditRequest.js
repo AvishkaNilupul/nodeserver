@@ -50,7 +50,11 @@ function auditRequest(req, res, next) {
     const path = String(req.path || req.originalUrl || "").split("?")[0];
     if (ASSET_RE.test(path)) return next();
     if (SKIP_PREFIXES.some((p) => path.startsWith(p))) return next();
-    const body = summarizeBody(req.body);
+    // Studio accepts broadcaster credentials and per-channel confirmations.
+    // Record route, actor and outcome, including rejected requests, without
+    // ever constructing a snapshot of these request bodies.
+    const studio = /^\/admin\/arcade-studio(?:\/|$)/i.test(path);
+    const body = studio ? undefined : summarizeBody(req.body);
     res.on("finish", () => {
       logEvent({
         category: "request",

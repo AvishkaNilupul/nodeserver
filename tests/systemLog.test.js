@@ -149,7 +149,7 @@ function assertNoSecrets(saved) {
 
 // Drives the REAL middleware end to end (summarizeBody -> logEvent -> the
 // model) and hands back the document that would have been persisted.
-async function runAudit(body, statusCode = 200) {
+async function runAudit(body, statusCode = 200, route = "/account-offers/68b0/stock") {
   const handlers = {};
   const res = {
     statusCode,
@@ -165,7 +165,7 @@ async function runAudit(body, statusCode = 200) {
     auditRequest(
       {
         method: "POST",
-        path: "/account-offers/68b0/stock",
+        path: route,
         session: { admin: { id: "1" } },
         body,
       },
@@ -295,4 +295,23 @@ test("logEvent applies the shape guard to detail, not to subject", async () => {
   } finally {
     SystemEvent.create = orig;
   }
+});
+
+test("Studio audit records outcomes without retaining key fragments, codes or rejected payloads", async () => {
+  const form = { streamKey: "synthetic-broadcast-secret-fragment", confirmationCode: "572",
+    unexpectedField: "synthetic-rejected-secret", channels: [{ csrf: "synthetic-private-token" }] };
+  for (const route of ["/admin/arcade-studio/wiznims/api/provision", "/admin/arcade-studio/aviskarex/api/start",
+    "/admin/arcade-studio/api/start-selected"]) {
+    for (const status of [200, 403, 409]) {
+      const saved = await runAudit(form, status, route);
+      assert.equal(saved.route, route);
+      assert.equal(saved.status, status);
+      assert.equal(saved.meta, undefined);
+      for (const fragment of ["synthetic-", form.confirmationCode]) assert.ok(!JSON.stringify(saved).includes(fragment));
+    }
+  }
+  const redacted = sanitize(form);
+  assert.equal(redacted.streamKey, "[redacted]");
+  assert.equal(redacted.confirmationCode, "[redacted]");
+  assert.equal(redacted.channels[0].csrf, "[redacted]");
 });

@@ -8,7 +8,7 @@ const SystemEvent = require("../models/SystemEvent");
 // Keys whose VALUES must never be stored — redacted anywhere they appear in a
 // meta object (request bodies, event details, nested objects).
 const SECRET_KEY =
-  /(secret|password|passwd|token|credpassword|clientsecret|cookie|authorization|apikey|api[_-]?key|otp|2fa)/i;
+  /(secret|password|passwd|token|credpassword|clientsecret|cookie|authorization|apikey|api[_-]?key|otp|2fa|stream[_-]?key|confirmation[_-]?code|csrf)/i;
 const MAX_DETAIL = 500;
 const MAX_META_CHARS = 2000;
 
