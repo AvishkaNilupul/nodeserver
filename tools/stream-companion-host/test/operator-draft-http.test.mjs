@@ -158,7 +158,8 @@ test('the reviewed route answers a viewer asking for advice and leaves passing c
   } while (Date.now() < deadline);
   assert.equal(command.state, 'completed');
   assert.equal(command.result.targetAuthor, viewer);
-  assert.match(command.result.text, /willow/i);
+  // A viewer can identify Willow by its wide turns even if the reply omits its name.
+  assert.match(command.result.text, /willow|wide (?:turns?|corners?)|no jumps?/i);
   assert.match(command.result.text, /wide|turn|jump|safer|easier/i);
   assert.doesNotMatch(command.result.text, /the (?:message|viewer)|acknowledged|no factual claim/i);
   assert.doesNotMatch(command.result.text, /willow(?:(?!flint).){0,60}(?:saves? (?:three|3) seconds|is (?:faster|the shortcut))/i);

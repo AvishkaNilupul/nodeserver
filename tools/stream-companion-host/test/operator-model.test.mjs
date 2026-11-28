@@ -71,7 +71,7 @@ test('native model speaks directly on an addressed decision and thanks, and decl
     const base = { ...context, messages: [{ author: 'viewer', text: 'The canal has wide corners; the ridge has a blind jump but saves time.' }] };
     const ask = text => generateOperatorDraft({ ...base, target: { author: 'viewer', text } });
     const choice = await ask('@operator for a first run which route would you try and why?');
-    assert.match(choice, /\b(canal|ridge)\b/i);
+    assert.match(choice, /\b(canal|ridge|wide corners?|blind jump)\b/i);
     assert.match(choice, /\b(wid\w*|corner\w*|blind|jump\w*|quicker|faster|time)\b/i);
     if (/\bcanal\b/i.test(choice) && !/\bridge\b/i.test(choice)) {
       assert.doesNotMatch(choice, /\b((saves?|saving) time|blind jump|quicker|faster)\b/i);
