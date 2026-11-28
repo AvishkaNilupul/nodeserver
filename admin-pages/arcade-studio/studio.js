@@ -240,8 +240,16 @@ function renderMonitor() {
   drawList("scores", (online ? ch?.leaderboard || [] : []).slice(0, 10).map((entry, n) =>
     el("li", (n + 1) + ". " + entry.name + " · " + entry.points + " pts")), "No scored players yet.");
 }
+function automaticFrameRate() {
+  const friend = channels.get("wiznims");
+  return selected.has("wiznims") && !alreadyRunning(friend) ? 30 : 60;
+}
+function requestedFrameRate() {
+  return byId("fps").value === "auto" ? automaticFrameRate() : Number(byId("fps").value);
+}
 function renderSelection() {
   const mode = byId("mode").value;
+  byId("auto-fps").textContent = "Automatic · " + automaticFrameRate() + " fps";
   const picked = selectedRows();
   const needed = picked.filter(ch => !alreadyRunning(ch));
   const blocked = needed.filter(ch => !startable(ch));
@@ -363,7 +371,7 @@ byId("start-form").addEventListener("submit", event => {
     return row;
   });
   mutate("api/start-selected", { channels: rows, mode, duration: Number(byId("duration").value),
-    fps: Number(byId("fps").value), volume: Number(byId("volume").value) }, null, data => {
+    fps: requestedFrameRate(), volume: Number(byId("volume").value) }, null, data => {
     if (!Array.isArray(data.results)) throw new Error("Checking the latest channel status.");
     const text = { started: "Start accepted", already_running: "Already running", failed: "Start failed", unconfirmed: "Start unconfirmed" };
     feedback(data.results.map(row => nameOf(row.channel) + " · " + (text[row.outcome] || "Unknown result") +
@@ -392,7 +400,8 @@ byId("key-form").addEventListener("submit", event => {
 });
 function saveSettings() {
   try {
-    localStorage.setItem("arcade-studio-settings", JSON.stringify({ mode: byId("mode").value, fps: Number(byId("fps").value),
+    localStorage.setItem("arcade-studio-settings", JSON.stringify({ mode: byId("mode").value,
+      fps: byId("fps").value === "auto" ? null : Number(byId("fps").value),
       volume: Number(byId("volume").value), duration: durationFor }));
   } catch { /* Browser storage is optional. */ }
 }
