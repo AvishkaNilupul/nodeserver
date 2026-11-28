@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111216">
+  <title>Broadcast studio · Arcade Circuit</title>
+  <link rel="stylesheet" href="/admin/arcade-studio/studio.css">
+  <script defer src="/admin/arcade-studio/studio.js"></script>
+</head>
+<body>
+  <header><div class="shell nav">
+    <a class="brand" href="/admin/arcade-studio/"><b aria-hidden="true">AC</b> Arcade Circuit</a>
+    <nav aria-label="Studio"><a href="#studio">Studio</a><a href="#rotation">Games</a><a href="#activity">Activity</a></nav>
+    <a class="admin-link" href="/admin.html">Admin console</a>
+  </div></header>
+  <main class="shell" id="studio">
+    <div class="page-title"><h1>Broadcast studio</h1><span id="connection" role="status">Connecting…</span></div>
+    <div class="studio-grid">
+      <section class="panel monitor" aria-labelledby="monitor-title">
+        <div class="panel-heading"><h2 id="monitor-title">Program monitor</h2><span class="badge" id="monitor-state">Connecting</span></div>
+        <div class="channel-tabs" id="monitors" role="group" aria-label="Channel to monitor"></div>
+        <div class="screen"><img id="standby" alt="" hidden><p id="screen-note">Connecting to Studio…</p><img id="frame" alt="Latest encoder frame" hidden></div>
+        <div class="monitor-foot"><b id="format">720p</b><span id="round">—</span></div>
+        <div class="session"><div><h3 id="monitor-name">Channel</h3><p id="session-detail">Waiting for channel status.</p></div>
+          <button class="end" type="button" id="stop" hidden>End broadcast</button>
+        </div>
+        <a class="twitch-link" id="watch" target="_blank" rel="noopener noreferrer" hidden>Open on Twitch ↗</a>
+      </section>
+      <section class="panel controls" aria-labelledby="control-title">
+        <div class="panel-heading"><h2 id="control-title">Stream controls</h2></div>
+        <form id="start-form" autocomplete="off">
+          <fieldset id="controls"><legend class="legend">Broadcast to</legend>
+            <div id="targets" class="targets"></div>
+            <div class="two-fields"><label>Mode<select id="mode"><option value="live">Public live</option><option value="test">Private test</option></select></label>
+              <label>Duration<select id="duration">
+                <option value="60">1 minute</option><option value="300">5 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option><option value="7200">2 hours</option><option value="10800">3 hours</option><option value="14400">4 hours</option><option value="18000" selected>5 hours</option>
+              </select></label>
+            </div>
+            <div class="two-fields"><label>Frame rate<select id="fps"><option value="60">60 fps</option><option value="30">30 fps</option></select></label>
+              <label>Show volume <output for="volume" id="volume-label">70%</output><input id="volume" type="range" min="0" max="100" value="70"></label>
+            </div>
+            <div id="confirmations"></div><p id="selection-note"></p>
+            <button type="submit" id="start" class="primary" disabled>Go live</button>
+          </fieldset>
+        </form>
+        <details id="key-setup" hidden>
+          <summary id="key-summary">Connect channel</summary>
+          <form id="key-form" autocomplete="off"><label for="stream-key">Primary Twitch stream key</label>
+            <input id="stream-key" type="password" autocomplete="off" spellcheck="false" required>
+            <div class="setup-buttons"><a id="dashboard" target="_blank" rel="noopener noreferrer">Twitch stream settings ↗</a><button type="submit" id="save-key">Connect</button></div>
+          </form>
+        </details>
+        <div id="feedback" role="status" aria-live="polite" hidden></div>
+      </section>
+    </div>
+    <section id="rotation"><div class="section-heading"><h2>Game rotation</h2><span>60-second rounds</span></div><div class="games" id="games"></div>
+      <p class="rules">Correct picks earn 10 points, with streaks up to 16. Other valid picks earn 2. Every 50 points earns a level. Check your score in chat with <code>!points</code>.</p>
+    </section>
+    <section id="activity"><div class="section-heading"><h2 id="activity-heading">Channel activity</h2><span id="metrics-session"></span></div>
+      <div class="metrics" id="metrics"></div><p id="exceptions" hidden></p>
+      <div class="activity-grid"><section class="panel"><div class="panel-heading"><h3>Broadcast log</h3></div><ul class="data-list" id="events"></ul></section>
+      <section class="panel"><div class="panel-heading"><h3>All-time leaderboard</h3></div><ol class="data-list" id="scores"></ol></section></div>
+    </section>
+  </main>
+</body>
+</html>
