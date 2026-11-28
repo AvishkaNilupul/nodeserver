@@ -60,6 +60,17 @@ function feedback(text = "", error = false) {
   byId("feedback").hidden = !text;
   byId("feedback").classList.toggle("error", error);
 }
+function maskStudioInput(field) {
+  // Check the applied style as well as browser support. If CSS fails to load,
+  // the field still needs native masking before an operator can type into it.
+  if (getComputedStyle(field).getPropertyValue("-webkit-text-security") !== "disc") {
+    field.type = "password";
+  }
+  field.setAttribute("data-1p-ignore", "");
+  field.setAttribute("data-lpignore", "true");
+  field.setAttribute("data-bwignore", "true");
+  field.hidden = false;
+}
 function clearCodes() {
   for (const entry of controls.values()) entry.pin.value = "";
 }
@@ -82,7 +93,10 @@ function addChannel(slug) {
   const pin = el("input");
   pin.id = "confirm-" + slug;
   pinLabel.htmlFor = pin.id;
-  pin.type = "password";
+  pin.type = "text";
+  pin.className = "studio-secret";
+  pin.hidden = true;
+  pin.disabled = true;
   pin.inputMode = "numeric";
   pin.autocomplete = "off";
   pin.spellcheck = false;
@@ -92,6 +106,7 @@ function addChannel(slug) {
   pinRow.append(pinLabel, pin);
   pinRow.hidden = true;
   byId("confirmations").append(pinRow);
+  maskStudioInput(pin);
 
   const tab = el("button", nameOf(slug));
   tab.type = "button";
@@ -430,6 +445,11 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) { clearCodes(); clearFrame(); byId("stream-key").value = ""; resetStop(); renderSelection(); }
   else if (!busy) poll();
 });
+window.addEventListener("pagehide", () => {
+  clearCodes();
+  byId("stream-key").value = "";
+});
+maskStudioInput(byId("stream-key"));
 readSettings();
 byId("duration").value = String(durationFor[byId("mode").value]);
 byId("volume-label").textContent = byId("volume").value + "%";

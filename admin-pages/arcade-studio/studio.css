@@ -45,7 +45,7 @@ input[type="checkbox"] {
 }
 button,
 select,
-input[type="password"] {
+input.studio-secret {
   border: 1px solid var(--line);
   border-radius: 7px;
   background: #24262e;
@@ -327,7 +327,7 @@ h3 {
   min-width: 0;
 }
 .two-fields select,
-.controls input[type="password"] {
+.controls input.studio-secret {
   display: block;
   width: 100%;
   margin-top: 4px;
@@ -346,10 +346,10 @@ output {
 .confirm-row {
   margin-top: 12px;
 }
-.confirm-row input[type="password"] {
+.confirm-row input.studio-secret {
   letter-spacing: 0.24em;
 }
-.controls input[type="password"] {
+.controls input.studio-secret {
   min-width: 0;
 }
 .primary {
@@ -555,4 +555,9 @@ summary {
     align-items: start;
     flex-wrap: wrap;
   }
+}
+
+/* A stream credential or channel code is independent of the site's login. */
+input.studio-secret {
+  -webkit-text-security: disc;
 }
