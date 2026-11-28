@@ -252,7 +252,7 @@ function renderSelection() {
     entry.check.disabled = !online || busy;
     entry.state.textContent = badge(channel);
     entry.tab.setAttribute("aria-pressed", String(monitor === slug));
-    const needsPin = online && mode === "live" && selected.has(slug) && startable(channel);
+    const needsPin = online && selected.has(slug) && startable(channel);
     if (!needsPin) entry.pin.value = "";
     entry.pinRow.hidden = !needsPin;
     entry.pin.required = needsPin;
@@ -267,7 +267,7 @@ function renderSelection() {
     (active(ch) && ch.mode && ch.mode !== mode ? "Already running in a different mode." : badge(ch))).join("  ");
   else if (!needed.length) note = "The selected " + (picked.length === 1 ? "channel is" : "channels are") + " already running.";
   else if (needed.length < picked.length) note = picked.filter(alreadyRunning).map(ch => nameOf(ch.channel)).join(", ") + " will keep its current show.";
-  else note = mode === "test" ? "Sends a private bandwidth test to Twitch Inspector." : "Enter a confirmation code for each channel you start.";
+  else note = mode === "test" ? "Enter a code for each private Twitch Inspector test." : "Enter a confirmation code for each channel you start.";
   byId("selection-note").textContent = note;
   const names = needed.map(ch => nameOf(ch.channel));
   byId("start").textContent = busy ? "Working…" : (mode === "live" ? "Go live" : "Start private test") +
@@ -359,7 +359,7 @@ byId("start-form").addEventListener("submit", event => {
   const mode = byId("mode").value;
   const rows = selectedRows().map(ch => {
     const row = { channel: ch.channel, csrf: ch.csrf };
-    if (mode === "live" && !alreadyRunning(ch)) row.confirmationCode = controls.get(ch.channel).pin.value;
+    if (!alreadyRunning(ch)) row.confirmationCode = controls.get(ch.channel).pin.value;
     return row;
   });
   mutate("api/start-selected", { channels: rows, mode, duration: Number(byId("duration").value),
