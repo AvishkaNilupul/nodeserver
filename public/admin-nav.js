@@ -119,6 +119,13 @@
       icon: ICONS.bots,
       items: [
         {
+          href: "/admin/arcade-studio/",
+          label: "Arcade Studio",
+          icon: ICONS.twitchDrops,
+          superOnly: true,
+          activePrefix: "/admin/arcade-studio",
+        },
+        {
           href: "/admin/stream-companion/accounts",
           label: "Twitch Controller",
           icon: ICONS.bots,
