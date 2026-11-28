@@ -8,6 +8,8 @@ import { createChannelDirectory } from './lib/channels.mjs';
 import { createBrowserLauncher, loadBrowserProfiles } from './lib/browser-launcher.mjs';
 import { createClipController } from './lib/clips.mjs';
 import { createStatusLogger } from './lib/status-log.mjs';
+import { createOperatorDrafts } from './lib/operator-drafts.mjs';
+import { generateOperatorDraft } from './lib/operator-model.mjs';
 
 const equal = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b || '')); return x.length === y.length && timingSafeEqual(x, y); };
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
@@ -48,13 +50,35 @@ async function bodyJSON(req) {
   return value;
 }
 
-export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), browserLauncher = createBrowserLauncher(), clips, port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
+export function createHostServer({ store, clients, accounts = createAccountManager(), channels = createChannelDirectory(), browserLauncher = createBrowserLauncher(), clips, generateDraft, port = 8795, csrfToken = randomBytes(32).toString('base64url'), readFileImpl = readFile, remoteToken } = {}) {
   if (!store || !Array.isArray(clients) || !clients.length) throw Error('Host store and clients required.');
   for (const c of clients) if (typeof c.token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(c.token) || store.client(c.id).account !== c.account) throw Error('Invalid coordination client pairing.');
   if (new Set(clients.map(c => c.token)).size !== clients.length) throw Error('Coordination clients require separate tokens.');
   if (remoteToken !== undefined && (typeof remoteToken !== 'string' || !TOKEN.test(remoteToken)
     || clients.some(c => equal(c.token, remoteToken)))) throw Error('Remote controller pairing must be valid and separate.');
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+  const accountSnapshot = async options => {
+    const value = await accounts.snapshot(options);
+    if (!store.director) return value;
+    const instances = value.instances.map(instance => {
+      const sent = store.director.history(instance.id).history;
+      const obs = generateDraft && instance.connected && store.director.observation(instance.id);
+      if (!obs || obs.channel !== instance.channel || obs.context?.streamId !== instance.streamContext?.streamId
+        || store.client(instance.id).account !== instance.account) return { ...instance, sent };
+      // Older helpers omit the native parent from their public status. Match the
+      // same source message before copying metadata from the current observation.
+      const observed = new Map(obs.messages.map(message => [message.id, message]));
+      const messages = instance.chat.messages.map(message => {
+        const native = observed.get(message.id);
+        if (!native || message.channel !== obs.channel || native.author !== message.author || native.at !== message.at) return message;
+        return { ...message, ...(native.isBot ? { isBot: true } : {}),
+          ...(/^[a-zA-Z0-9:_-]{1,160}$/.test(native.replyParentId || '') ? { replyParentId: native.replyParentId } : {}) };
+      });
+      return { ...instance, chat: { ...instance.chat, messages }, sent };
+    });
+    return { ...value, instances };
+  };
+  const operatorDrafts = generateDraft && createOperatorDrafts({ snapshot: accountSnapshot, generate: generateDraft, companionLogins: clients.map(c => c.account) });
   const send = (res, status, value, contentType = 'application/json; charset=utf-8') => {
     res.writeHead(status, { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Cross-Origin-Resource-Policy': 'same-origin',
@@ -130,9 +154,8 @@ export function createHostServer({ store, clients, accounts = createAccountManag
       if (path === '/api/accounts') {
         if (req.method !== 'GET') return send(res, 405, { error: 'GET required.' });
         if (!sameOrigin(req)) return send(res, 403, { error: 'Open the local account pages to view status.' });
-        const value = await accounts.snapshot();
-        return send(res, 200, { ...value, instances: value.instances.map(instance => ({ ...instance,
-          ...(store.director ? { sent: store.director.history(instance.id).history } : {}),
+        const value = await accountSnapshot();
+        return send(res, 200, { ...value, instances: value.instances.map(instance => ({ ...(operatorDrafts ? operatorDrafts.decorate(instance, value.instances) : instance),
           browser: { ...instance.browser, canOpen: browserLauncher.available(instance.id) === true } })), csrfToken });
       }
       if (path === '/api/clips') {
@@ -171,7 +194,23 @@ export function createHostServer({ store, clients, accounts = createAccountManag
       if (accountCommand) {
         if (req.method !== 'POST') return send(res, 405, { error: 'POST required.' });
         if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the local account controls.' });
-        const body = await bodyJSON(req), result = await accounts.command(accountCommand[1], body);
+        const body = await bodyJSON(req), id = accountCommand[1];
+        if (operatorDrafts && body.action === 'draft' && body.params?.mode === 'reply') {
+          return send(res, 200, await operatorDrafts.request(id, body));
+        }
+        if (body.action === 'send' && typeof body.requestId === 'string' && body.requestId.startsWith('review-send:')) {
+          // The gateway forwards opaque IDs. The review reference survives an
+          // edit of the text without extending the helper's typed Send command.
+          const reviewId = /^review-send:[a-z0-9_-]{1,40}:([a-z0-9_:-]{1,100})$/i.exec(body.requestId)?.[1];
+          const value = await accountSnapshot({ fresh: true });
+          const instance = value.instances.find(i => i.id === id);
+          const controls = instance && operatorDrafts?.decorate(instance, value.instances).controls;
+          if (!reviewId || !controls?.recent?.some(c => c.action === 'draft' && c.requestId === reviewId && c.state === 'completed' && c.result?.targetAuthor)) {
+            return send(res, 409, { code: 'review_expired', error: 'The viewer conversation changed. Request a fresh draft before sending.' });
+          }
+        }
+        const result = await accounts.command(id, body);
+        if (operatorDrafts && ['start', 'stop', 'watch'].includes(body.action)) operatorDrafts.invalidate(id);
         if (store.director && ['start', 'settings'].includes(body.action)) {
           store.director.preferences(accountCommand[1], { requestId: `profile:${createHash('sha256').update(JSON.stringify([accountCommand[1], body.requestId])).digest('hex')}`, chatMode: body.params.chatMode, replySource: body.params.replySource });
         }
@@ -197,6 +236,7 @@ export function createHostServer({ store, clients, accounts = createAccountManag
     } catch (error) { return send(res, Number.isInteger(error.status) ? error.status : 503, { error: error.status ? error.message : 'The coordination host is temporarily unavailable.' }); }
   });
   server.requestTimeout = 10000; server.headersTimeout = 5000; server.keepAliveTimeout = 5000; server.maxHeadersCount = 32;
+  server.once('close', () => operatorDrafts?.stop());
   return server;
 }
 
@@ -211,7 +251,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const statusLog = createStatusLogger();
   const accounts = createAccountManager({ onSnapshot: value => statusLog.observe(value) });
   const clips = createClipController({ db: store.db, accounts, isPaused: () => store.paused });
-  const server = createHostServer({ store, clients: config.clients, remoteToken, browserLauncher, accounts, clips });
+  const server = createHostServer({ store, clients: config.clients, remoteToken, browserLauncher, accounts, clips,
+    generateDraft: process.platform === 'darwin' ? generateOperatorDraft : undefined });
   server.once('close', async () => { await clips.close(); statusLog.lifecycle('stopped'); store.close(); });
   server.listen(8795, '127.0.0.1', () => { statusLog.lifecycle('started'); clips.start(); console.log('Stream Companion Host 1.0.0 listening on http://127.0.0.1:8795'); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => server.close());

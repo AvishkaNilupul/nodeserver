@@ -23,6 +23,59 @@ class Node {
 function view() { const nodes = new Map(); return createAccountsView({ getElementById: id => { if (!nodes.has(id)) nodes.set(id, new Node()); return nodes.get(id); }, createElement: tag => new Node(tag) }); }
 const visible = v => Object.values(v.nodes).map(node => node.textContent).join('\n');
 
+test('a quiet chat explains the missing viewer and immediately releases the draft button', async () => {
+  const reason = 'There is no recent viewer message to reply to in this channel.';
+  const c = controller(async (_, options) => options.method === 'GET' ? reply(snapshot()) : { status: 409, ...reply({ error: reason }, false) });
+  await c.refresh(); assert.equal(await c.command('primary', 'draft', { mode: 'reply' }), false);
+  const receipt = c.getState().operations.primary.command;
+  assert.equal(receipt.state, 'failed'); assert.equal(receipt.error, reason); assert.equal(c.canCommand('primary', 'draft'), true);
+});
+
+test('summarizing chat cannot keep a cancelled viewer draft sendable', async () => {
+  const data = snapshot(), row = data.instances[0];
+  const c = controller(async (_, options) => {
+    if (options.method === 'GET') return reply(data);
+    const body = JSON.parse(options.body);
+    const result = body.params.mode === 'summary' ? { text: 'The race is ongoing.' }
+      : { text: 'Blue leads.', targetAuthor: 'viewer', account: row.account, channel: row.channel };
+    const completed = command(body, { state: 'completed', result });
+    row.controls.recent.unshift(completed); return reply({ ok: true, command: completed });
+  });
+  await c.refresh(); await c.command('primary', 'draft', { mode: 'reply' });
+  c.edit('primary', 'text', 'Blue leads by two.');
+  await c.command('primary', 'draft', { mode: 'summary' });
+  row.controls.recent[1].state = 'cancelled'; await c.refresh();
+  assert.equal(c.form('primary').text, 'Blue leads by two.');
+  assert.equal(c.form('primary').draftResult.title, 'Draft expired');
+  assert.equal(c.canCommand('primary', 'send'), false);
+});
+
+test('reviewed drafts identify the viewer and cannot follow an account to another room', async () => {
+  for (const editDraft of [false, true]) {
+    const data = snapshot(), requests = [], row = data.instances[0];
+    const c = controller(async (_, options) => {
+      if (options.method === 'GET') return reply(data);
+      const body = JSON.parse(options.body); requests.push(body.action);
+      const result = { text: 'Blue leads by two.', targetAuthor: 'viewer', account: row.account, channel: row.channel, streamId: row.streamContext.streamId };
+      const completed = command(body, { state: 'completed', result });
+      row.controls.recent = [completed]; return reply({ ok: true, command: completed });
+    });
+    await c.refresh(); await c.command('primary', 'draft', { mode: 'reply' });
+    assert.match(c.form('primary').draftResult.title, /@viewer in #example_channel/);
+    assert.equal(c.form('primary').text, 'Blue leads by two.');
+    if (editDraft) c.edit('primary', 'text', 'Blue leads 3–1.');
+    row.channel = 'new_room'; await c.refresh();
+    assert.equal(c.form('primary').text, editDraft ? 'Blue leads 3–1.' : '');
+    assert.equal(c.form('primary').draftResult.title, 'Chat changed');
+    if (editDraft) {
+      assert.equal(c.canCommand('primary', 'send'), false);
+      c.edit('primary', 'text', ''); c.edit('primary', 'text', 'Fresh message.');
+      assert.equal(c.canCommand('primary', 'send'), true);
+    }
+    assert.deepEqual(requests, ['draft']);
+  }
+});
+
 test('account paths are fixed and markup uses external self-hosted assets with labelled controls', async () => {
   assert.equal(accountFromPath('/accounts/primary'), 'primary'); assert.equal(accountFromPath('/accounts/test/'), 'test');
   for (const path of ['/accounts', '/accounts/anything', '/accounts/primary/x', '/accounts/%74est']) assert.equal(accountFromPath(path), null);

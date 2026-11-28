@@ -110,7 +110,9 @@ function project(source, raw, time, clean) {
   const base = empty(source, time, ''), s = record(raw.settings) ? raw.settings : {}, b = record(raw.browser) ? raw.browser : {}, w = record(raw.watch) ? raw.watch : {};
   const lastSeen = timestamp(b.lastSeenAt), online = b.online === true && Number.isFinite(lastSeen) && lastSeen <= time + 5000 && lastSeen >= time - 45000;
   const messages = (Array.isArray(raw.chat?.messages) ? raw.chat.messages : []).filter(m => record(m) && login(m.author) && typeof m.text === 'string' && Number.isFinite(m.at) && m.at <= time + 5000 && m.at >= time - 900000)
-    .slice(-100).map(m => ({ id: clean(m.id, 160), author: m.author, text: clean(m.text), at: m.at, channel: login(m.channel) || login(raw.channel) }));
+    .slice(-100).map(m => ({ id: clean(m.id, 160), author: m.author, text: clean(m.text), at: m.at, channel: login(m.channel) || login(raw.channel),
+      ...(typeof m.replyParentId === 'string' && /^[a-zA-Z0-9:_-]{1,160}$/.test(m.replyParentId) ? { replyParentId: clean(m.replyParentId, 160) } : {}),
+      ...(m.isBot === true ? { isBot: true } : {}) }));
   const sent = (Array.isArray(raw.sent) ? raw.sent : []).filter(m => record(m) && login(m.account) && login(m.channel) && Number.isFinite(m.at) && m.at <= time + 5000 && m.at >= time - 14 * 86400000 && typeof m.text === 'string')
     .sort((a, b) => b.at - a.at).slice(0, 50).map(m => ({ at: m.at, account: m.account, channel: m.channel, text: clean(m.text),
       delivery: ['confirmed', 'rejected', 'pending', 'cancelled'].includes(m.delivery) ? m.delivery : 'unknown',
@@ -181,7 +183,8 @@ export function createAccountManager({ sources = SOURCES, fetchImpl = fetch, rea
     return raw;
   };
   let cached = null, cachedAt = 0, inflight = null, revision = 0, inflightRevision = -1;
-  const snapshot = async () => {
+  const snapshot = async ({ fresh = false } = {}) => {
+    if (fresh) { revision++; cached = null; }
     if (cached && now() >= cachedAt && now() - cachedAt < 1500) return cached;
     if (inflight && inflightRevision === revision) return inflight;
     const expected = revision;

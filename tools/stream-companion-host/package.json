@@ -8,6 +8,7 @@
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
     "setup": "node setup.mjs",
+    "build:operator-draft": "umask 077 && mkdir -p private && swiftc -O scripts/OperatorDraft.swift -o private/operator-draft",
     "service:install": "node service.mjs install",
     "service:status": "node service.mjs status",
     "service:restart": "node service.mjs restart",

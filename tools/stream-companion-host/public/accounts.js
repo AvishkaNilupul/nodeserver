@@ -44,6 +44,11 @@ function validChannel(value) { return typeof value === 'string' && /^[a-zA-Z0-9_
 function validMessage(value) { return typeof value === 'string' && value.trim() === value && value.length > 0 && value.length <= 300 && !/^[/.]|[\r\n\u0000-\u001f\u007f]|https?:\/\/|www\./i.test(value); }
 function validMode(value) { return value === 'mentions' || value === 'participate'; }
 function validSource(value) { return value === 'local' || value === 'ai'; }
+function sameDraftRoom(draft, instance) {
+  return instance?.available === true && instance.connected === true && instance.settings?.paused !== true
+    && instance.account?.toLowerCase() === draft.account && instance.channel?.toLowerCase() === draft.channel
+    && (!draft.streamId || instance.streamContext?.streamId === draft.streamId);
+}
 function quickFailure(message) { return Object.assign(Error(message), { quickPublic: true }); }
 function commandParams(action, params = {}) {
   if (action === 'start' && validChannel(params.channel) && validMode(params.chatMode) && validSource(params.replySource) && typeof params.autoResume === 'boolean') return { channel: params.channel.toLowerCase(), chatMode: params.chatMode, replySource: params.replySource, autoResume: params.autoResume };
@@ -74,20 +79,45 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       const central = profileProvider?.(instance.id, now());
       if (central) { form.chatMode = central.chatMode; form.replySource = central.replySource; }
       form.initialized ||= !!instance.settings;
+      const receipts = [instance.controls?.pending, ...list(instance.controls?.recent)];
+      if (form.draftResult?.room && !sameDraftRoom(form.draftResult.room, instance)) {
+        form.draftResult = { title: 'Chat changed', text: 'Request a fresh draft for the current chat.' };
+      }
+      if (form.draftRoom && !form.draftRoom.expired) {
+        const changed = !sameDraftRoom(form.draftRoom, instance);
+        const receipt = receipts.find(c => c?.requestId === form.draftRoom.requestId);
+        if (changed || receipt?.state !== 'completed') {
+          form.draftResult = { title: changed ? 'Chat changed' : 'Draft expired', text: 'Clear the message to write a new one, or request a fresh draft.' };
+          if (form.text === form.draftRoom.original) { form.text = ''; form.textRevision++; delete form.draftRoom; }
+          else form.draftRoom.expired = true;
+        }
+      }
       const operation = state.operations[instance.id];
       if (!operation) continue;
-      const match = [instance.controls?.pending, ...list(instance.controls?.recent)].find(command => command?.requestId === operation.requestId);
+      const match = receipts.find(command => command?.requestId === operation.requestId);
       if (match) { if (operation.command.state === 'unknown' && TERMINAL.has(match.state)) state.error = ''; operation.command = match; }
+      if (operation.draftApplied && match?.state === 'cancelled' && form.draftResult?.room) {
+        form.draftResult = { title: 'Draft expired', text: 'Request a fresh reply for the current conversation.' };
+      }
       if (!operation.transport && active(operation.command, now()) === false && !TERMINAL.has(operation.command.state)) {
         operation.command = { ...operation.command, state: 'expired', error: 'No confirmed outcome before the request expired. The request will not be retried.' };
       }
       if (operation.action === 'draft' && operation.command.state === 'completed' && !operation.draftApplied) {
         operation.draftApplied = true;
-        const draft = operation.command.result?.text ?? operation.command.result?.summary;
+        const result = operation.command.result;
+        const draft = result?.text ?? result?.summary;
         if (typeof draft === 'string') {
           const summary = operation.params?.mode === 'summary';
-          form.draftResult = { title: summary ? 'Chat summary' : 'Draft reply', text: draft };
-          if (!summary && draft.length <= 300 && form.textRevision === operation.textRevision) { form.text = draft; form.textRevision++; }
+          const room = !summary && result.targetAuthor ? { account: result.account, channel: result.channel, streamId: result.streamId } : null;
+          if (room && !sameDraftRoom(room, instance)) {
+            form.draftResult = { title: 'Chat changed', text: 'Request a fresh draft for the current chat.' };
+            continue;
+          }
+          const title = room ? `Draft for @${result.targetAuthor} in #${room.channel}` : summary ? 'Chat summary' : 'Draft reply';
+          form.draftResult = { title, text: draft, room };
+          if (!summary && validMessage(draft) && form.textRevision === operation.textRevision) {
+            form.text = draft; form.textRevision++; form.draftRoom = room && { ...room, original: draft, requestId: operation.requestId };
+          }
         }
       }
     }
@@ -198,6 +228,8 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     if (state.browserPreparations[id]) return false;
     if (localPending || serverPending || !bridgeFresh(instance, now())) return false;
     if (instance.settings?.paused === true && !['start', 'watch', 'settings', 'drops-disable'].includes(action)) return false;
+    const room = state.forms[id]?.draftRoom;
+    if (action === 'send' && room && (room.expired || !sameDraftRoom(room, instance))) return false;
     if (['draft', 'send'].includes(action)) return instance.authorized === true && instance.connected === true && !!instance.channel;
     return true;
   }
@@ -223,13 +255,30 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (!central) { state.error = 'Central account settings are not current. Refresh Messages before starting or saving session settings.'; emit(); return false; }
       exactParams = { ...exactParams, chatMode: central.chatMode, replySource: central.replySource };
     }
-    const rid = requestId(), at = now();
+    const tiedReview = action === 'send' && formFor(id).draftRoom;
+    const rid = tiedReview ? `review-send:${requestId()}:${tiedReview.requestId}` : requestId(), at = now();
     const operation = { requestId: rid, action, params: exactParams, transport: true, textRevision: formFor(id).textRevision,
       command: { requestId: rid, action, state: 'submitting', createdAt: at, expiresAt: at + 90000 } };
     state.operations[id] = operation; state.error = ''; emit();
     let accepted = false;
     try {
       const response = await fetchImpl(controllerPath(basePath, `/api/accounts/${id}/command`), { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.data.csrfToken }, body: JSON.stringify({ requestId: rid, action, params: exactParams }) });
+      if (tiedReview && response.status === 409) {
+        const detail = await response.json();
+        if (detail.code === 'review_expired' && state.operations[id] === operation) {
+          tiedReview.expired = true;
+          operation.command = { ...operation.command, state: 'failed', error: 'The conversation changed. Request a fresh draft before sending.' };
+          return false;
+        }
+      }
+      if (action === 'draft' && exactParams.mode === 'reply' && [400, 409, 429].includes(response.status)) {
+        const detail = await response.json();
+        if (state.operations[id] === operation) {
+          const message = typeof detail.message === 'string' ? detail.message : typeof detail.error === 'string' ? detail.error : 'Refresh the current chat before requesting a draft.';
+          operation.command = { ...operation.command, state: 'failed', error: message.slice(0, 300) };
+        }
+        return false;
+      }
       if (!response.ok) throw responseError(response);
       const result = await response.json();
       if (result?.ok !== true || result.command?.requestId !== rid || result.command?.action !== action || typeof result.command?.state !== 'string') throw Error('invalid');
@@ -253,7 +302,7 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
   function edit(id, key, value) {
     if (!IDS.has(id) || !['channel', 'chatMode', 'replySource', 'autoResume', 'text'].includes(key)) return;
     const form = formFor(id); form[key] = value; form.dirty[key] = true;
-    if (key === 'text') form.textRevision++;
+    if (key === 'text') { form.textRevision++; if (!value) delete form.draftRoom; }
     emit();
   }
   const selectedIds = () => quickIds(state.quick.selection);

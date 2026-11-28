@@ -16,6 +16,8 @@ const validBinding = value => exact(value, ['generation', 'sessionId', 'settings
   && Number.isSafeInteger(value.settingsRevision) && value.settingsRevision >= 0;
 const timestamp = value => Number.isFinite(value) && value >= 0;
 const eventKey = event => `event:${event.channel}:${event.id}`;
+const silentEventKey = (stream, event) => `silent:${stream}:${eventKey(event)}`;
+const freshEvent = (event, now) => event.at > now - 45000 && event.at <= now;
 const sameEvent = (a, b) => !!a && !!b && a.id === b.id && a.channel === b.channel && a.type === b.type && a.at === b.at;
 const validNativeEvent = event => {
   if (!exact(event, ['id', 'channel', 'type', 'at']) || !ID.test(event.id || '') || !LOGIN.test(event.channel || '')
@@ -43,6 +45,7 @@ export class Director {
       CREATE INDEX IF NOT EXISTS director_plan_client ON director_plans(client_id,state);
       CREATE TABLE IF NOT EXISTS director_history(id INTEGER PRIMARY KEY,attempt_id TEXT NOT NULL UNIQUE,client_id TEXT NOT NULL,account TEXT NOT NULL,channel TEXT NOT NULL,stream_id TEXT NOT NULL,kind TEXT NOT NULL,text TEXT,text_key TEXT NOT NULL,delivery TEXT NOT NULL,source TEXT NOT NULL,at INTEGER NOT NULL,updated_at INTEGER NOT NULL,submitted INTEGER NOT NULL,category TEXT NOT NULL DEFAULT '',reply_id TEXT NOT NULL DEFAULT '',reply_to TEXT NOT NULL DEFAULT '',message_id TEXT NOT NULL DEFAULT '',reason TEXT NOT NULL DEFAULT '');
       CREATE INDEX IF NOT EXISTS director_history_account ON director_history(client_id,id);
+      CREATE INDEX IF NOT EXISTS director_history_event_wording ON director_history(channel,stream_id,text_key) WHERE kind='event' AND submitted=1;
       CREATE TABLE IF NOT EXISTS director_scenes(content_key TEXT PRIMARY KEY,scene_id TEXT NOT NULL UNIQUE,lines_json TEXT NOT NULL);
     `);
     if (!this.db.prepare('PRAGMA table_info(director_opportunities)').all().some(x => x.name === 'owner_plan')) this.db.exec("ALTER TABLE director_opportunities ADD COLUMN owner_plan TEXT NOT NULL DEFAULT ''");
@@ -303,7 +306,15 @@ export class Director {
   }
   current(clientId) { return this.db.prepare("SELECT * FROM director_plans WHERE client_id=? AND state IN ('offered','leased','generating') ORDER BY created_at DESC LIMIT 1").get(clientId); }
   eventClaim(key) {
-    return this.db.prepare("SELECT o.*,json_extract(p.payload_json,'$.kind') AS plan_kind,p.state AS plan_state FROM director_opportunities o LEFT JOIN director_plans p ON p.id=o.owner_plan WHERE o.key=?").get(key);
+    return this.db.prepare("SELECT o.*,json_extract(p.payload_json,'$.kind') AS plan_kind,json_extract(p.payload_json,'$.textKey') AS plan_text_key,p.state AS plan_state FROM director_opportunities o LEFT JOIN director_plans p ON p.id=o.owner_plan WHERE o.key=?").get(key);
+  }
+  eventWordingAttempted(channel, streamId, textKey) {
+    if (!channel || !streamId || !textKey) return false;
+    return !!this.db.prepare("SELECT 1 FROM director_history WHERE channel=? AND stream_id=? AND text_key=? AND kind='event' AND submitted=1 AND delivery IN ('pending','confirmed','rejected','unknown') LIMIT 1").get(channel, streamId, textKey);
+  }
+  silenceEvent(account, streamId, event) {
+    // An alert can stay silent while a human question on the same cheer is still answerable.
+    this.opportunity(silentEventKey(streamId, event), account, event.channel, streamId, '', event.at, 'handled');
   }
   eventCoversMessage(channel, id, ownerPlanId = '') {
     const claim = this.eventClaim(eventKey({ channel, id: `bits:${id}` }));
@@ -326,7 +337,8 @@ export class Director {
     const budget = this.s.budget(c.channel);
     if (budget.count >= this.s.policy.maxAttemptsPerHour || budget.rows.length && budget.next > now) return null;
     for (const event of [...(obs.events || [])].reverse()) {
-      if (event.at <= now - 45000 || event.at > now || event.type === 'gift' && event.id.startsWith('gift:') || this.consumed(eventKey(event))) continue;
+      if (!freshEvent(event, now) || event.type === 'gift' && event.id.startsWith('gift:') || this.consumed(eventKey(event))
+        || this.consumed(silentEventKey(obs.context.streamId, event))) continue;
       if (event.type === 'bits') {
         const id = event.id.slice(5), message = obs.messages.find(m => m.id === id);
         // A genuine request attached to a cheer has human-reply priority. It
@@ -440,9 +452,17 @@ export class Director {
       const event = this.eventCandidate(clientId, obs, snapshot);
       if (event) {
         const key = eventKey(event), text = this.distinct(this.choices(clientId, 'event', event.type, context), key, excluded);
+        // A restart or cancellation may have released an offer before late history arrived.
+        const prior = this.eventClaim(key), textKey = messageKey(text);
+        if (!textKey || this.eventWordingAttempted(c.channel, context.streamId, textKey)
+          || prior?.plan_kind === 'event' && prior.stream_id === context.streamId && this.eventWordingAttempted(c.channel, context.streamId, prior.plan_text_key)) {
+          this.silenceEvent(c.account, context.streamId, event);
+          return;
+        }
         this.makePlan(clientId, { kind: 'event', streamId: context.streamId, text, category: event.type, event, opportunityKey: key, participationKey: key, expiresAt: event.at + 45000 });
         return;
       }
+      if (obs.events?.some(e => freshEvent(e, now) && this.consumed(silentEventKey(context.streamId, e)))) return;
       const exchange = snapshot.exchange;
       if (exchange && !this.consumed(exchange.key)) { this.makePlan(clientId, { kind: 'exchange', streamId: context.streamId, text: exchange.text, category: 'participation-exchange', opportunityKey: exchange.key, participationKey: exchange.key, exchangeId: exchange.id, notBefore: exchange.notBefore, expiresAt: exchange.expiresAt }); return; }
       const base = `participation:${c.account}:${c.channel}:${context.streamId}`;
@@ -621,6 +641,7 @@ export class Director {
     }
     if (p.kind === 'event' && (!p.event || this.profile(clientId).chatMode !== 'participate'
       || !this.observation(clientId)?.events?.some(e => sameEvent(e, p.event)) || p.event.at < this.s.now() - 45000 || p.event.at > this.s.now())) throw failure('This native event is no longer current.', 409);
+    if (p.kind === 'event' && this.eventWordingAttempted(p.channel, p.streamId, p.textKey)) throw failure('This event wording was already attempted during this broadcast.', 409);
     if (p.kind) {
       const last = this.db.prepare("SELECT MAX(at) AS at FROM director_opportunities WHERE account=? AND kind<>'' AND state IN ('pending','submitting','confirmed','rejected','unknown')").get(p.account).at;
       if (last && last + 600000 > this.s.now()) throw failure('Waiting between this account’s participation messages.', 409);
@@ -680,7 +701,10 @@ export class Director {
     for (const row of this.db.prepare("SELECT * FROM director_plans WHERE state IN ('offered','leased','generating')").all()) {
       const p = JSON.parse(row.payload_json), obs = this.observation(row.client_id);
       const permit = row.reservation_id ? this.db.prepare('SELECT state FROM host_permits WHERE reservation_id=?').get(row.reservation_id) : null;
-      if (p.expiresAt <= this.s.now() || !obs || !same(obs.binding, p.binding) || this.s.paused || p.kind === 'event' && (!this.canPlan(row.client_id) || !obs.events?.some(e => sameEvent(e, p.event))) || permit && ['expired', 'cancelled'].includes(permit.state)) {
+      if (p.kind === 'event' && p.event && this.eventWordingAttempted(p.channel, p.streamId, p.textKey)) {
+        this.silenceEvent(p.account, p.streamId, p.event);
+        this.cancelRow(row, 'This event wording was already attempted during this broadcast.');
+      } else if (p.expiresAt <= this.s.now() || !obs || !same(obs.binding, p.binding) || this.s.paused || p.kind === 'event' && (!this.canPlan(row.client_id) || !obs.events?.some(e => sameEvent(e, p.event))) || permit && ['expired', 'cancelled'].includes(permit.state)) {
         this.cancelRow(row, p.expiresAt <= this.s.now() ? 'The unused message plan expired.' : 'Waiting for fresh browser state.');
       }
     }

@@ -30,6 +30,10 @@ Pages show independent chat, video, browser check-in and permission status; curr
 
 The extension stays installed as the browser/watch engine and checks in without keeping a dashboard tab open. The regular alarm provides a fallback for worker termination, following [Chrome's service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle/). The Mac, Chrome profiles and actual Twitch players still need to be awake and available. No recurring window-focus job is added.
 
+On an Apple Intelligence Mac with the Foundation Models SDK, run `npm run build:operator-draft` in the host directory. The **Draft reply** button uses the on-device model and recent chat for that account. The account page names the viewer and channel above the editable reply. Missing context or an unavailable model is reported there. Only **Send reviewed message** submits the edited text. The saved automatic reply source is a separate setting.
+
+For a native subscription, gift or Bits event, the director holds an already submitted stock reaction for the rest of that broadcast across all profiles. A held reaction stays silent.
+
 Account control is loopback-only with same-origin/CSRF checks. The server reads each existing helper's local pairing only in memory for fixed8792/8793 requests; pages never receive these credentials. Typed commands cannot change account identity, credentials or arbitrary URLs. Session/generation/command ownership and expiry are rechecked before provider submission. Browser command results are kept in helper memory; worker replacement/helper restart never replays a send. Only the stopped/transition hold is persisted in each helper's owner-only `private/control-intent.json`.
 
 ## Behavior
