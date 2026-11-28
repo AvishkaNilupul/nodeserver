@@ -484,6 +484,10 @@ async function handle(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message.type === 'watchQualityActive') {
+    watch.qualityActive(message, sender).then(respond, () => respond(false));
+    return true;
+  }
   if (message.type === 'dropsPermit') { drops.authorize(message, sender).then(respond).catch(() => respond({ ok: false })); return true; }
   if (!panelSender(sender)) { respond({ error: 'This operation is only available from the extension panel.' }); return false; }
   const result = ['getState', 'compose', 'pause', 'disconnect', 'dropsDisable', 'stopWatching'].includes(message.type) ? handle(message) : locked(() => handle(message));

@@ -63,6 +63,15 @@ export class WatchSession {
     const [s, settings] = await Promise.all([this.raw(), this.settings()]);
     return !!s.enabled && !settings.paused && settings.account === token.account && s.account === token.account && s.tabId === token.tabId && s.sessionId === token.sessionId && s.generation === token.generation && s.channel === token.channel;
   }
+  async qualityActive(message, sender) {
+    const check = this.qualityCheck;
+    if (!check || sender?.id !== this.api.runtime.id || sender.frameId !== 0
+      || sender.documentId !== check.documentId || sender.tab?.id !== check.token.tabId
+      || sender.url !== check.token.url || message.sessionId !== check.token.sessionId
+      || message.generation !== check.token.generation || check.epoch !== this.epoch) return false;
+    const active = await this.current(check.token);
+    return active && check === this.qualityCheck && check.epoch === this.epoch;
+  }
   async attach({ tabId, channel, account }) {
     const epoch = ++this.epoch;
     const s = await this.settings();
@@ -161,14 +170,15 @@ export class WatchSession {
         // Address the exact observed document. Navigations and missing menus
         // must never downgrade the health of a working player.
         try {
-          const guard = { sessionId: token.sessionId, generation: token.generation, tabId: token.tabId };
+          this.qualityCheck = { token, documentId: snapshot.documentId, epoch };
+          const guard = { sessionId: token.sessionId, generation: token.generation };
           const applied = await this.api.scripting.executeScript({
             target: { tabId: s.tabId, documentIds: [snapshot.documentId] }, world: 'ISOLATED',
             func: preferLowWatchQuality, args: [s.url, guard]
           });
           const height = applied.find(row => row.documentId === snapshot.documentId)?.result;
           if (Number.isInteger(height) && height > 0 && height <= 16384) next.requestedHeight = height;
-        } catch {}
+        } catch {} finally { this.qualityCheck = null; }
         if (epoch !== this.epoch || !await this.current(token)) return this.state();
       }
       await this.patch(next, token);

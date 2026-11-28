@@ -83,10 +83,22 @@ test('a user-open menu or focused composer is preserved', async t => {
   f.doc.querySelector('#chat').blur(); f.gear.click(); assert.equal(await f.choose(url), 0); assert.deepEqual(f.clicks, ['gear']); assert.ok(f.menu());
 });
 
+test('the isolated chooser requires only boolean worker confirmation while local storage is restricted', async t => {
+  const f = fixture(t);
+  const session = { sessionId: 'manual-watch', generation: 3 };
+  const messages = [];
+  f.w.chrome = { runtime: { sendMessage: async message => { messages.push(message); return true; } },
+    get storage() { throw new Error('Unavailable in content scripts'); } };
+  assert.equal(await f.choose(url, session), 160);
+  assert.ok(messages.length >= 3);
+  assert.ok(messages.every(m => m.type === 'watchQualityActive' && m.generation === 3 && m.sessionId === session.sessionId));
+});
+
 test('Stop while the quality menu renders cancels selection and restores the menu', async t => {
   const f = fixture(t, { delayed: true });
   const s = { enabled: true, sessionId: 'test', generation: 2, tabId: 1 };
-  f.w.chrome = { storage: { local: { get: async () => ({ watchSession: s }) } } };
+  f.w.chrome = { runtime: { sendMessage: async msg => msg.type === 'watchQualityActive' && s.enabled
+    && msg.sessionId === s.sessionId && msg.generation === s.generation } };
   const first = f.choose(url, { ...s });
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.deepEqual(f.clicks, ['gear', 'quality']); s.enabled = false;
@@ -97,11 +109,19 @@ test('watch lifecycle requests quality once per aligned playing document and rep
   let saved = {}, clock = 10, height = 1080, documentId = 'doc-one';
   const choices = [];
   const api = {
+    runtime: { id: 'fixture-id' },
     storage: { local: { get: async () => structuredClone(saved), set: async value => { Object.assign(saved, value); } } },
     permissions: { contains: async () => true }, tabs: { get: async () => ({ url, status: 'complete' }) },
     scripting: { executeScript: async request => {
       if (request.func === preferLowWatchQuality) {
         assert.deepEqual(request.target, { tabId: 42, documentIds: [documentId] }); choices.push(documentId);
+        const message = { type: 'watchQualityActive', ...request.args[1] };
+        const sender = { frameId: 0, documentId, tab: { id: 42 }, id: 'fixture-id', url };
+        assert.equal(await watch.qualityActive(message, sender), true);
+        for (const changes of [{ frameId: 1 }, { id: 'other' }, { documentId: 'old' }, { tab: { id: 100 } }, { url: url + '?different' }])
+          assert.equal(await watch.qualityActive(message, { ...sender, ...changes }), false);
+        assert.equal(await watch.qualityActive({ ...message, generation: -1 }, sender), false);
+        assert.equal(await watch.qualityActive({ ...message, sessionId: 'old' }, sender), false);
         return [{ frameId: 0, documentId, result: 160 }];
       }
       return [{ frameId: 0, documentId, result: { url, videoId: 'v1', currentTime: clock++, hasVideo: true, readyState: 4, decodedHeight: height } }];
@@ -111,6 +131,8 @@ test('watch lifecycle requests quality once per aligned playing document and rep
   await watch.attach({ tabId: 42, account: 'test_user', channel: 'watch_fixture' });
   await watch.poll({ force: true }); assert.deepEqual(choices, []);
   const first = await watch.poll({ force: true }); assert.equal(first.decodedHeight, 1080); assert.equal(first.requestedHeight, 160);
+  assert.equal(await watch.qualityActive({ sessionId: first.sessionId, generation: first.generation },
+    { frameId: 0, documentId, tab: { id: 42 }, id: 'fixture-id', url }), false);
   height = 160; assert.match((await watch.poll({ force: true })).detail, /160p/);
   // The operator can switch back during the same document.
   height = 720; assert.equal((await watch.poll({ force: true })).decodedHeight, 720); assert.deepEqual(choices, ['doc-one']);

@@ -27,8 +27,9 @@ export async function preferLowWatchQuality(expectedUrl, session) {
   if (!canChange() || /commercial\s+break\s+in\s+progress/i.test(player.innerText ?? player.textContent ?? '')) return 0;
   const currentSession = async () => {
     if (!session) return true;
-    const { watchSession: s } = await chrome.storage.local.get('watchSession');
-    return s?.enabled && s.sessionId === session.sessionId && s.generation === session.generation && s.tabId === session.tabId;
+    return await chrome.runtime.sendMessage({
+      type: 'watchQualityActive', sessionId: session.sessionId, generation: session.generation
+    }) === true;
   };
   // React normally commits the menu in the click microtask. A bounded DOM
   // observer also covers asynchronous menu rendering without a polling loop.
