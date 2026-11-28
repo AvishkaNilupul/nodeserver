@@ -14,7 +14,7 @@ const remoteToken = 'synthetic-browser-pairing'.repeat(2), csrfToken = 'fixture-
 const deviceQA = process.env.COMPANION_QA_DEVICE_MODEL === '1';
 const draftBody = requestId => ({ requestId, action: 'draft', params: { mode: 'reply' } });
 
-async function fixture(t) {
+async function fixture(t, cannedReply) {
   const now = Date.now();
   const store = new HostStore({ file: ':memory:', clients, directorEnabled: true });
   const stream = { channel, isLive: true, streamId: '111', checkedAt: now, title: 'Team finals', gameName: 'Racing' };
@@ -37,6 +37,7 @@ async function fixture(t) {
     generateDraft(context, options) {
       modelCalls.push(context);
       if (deviceQA) return generateOperatorDraft(context, options);
+      if (cannedReply) return cannedReply;
       const corrected = context.messages.find(m => m.text.startsWith('Correction:'));
       return corrected?.text.slice('Correction: '.length) || 'Which score did you mean?';
     }
@@ -134,6 +135,39 @@ test('local and paired account pages draft corrected scores and dispatch only an
   assert.equal(approved.status, 200);
   assert.equal(approved.data.command.state, 'queued');
   f.assertDeliveryState(4, [{ id: 'third', body: edited }]);
+});
+
+test('the reviewed route answers a viewer asking for advice and leaves passing commentary alone', async t => {
+  const f = await fixture(t, 'I’d take Willow first. The wide turns give you room to learn.');
+  const client = clients[0], profile = f.profiles[0];
+  const facts = f.row('routes', viewer, 'Willow has two wide turns and no jumps. Flint saves three seconds but has a blind jump.', 4000);
+  const question = f.row('advice', viewer, 'For my first run which route would you try and why?', 2000);
+  const aside = f.row('aside', 'another_fan', 'Both of those guys are kind of jerks.', 1000);
+  profile.chat.messages = [facts, question, aside];
+  const headers = { ...f.local, 'X-CSRF-Token': csrfToken };
+  const path = '/api/accounts/primary/command';
+  const submitted = await f.request(path, headers, draftBody('advice-draft'));
+  assert.equal(submitted.status, 200);
+  let command;
+  const deadline = Date.now() + (deviceQA ? 32_000 : 2000);
+  do {
+    const snapshot = await f.request('/api/accounts', f.local);
+    command = snapshot.data.instances[0].controls.recent.find(c => c.requestId === 'advice-draft');
+    if (command?.state !== 'running') break;
+    await sleep(40);
+  } while (Date.now() < deadline);
+  assert.equal(command.state, 'completed');
+  assert.equal(command.result.targetAuthor, viewer);
+  assert.match(command.result.text, /willow/i);
+  assert.match(command.result.text, /wide|turn|jump|safer|easier/i);
+  assert.doesNotMatch(command.result.text, /the (?:message|viewer)|acknowledged|no factual claim/i);
+  assert.doesNotMatch(command.result.text, /willow(?:(?!flint).){0,60}(?:saves? (?:three|3) seconds|is (?:faster|the shortcut))/i);
+  assert.deepEqual(f.modelCalls[0].messages, [{ author: viewer, text: facts.text }]);
+  if (deviceQA) t.diagnostic(command.result.text);
+  profile.chat.messages = [aside];
+  const quiet = await f.request(path, headers, draftBody('quiet'));
+  assert.equal(quiet.status, 409); assert.equal(quiet.data.code, 'no_conversation');
+  assert.equal(f.modelCalls.length, 1); f.assertDeliveryState();
 });
 
 test('matching native observation identity is required to project parent and bot tags', async t => {

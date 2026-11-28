@@ -196,7 +196,11 @@ export function createHostServer({ store, clients, accounts = createAccountManag
         if (!sameOrigin(req) || !equal(req.headers['x-csrf-token'], csrfToken)) return send(res, 403, { error: 'Use the local account controls.' });
         const body = await bodyJSON(req), id = accountCommand[1];
         if (operatorDrafts && body.action === 'draft' && body.params?.mode === 'reply') {
-          return send(res, 200, await operatorDrafts.request(id, body));
+          try { return send(res, 200, await operatorDrafts.request(id, body)); }
+          catch (e) {
+            if (e.code === 'no_conversation') return send(res, 409, { code: e.code, error: e.message });
+            throw e;
+          }
         }
         if (body.action === 'send' && typeof body.requestId === 'string' && body.requestId.startsWith('review-send:')) {
           // The gateway forwards opaque IDs. The review reference survives an
@@ -205,7 +209,8 @@ export function createHostServer({ store, clients, accounts = createAccountManag
           const value = await accountSnapshot({ fresh: true });
           const instance = value.instances.find(i => i.id === id);
           const controls = instance && operatorDrafts?.decorate(instance, value.instances).controls;
-          if (!reviewId || !controls?.recent?.some(c => c.action === 'draft' && c.requestId === reviewId && c.state === 'completed' && c.result?.targetAuthor)) {
+          if (!reviewId || !controls?.recent?.some(c => c.action === 'draft' && c.requestId === reviewId && c.state === 'completed'
+            && c.result?.targetAuthor && typeof c.result.text === 'string' && c.result.text.length > 0)) {
             return send(res, 409, { code: 'review_expired', error: 'The viewer conversation changed. Request a fresh draft before sending.' });
           }
         }

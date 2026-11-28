@@ -105,6 +105,82 @@ test('an unthreaded correction carries the previous native branch and chronologi
   ]);
 });
 
+test('an actual viewer question survives newer spectator commentary even from the same author', async t => {
+  const f = fixture(t);
+  f.account.chat.messages = [msg('question', 'viewerone', 'How many laps are left?', 10_000),
+    msg('remark', 'anotherfan', 'both of those guys are kind of jerks', 3000),
+    msg('aside', 'viewerone', 'the lighting looks nice')];
+  await f.service.request('primary', body());
+  assert.equal(f.contexts[0].target.text, 'How many laps are left?');
+  f.calls[0].resolve('Which race are you asking about?');
+  await nextTurn();
+  assert.equal(f.status().state, 'completed');
+  f.account.chat.messages.push(msg('aside2', 'viewerone', 'yeah the sky looks blue'));
+  assert.equal(f.status().state, 'completed');
+});
+
+test('a room of offhand remarks, reactions, or invitations to insult someone gives a typed quiet outcome', async t => {
+  const f = fixture(t);
+  f.account.chat.messages = [msg('aside', 'viewerone', 'both of those guys are kind of jerks'),
+    msg('offhand', 'viewertwo', 'beautiful lighting!'), msg('react', 'viewerone', 'lol???'),
+    msg('insult', 'viewertwo', 'Are both those guys jerks?'),
+    msg('direct-insult', 'viewertwo', '@mainhost why are those players such idiots?')];
+  await assert.rejects(f.service.request('primary', body()), { status: 409, code: 'no_conversation' });
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.service.decorate(f.account).controls.pending, null);
+});
+
+test('room questions in different scripts, requests without punctuation, and invitations are eligible', async t => {
+  for (const text of ['أين نقطة التفتيش؟', '次の関門はどこ？', '¿Qué vuelta es esta?', 'Alguien sabe dónde empieza la vuelta',
+    'このモードの開放方法を教えてください', 'chat, anyone know the next map', 'Please show the route', "Who’s up for another round"]) {
+    const f = fixture(t);
+    f.account.chat.messages = [msg('request', 'viewerone', text)];
+    await f.service.request('primary', body());
+    assert.equal(f.contexts[0].target.text, text);
+  }
+});
+
+test('a direct non-English conversational turn needs no question words or punctuation', async t => {
+  const f = fixture(t);
+  f.account.chat.messages = [msg('direct', 'viewerone', '@mainhost 青い方にしたよ'), msg('aside', 'anotherviewer', 'beautiful sky')];
+  await f.service.request('primary', body());
+  assert.equal(f.contexts[0].target.text, '@mainhost 青い方にしたよ');
+});
+
+test('a moderation question quoting abuse is eligible and an invitation to pile on stays quiet', async t => {
+  const f = fixture(t);
+  const question = 'How can I mute someone who calls me an idiot?';
+  f.account.chat.messages = [msg('moderation', 'viewerone', question, 2000), msg('pileon', 'viewerother', 'Should we call the driver an idiot?')];
+  await f.service.request('primary', body());
+  assert.equal(f.contexts[0].target.text, question);
+});
+
+test('the first unthreaded answer to the account’s question retains the viewer’s own words', async t => {
+  const f = fixture(t);
+  f.account.chat.messages = [msg('answer', 'viewerone', '黄緑に紫のホイール。', 10_000), msg('aside', 'viewerone', 'the sky looks nice')];
+  f.account.sent = [{ account: 'mainhost', channel, replyTo: 'viewerone', delivery: 'confirmed', at: start - 20_000, text: 'どんな色にした？' }];
+  await f.service.request('primary', body());
+  assert.deepEqual(f.contexts[0].target, { author: 'viewerone', text: '黄緑に紫のホイール。' });
+  assert.deepEqual(f.contexts[0].messages, [{ author: 'mainhost', text: 'どんな色にした？' }]);
+  f.calls[0].resolve('紫のホイールなんだね。');
+  await nextTurn();
+  assert.equal(f.status().state, 'completed');
+});
+
+test('model abstention produces a completed, unsendable receipt and a clear operator reason', async t => {
+  const f = fixture(t);
+  await f.service.request('primary', body());
+  f.calls[0].reject(Object.assign(new Error('private model detail'), { code: 'no_reply' }));
+  await nextTurn();
+  const { command } = await f.service.request('primary', body());
+  assert.equal(command.state, 'completed');
+  assert.equal(command.error, '');
+  assert.deepEqual(command.result, { suggested: false, reason: 'No reply suggested. The conversation does not call for a response.' });
+  assert.equal(command.result.text, undefined);
+  assert.equal(command.result.targetAuthor, undefined);
+  assert.equal(f.calls.length, 1);
+});
+
 test('retry is idempotent during generation and after completion, while a new request waits', async t => {
   const f = fixture(t);
   const [a, b] = await Promise.all([f.service.request('primary', body()), f.service.request('primary', body())]);

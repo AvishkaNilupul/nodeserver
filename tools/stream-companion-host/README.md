@@ -30,7 +30,7 @@ Pages show independent chat, video, browser check-in and permission status; curr
 
 The extension stays installed as the browser/watch engine and checks in without keeping a dashboard tab open. The regular alarm provides a fallback for worker termination, following [Chrome's service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle/). The Mac, Chrome profiles and actual Twitch players still need to be awake and available. No recurring window-focus job is added.
 
-On an Apple Intelligence Mac with the Foundation Models SDK, run `npm run build:operator-draft` in the host directory. The **Draft reply** button uses the on-device model and recent chat for that account. The account page names the viewer and channel above the editable reply. Missing context or an unavailable model is reported there. Only **Send reviewed message** submits the edited text. The saved automatic reply source is a separate setting.
+On an Apple Intelligence Mac with the Foundation Models SDK, run `npm run build:operator-draft` in the host directory. **Draft reply** looks for a recent viewer question or an ongoing conversation with the account and asks the on-device model for a reply. The page names the viewer and channel above the editable text. If a room has only passing remarks, the page explains why it has no suggestion. **Send reviewed message** submits the text after review. The saved automatic reply source is a separate setting.
 
 For a native subscription, gift or Bits event, the director holds an already submitted stock reaction for the rest of that broadcast across all profiles. A held reaction stays silent.
 

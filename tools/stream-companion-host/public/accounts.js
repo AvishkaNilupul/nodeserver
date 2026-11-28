@@ -105,6 +105,10 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
       if (operation.action === 'draft' && operation.command.state === 'completed' && !operation.draftApplied) {
         operation.draftApplied = true;
         const result = operation.command.result;
+        if (result?.suggested === false) {
+          form.draftResult = { title: 'No reply suggested', text: result.reason };
+          continue;
+        }
         const draft = result?.text ?? result?.summary;
         if (typeof draft === 'string') {
           const summary = operation.params?.mode === 'summary';
@@ -242,6 +246,14 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
     }
     let exactParams = commandParams(action, params);
     if (!exactParams) { state.error = action === 'send' ? 'Use 1–300 characters on one line, without links or chat commands. Remove spaces at the start and end.' : 'Check the channel and selected settings.'; emit(); return false; }
+    if (action === 'draft' && exactParams.mode === 'reply') {
+      const form = formFor(id);
+      if (form.draftRoom) {
+        if (form.text === form.draftRoom.original) { form.text = ''; form.textRevision++; delete form.draftRoom; }
+        else form.draftRoom.expired = true;
+      }
+      delete form.draftResult;
+    }
     if (action === 'start') {
       const version = ++startVersions[id];
       if (!prepared && (!bridgeFresh(instanceFor(state, id), now()) || instanceFor(state, id).browser?.canOpen === true)) {
@@ -275,6 +287,11 @@ export function createAccountsController({ fetchImpl = globalThis.fetch, now = D
         const detail = await response.json();
         if (state.operations[id] === operation) {
           const message = typeof detail.message === 'string' ? detail.message : typeof detail.error === 'string' ? detail.error : 'Refresh the current chat before requesting a draft.';
+          if (response.status === 409 && detail.code === 'no_conversation') {
+            operation.command = { ...operation.command, state: 'completed', result: { suggested: false, reason: message.slice(0, 300) } };
+            reconcile();
+            return true;
+          }
           operation.command = { ...operation.command, state: 'failed', error: message.slice(0, 300) };
         }
         return false;

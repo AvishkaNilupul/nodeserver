@@ -50,6 +50,31 @@ test('summarizing chat cannot keep a cancelled viewer draft sendable', async () 
   assert.equal(c.canCommand('primary', 'send'), false);
 });
 
+test('requesting a new suggestion clears a previous untouched draft even when chat goes quiet', async () => {
+  const data = snapshot(), row = data.instances[0];
+  let requests = 0;
+  const c = controller(async (_, options) => {
+    if (options.method === 'GET') return reply(data);
+    if (++requests === 2) return { status: 409, ...reply({ error: 'No current viewer question.' }, false) };
+    const completed = command(JSON.parse(options.body), { state: 'completed',
+      result: { text: 'Blue leads.', targetAuthor: 'viewer', account: row.account, channel: row.channel } });
+    row.controls.recent = [completed]; return reply({ ok: true, command: completed });
+  });
+  await c.refresh(); await c.command('primary', 'draft', { mode: 'reply' });
+  assert.equal(c.form('primary').text, 'Blue leads.');
+  await c.command('primary', 'draft', { mode: 'reply' });
+  assert.equal(c.form('primary').text, ''); assert.equal(c.form('primary').draftResult, undefined);
+});
+
+test('a passing remark leaves the composer empty and explains the quiet outcome', async () => {
+  const reason = 'There is no current conversation that calls for a reply.';
+  const c = controller(async (_, options) => options.method === 'GET' ? reply(snapshot())
+    : { status: 409, ...reply({ code: 'no_conversation', error: reason }, false) });
+  await c.refresh(); await c.command('primary', 'draft', { mode: 'reply' });
+  assert.deepEqual(c.form('primary').draftResult, { title: 'No reply suggested', text: reason });
+  assert.equal(c.form('primary').text, ''); assert.equal(c.canCommand('primary', 'draft'), true);
+});
+
 test('reviewed drafts identify the viewer and cannot follow an account to another room', async () => {
   for (const editDraft of [false, true]) {
     const data = snapshot(), requests = [], row = data.instances[0];

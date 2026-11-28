@@ -36,11 +36,42 @@ function streamId(instance) {
 
 const mentions = m => [...m.text.matchAll(/(?:^|[^a-z0-9_])@([a-z0-9_]{3,25})(?![a-z0-9_])/gi)].map(match => match[1].toLowerCase());
 
+// A room-wide remark needs an actual opening for a reply. Direct mentions and
+// verified native replies have their own evidence of conversational intent.
+const questionMark = /[?¿؟՞፧⁇⁈⁉﹖？]/u;
+const requestForms = [
+  /^(?:any(?:one|body)\s+(?:know|remember|have|up for)|any\s+(?:tips|ideas|advice|recommendations))\b/iu,
+  /^(?:(?:please\s+)?(?:tell|show|teach|remind|help)\s+(?:me|us)|(?:please|pls)\s+(?:explain|help|show|share)|walk (?:me|us) through|recommend (?:a|an|some))\b/iu,
+  /^(?:can|could|would|should|will|did|do|does|is|are|was|were|has|have)\s+(?:you|we|i|anyone|someone|this|that|there|the)\b/iu,
+  /^(?:let['’]?s\s+(?:vote|pick|choose)|who['’]?s\s+up for|who wants to|join (?:me|us) (?:for|in))\b/iu,
+  /^(?:(?:what|where|who|how|when)['’]s|(?:what|which|where|who|why|how|when)\s+(?:is|are|was|were|did|does|do|can|could|should|would|has|happened|happens|many|much|far|long|about|time|lap|map|game|mode|gear|route))\b/iu,
+  /^(?:(?:alguien|algui[eé]m)\s+(?:sabe|puede|pode)|(?:quelqu['’]un|qualcuno)\s+(?:sait|peut|sa|può)|est-ce que|kann (?:mir |uns )?jemand|кто знает|подскажите|объясните)(?:\s|$)/iu,
+  /(?:どうやって|教えて(?:ください)?[。！]?$|ですか[。！]?$|[吗嗎][。！]?$|怎么|怎麼|어떻게|나요[.!]?$)/u
+];
+const correction = /^(?:(?:actually[, ]+)?i (?:meant|mean|was asking|was talking about)|(?:no|sorry|actually)[, ]+(?:the |that |i meant|i mean)|(?:the|that) other\b|me refer[ií]a|quer[ií]a decir|je voulais dire|ich meinte|я (?:имел|имела) в виду|違う|不是)/iu;
+const acknowledgement = /^(?:no[, ]|yes\b|yeah\b|yep\b|nope\b|sorry[, ]|my bad\b|that(?:'s|’s| is) (?:it|right|what i meant)|thanks\b|thank you\b|そう(?:です|そう)|对的|네[ ,.!]|아니)/iu;
+function invitesReply(text) {
+  const line = text.trim().replace(/^(?:hey\s+)?(?:chat|everyone|folks|guys)[,:]?\s+/iu, '');
+  if (!/\p{L}/u.test(line) || /^(?:lol+|lmao+|kekw|gg|wow|bruh)[\s!?！？]+$/iu.test(line)) return false;
+  return questionMark.test(line) || requestForms.some(form => form.test(line));
+}
+function continuesTurn(text, direct) {
+  return correction.test(text) || direct && acknowledgement.test(text);
+}
+function personalInsult(text) {
+  // A viewer can quote abuse or ask for help with moderation without endorsing it.
+  if (/\b(?:called|calls|call|calling)\s+(?:me|us)\b/iu.test(text)
+    || /\b(?:how (?:do|can|could|should) (?:i|we|you)|how to|can (?:i|we)|help (?:me|us))\b[^.!?]{0,50}\b(?:mute|block|report|ignore|filter|deal with)\b/iu.test(text)) return false;
+  return /\b(?:idiots?|morons?|dumbasses?|assholes?|douchebags?|scumbags?)\b/i.test(text)
+    || /\b(?:guys?|people|players?|streamers?|dudes?|they|you|he|she|who|what|such|those|these)\b[^.!?]{0,42}\b(?:jerks?|losers?|stupid|pathetic|worthless)\b/i.test(text)
+    || /\b(?:why|how)\s+(?:are|is)\b[^.!?]{0,32}\b(?:jerks?|losers?)\b/i.test(text);
+}
+
 function selectConversation(instance, companions, time) {
   const { account, channel } = instance;
   const incoming = instance.chat.messages.filter(m => m.channel === channel && messageId(m.id) && login(m.author)
     && !companions.has(m.author) && !bots.has(m.author) && !m.author.endsWith('bot') && !m.isBot && !m.bot
-    && m.at >= time - historyAge && m.at <= time && safeText(m.text)).sort((a, b) => a.at - b.at);
+    && m.at >= time - historyAge && m.at <= time && safeText(m.text) && !personalInsult(m.text)).sort((a, b) => a.at - b.at);
   const confirmed = instance.sent.filter(m => m.account === account && m.channel === channel && m.delivery === 'confirmed'
     && Number.isFinite(m.at) && m.at <= time && safeText(m.text)).map(m => ({ id: m.messageId, author: account, text: m.text, at: m.at, replyTo: m.replyTo }));
   const own = new Map(confirmed.filter(m => messageId(m.id)).map(m => [m.id, m]));
@@ -63,27 +94,33 @@ function selectConversation(instance, companions, time) {
     return path;
   }
 
-  const lastDirect = new Map();
+  const lastOpening = new Map(), answered = new Set();
   let selected;
   for (const m of incoming) {
     const addressees = mentions(m), path = ancestry(m);
     if (!path || addressees.some(name => name !== account)) continue;
     const direct = addressees.includes(account) || path.some(parent => parent.author === account || mentions(parent).includes(account));
-    const previous = lastDirect.get(m.author);
-    const followUp = previous && m.at - previous.m.at <= 60_000;
-    if (direct) lastDirect.set(m.author, { m, path });
-    if (m.at < time - targetAge) continue;
+    const ask = invitesReply(m.text);
+    const previous = lastOpening.get(m.author);
+    const recent = previous && m.at - previous.m.at <= 60_000 ? previous : null;
     const ownReply = !m.replyParentId && recentOwnReply(m);
-    const priority = direct || followUp || ownReply ? 1 : 0;
+    // The first answer to a confirmed question addressed to this viewer may be
+    // a name, description, or number in any language.
+    const answersOwnQuestion = ownReply && !answered.has(ownReply) && invitesReply(ownReply.text);
+    if (answersOwnQuestion) answered.add(ownReply);
+    const follows = continuesTurn(m.text, ownReply || recent?.direct) || ask;
+    const refersBack = answersOwnQuestion || follows && (ownReply || recent || path.some(parent => invitesReply(parent.text)));
+    if (!direct && !ask && !refersBack) continue;
+    const priority = direct || refersBack && (ownReply || recent?.direct) ? 1 : 0;
+    if (direct || ask) lastOpening.set(m.author, { m, path, direct: priority === 1 });
+    if (m.at < time - targetAge) continue;
     if (!selected || priority >= selected.priority) {
-      // A clarifying unthreaded line can follow the viewer's earlier native reply.
-      // Keep that verified branch, including the actual parent the viewer answered.
-      const branch = !path.length && !direct && followUp && previous.path.length
-        ? [...previous.path, previous.m] : path;
+      // Keep the verified parent when a later unthreaded line clarifies the viewer's question.
+      const branch = !path.length && !direct && refersBack && recent?.path.length ? [...recent.path, recent.m] : path;
       selected = { m, path: branch, priority, ownReply };
     }
   }
-  if (!selected) throw failure('There is no recent viewer message to reply to in this channel.');
+  if (!selected) throw Object.assign(failure('There is no recent viewer question, request, or direct conversation to reply to in this channel.'), { code: 'no_conversation' });
   const { m: target, path, ownReply } = selected;
   const earlier = incoming.slice(0, incoming.indexOf(target)).filter(m => m.at >= target.at - targetAge
     && m.author === target.author && !m.replyParentId && mentions(m).every(name => name === account)).slice(-4);
@@ -92,7 +129,7 @@ function selectConversation(instance, companions, time) {
   const messages = [...new Set(contextRows)].sort((a, b) => a.at - b.at).map(m => ({ author: m.author, text: m.text }));
   const stream = instance.streamContext;
   const thread = new Set([target.id, target.replyParentId, ...path.map(m => m.id)].filter(messageId));
-  return { target, thread, context: { account, channel, target: { author: target.author, text: target.text }, messages,
+  return { target, thread, directed: selected.priority === 1, context: { account, channel, target: { author: target.author, text: target.text }, messages,
     stream: stream?.isLive && stream.channel === channel && fresh(stream.checkedAt, time, 120_000)
       ? { title: safeText(stream.title) ? stream.title : '', category: safeText(stream.gameName) ? stream.gameName : '' } : null } };
 }
@@ -103,11 +140,14 @@ function hasNewerFollowUp(job, instance, time) {
   return messages.some((m, index) => {
     if (m.author !== job.targetAuthor || m.channel !== job.channel || m.id === job.targetId || !messageId(m.id)
       || m.at < job.targetAt || m.at === job.targetAt && index <= originalIndex || m.at > time
-      || m.isBot || m.bot || !safeText(m.text)) return false;
+      || m.isBot || m.bot || !safeText(m.text) || personalInsult(m.text)) return false;
     const addressees = mentions(m);
     if (addressees.some(name => name !== job.account)) return false;
-    if (!m.replyParentId) return addressees.includes(job.account) || m.at - job.targetAt <= 60_000;
-    return job.thread.has(m.replyParentId);
+    const follows = invitesReply(m.text) || continuesTurn(m.text, job.directed);
+    if (m.replyParentId) return job.thread.has(m.replyParentId) && (job.directed || follows);
+    if (addressees.includes(job.account) || m.at - job.targetAt <= 60_000 && follows) return true;
+    return instance.sent.some(s => s.delivery === 'confirmed' && s.account === job.account && s.channel === job.channel
+      && s.replyTo === job.targetAuthor && s.at > job.targetAt && s.at <= m.at && m.at - s.at <= 90_000 && safeText(s.text) && invitesReply(s.text));
   });
 }
 
@@ -136,7 +176,7 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
   }
 
   function reconcile(job, instance, companions) {
-    if (!['running', 'completed'].includes(job.command.state)) return;
+    if (!['running', 'completed'].includes(job.command.state) || job.command.result?.suggested === false) return;
     if (job.command.state === 'running' && now() >= job.command.expiresAt) {
       finish(job, 'expired', modelErrors.model_timeout);
       return;
@@ -159,7 +199,7 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
 
   async function generateDraft(job, context) {
     try {
-      const raw = await generate(context, { signal: job.controller.signal });
+      const raw = await generate(context, { signal: job.controller.signal, selectedConversation: true });
       if (job.command.state !== 'running') return;
       let text;
       try { text = validateReply(raw); } catch { /* Report validation failures without including model text. */ }
@@ -174,8 +214,13 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
       if (job.command.state !== 'running') return;
       finish(job, 'completed', '', { text, reason: 'Draft reply to @' + job.targetAuthor + '.', account: job.account, channel: job.channel, targetAuthor: job.targetAuthor, ...(job.streamId ? { streamId: job.streamId } : {}) });
     } catch (error) {
-      if (job.command.state === 'running') finish(job, 'failed', Object.hasOwn(modelErrors, error?.code)
-        ? modelErrors[error.code] : 'The draft could not be generated. Refresh the account and check the on-device model.');
+      if (job.command.state !== 'running') return;
+      if (error?.code === 'no_reply') {
+        finish(job, 'completed', '', { suggested: false, reason: 'No reply suggested. The conversation does not call for a response.' });
+      } else {
+        finish(job, 'failed', Object.hasOwn(modelErrors, error?.code)
+          ? modelErrors[error.code] : 'The draft could not be generated. Refresh the account and check the on-device model.');
+      }
     }
   }
 
@@ -207,9 +252,9 @@ export function createOperatorDrafts({ snapshot, generate, companionLogins = [],
     if (instance.controls?.recent?.some(c => c.requestId === body.requestId)) throw failure('That request ID was already used for an account operation.');
     if (entries.length >= 30) throw failure('Too many recent draft requests. Wait before requesting another draft.', 429);
     if (!companions) throw failure('Companion identities are unavailable. Refresh the account list before drafting.');
-    const { target, thread, context } = selectConversation(instance, companions, now());
+    const { target, thread, directed, context } = selectConversation(instance, companions, now());
     const createdAt = now(), command = { id: 'review:' + body.requestId, ...body, state: 'running', createdAt, expiresAt: createdAt + jobTimeout, error: '' };
-    const job = { id, command, thread, account: instance.account, channel: instance.channel, streamId: streamId(instance),
+    const job = { id, command, thread, directed, account: instance.account, channel: instance.channel, streamId: streamId(instance),
       targetId: target.id, targetAuthor: target.author, targetAt: target.at, targetText: target.text, parentId: target.replyParentId, controller: new AbortController() };
     job.timer = setTimeout(() => { if (job.command.state === 'running') finish(job, 'expired', modelErrors.model_timeout); }, jobTimeout);
     job.timer.unref();
